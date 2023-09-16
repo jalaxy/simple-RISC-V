@@ -3,10 +3,12 @@ module core(
     input clk,
     input rst
 );
-    wire clk_if, clk_wb, clk_ex;
-    assign clk_if = clk;
-    assign clk_wb = clk;
-    assign clk_ex = clk;
+    reg ena_if, ena_ex, ena_ma, ena_wb;
+    wire clk_if, clk_ex, clk_ma, clk_wb;
+    assign clk_if = clk & ena_if;
+    assign clk_ex = clk & ena_ex;
+    assign clk_ma = clk & ena_ma;
+    assign clk_wb = clk & ena_wb;
 
     // pipeline registers
     reg [31:0]  pc_if;      reg [31:0]  pc_ex;      reg [31:0]  pc_ma;    reg [31:0] pc_wb;
@@ -26,9 +28,8 @@ module core(
     wire [31:0] ir;
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr, rs2_addr;
-    icache icache_inst(.clk(clk_if), .addr(pc_wb), .valid(icache_valid), .data(ir_if));
-    always@(clk_if)
-        pc_if <= pc_wb;
+    icache icache_inst(.clk(clk_if), .addr(pc_wb), .valid(icache_valid), .data(ir));
+    always @(posedge clk_if) pc_if <= pc_wb;
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
     assign funct7    = ir[31:25];
@@ -75,21 +76,21 @@ module core(
                  .funct3(op | op_imm ? funct3_if : 3'b000),
                  .funct7(op | op_imm ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
     reg [31:0] r_reg;
-    always @(clk_ex)
-        r_reg <= r;
+    always @(posedge clk_ex) if (ena_ex) r_reg <= r;
     assign r_ex = r_reg;
     assign flags[2] = r[31];
     assign flags[0] = r == 32'd0;
     assign b_suc_ex = mux_ex[4] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
 
     // Memory access
+    wire [31:0] pc_adder;
+    assign pc_adder = pc_ex + (b_suc_ex ? imm_ex : 4);
     always @(posedge clk_ma) begin
-        pc_ma      <= pc_ex;
+        pc_ma      <= mux_ex[5] ? r_ex : pc_adder;
         mux_ma     <= mux_ex;
         imm_ma     <= imm_ex;
         rd_addr_ma <= rd_addr_ex;
         r_ma       <= r_ex;
-        b_suc_ma   <= b_suc_ex;
     end
     wire dcache_valid;
     wire [31:0] d_out;
@@ -98,17 +99,19 @@ module core(
                        .data_in(rs2_ex), .valid(dcache_valid), .data_out(d_out));
 
     // Write back
-    wire [31:0] pc_adder;
-    assign pc_adder = pc_ma + (b_suc_ma ? imm_ma : 4);
-    always @(posedge clk_wb)
-        pc_wb <= mux_ma[5] ? r_ma : pc_adder;
-    wire [31:0] rd_ma;
-    assign rd_ma = mux_ma[1] ? (mux_ma[0] ? d_out : pc_adder) : (mux_ma[0] ? imm_ma : r_ma);
+    always @(posedge clk_wb) pc_wb <= rst ? 32'd0 : pc_wb + 32'd4; // normal situation
+    wire [31:0] rd;
+    assign rd = mux_ma[1] ? (mux_ma[0] ? d_out : pc_adder) : (mux_ma[0] ? imm_ma : r_ma);
     gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr),
-                     .rd_addr(rd_addr_ma), .rd(rd_ma), .rs1(rs1), .rs2(rs2_if));
-    
-    always @(posedge rst)
-        pc_wb <= 32'd0;
+                     .rd_addr(rd_addr_ma), .rd(rd), .rs1(rs1), .rs2(rs2_if));
+
+    // Enable control
+    always @(posedge clk) begin
+        ena_if <= 1'b1;
+        ena_ex <= 1'b1;
+        ena_ma <= 1'b1;
+        ena_wb <= 1'b1;
+    end
 endmodule
 
 module gpreg(
@@ -151,10 +154,16 @@ module icache(
     input clk,
     input [31:0] addr,
     output valid,
-    output [31:0] data
+    output reg [31:0] data
 );
     assign valid = 1'b1;
-    assign data = 32'h00000000;
+    integer fd;
+    initial
+        fd <= $fopen("/home/ubuntu/Desktop/test.dump", "r");
+    always @(posedge clk) begin
+        $fseek(fd, (addr>>2)*9, 0);
+        $fscanf(fd, "%h", data);
+    end
 endmodule
 
 module dcache(

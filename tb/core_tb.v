@@ -1,3 +1,4 @@
+`timescale 1ns/1ns
 module core_tb();
     reg clk, rst;
     integer i;
@@ -6,6 +7,9 @@ module core_tb();
         rst = 0;
         #10;
         rst = 1;
+        clk = 0;
+        #10;
+        clk = 1;
         #10;
         rst = 0;
         for (i = 0; i < 100; i = i + 1) begin
@@ -15,6 +19,20 @@ module core_tb();
             #10;
         end
     end
+
     wire [31:0] pc;
-    assign pc = core.pc_wb;
+    assign pc = core_inst.pc_wb;
+    wire [31:0] ir;
+    assign ir = core_inst.ir;
+    reg [31:0] r[0:31];
+    integer i;
+    always @(*)
+        for (i = 0; i < 32; i = i + 1)
+            r[i] <= core_inst.gpreg_inst.r[i];
+    wire [5:0] mux_if, mux_ex, mux_ma;
+    assign mux_if = core_inst.mux_if;
+    assign mux_ex = core_inst.mux_ex;
+    assign mux_ma = core_inst.mux_ma;
+    wire [31:0] rd_ma;
+    assign rd = core_inst.rd;
 endmodule
