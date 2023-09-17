@@ -12,21 +12,32 @@ module core_tb();
         clk = 1;
         #10;
         rst = 0;
-        for (i = 0; i < 100; i = i + 1) begin
+        while (1) begin
             clk = 0;
             #10;
             clk = 1;
             #10;
         end
     end
-
+`define N 3
     wire [31:0] pc;
-    assign pc = core_inst.pc_wb;
+    assign pc = core_inst.pc;
     wire [31:0] ir;
     assign ir = core_inst.ir;
-    reg [31:0] r[0:31];
+    reg [31:0] r[1:`N];
     integer i;
     always @(*)
-        for (i = 0; i < 32; i = i + 1)
+        for (i = 1; i <= `N; i = i + 1)
             r[i] <= core_inst.gpreg_inst.r[i];
+    wire ena[3:0], jump, b_suc;
+    assign ena[3]= core_inst.ena_if;
+    assign ena[2] = core_inst.ena_ex;
+    assign ena[1] = core_inst.ena_ma;
+    assign ena[0] = core_inst.ena_wb;
+    assign jump = core_inst.jump;
+    assign b_suc = core_inst.b_suc;
+    wire [3:0] flags;
+    assign flags = core_inst.flags;
+    wire [2:0] funct3_ex;
+    assign funct3_ex = core_inst.funct3_ex;
 endmodule

@@ -11,7 +11,8 @@ module core(
     assign clk_wb = clk & ena_wb;
 
     // pipeline registers
-    reg [31:0]  pc_if;      reg [31:0]  pc_ex;      reg [31:0]  pc_ma;    reg [31:0] pc_wb;
+    reg [31:0]  pc;
+    reg [31:0]  pc_if;      reg [31:0]  pc_ex;      reg [31:0]  pc_ma;
     wire [5:0]  mux_if;     reg [5:0]   mux_ex;     reg [5:0]   mux_ma;
     wire [2:0]  funct3_if;  reg [2:0]   funct3_ex;
     wire        mem_w_if;   reg         mem_w_ex;
@@ -19,7 +20,6 @@ module core(
     wire [31:0] rs2_if;     reg [31:0]  rs2_ex;
     wire [4:0]  rd_addr_if; reg [4:0]   rd_addr_ex; reg [4:0]   rd_addr_ma;
                             wire [31:0] r_ex;       reg [31:0]  r_ma;
-                            wire        b_suc_ex;   reg         b_suc_ma;
 
     // Instruction fetch & decode
     wire icache_valid;
@@ -29,8 +29,8 @@ module core(
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr, rs2_addr;
     wire [6:0] funct7;
-    icache icache_inst(.clk(clk_if), .addr(pc_wb), .valid(icache_valid), .data(ir));
-    always @(posedge clk_if) pc_if <= pc_wb;
+    icache icache_inst(.clk(clk_if), .addr(pc), .valid(icache_valid), .data(ir));
+    always @(posedge clk_if) pc_if <= pc;
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
     assign funct7    = ir[31:25];
@@ -55,7 +55,7 @@ module core(
                     enc[0] ? {{12{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} : // J type
                              32'd0))));                                           // R type
     // MUX selection signal: H -> L
-    // PC input (1), PC adder (1), ALU a (1), ALU b (1), rd input (2)
+    // PC input (5), PC adder (4), ALU a (3), ALU b (2), rd input (1:0)
     assign mux_if = {jal | jalr, branch, auipc | jal, branch | op,
                      load | jal | jalr, load | lui};
 
@@ -69,31 +69,29 @@ module core(
         rs2_ex     <= rs2_ex;
         rd_addr_ex <= rd_addr_if;
     end
-    wire [31:0] a, b, r, rs1;
+    wire [31:0] a, b, rs1;
     wire [3:0] flags; // carry, negative, (placeholder), zero
     assign a = mux_if[3] ? pc_if : rs1;
     assign b = mux_if[2] ? rs2_if : imm_if;
-    alu alu_inst(.a(a), .b(b), .r(r), .c(flags[3]), 
+    alu alu_inst(.clk(clk_ex), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
                  .funct3(op | op_imm ? funct3_if : 3'b000),
                  .funct7(op | op_imm & funct3_if == 3'b101 // SRL/SRA (special I-type)
                          ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
-    reg [31:0] r_reg;
-    always @(posedge clk_ex) if (ena_ex) r_reg <= r;
-    assign r_ex = r_reg;
-    assign flags[2] = r[31];
-    assign flags[0] = r == 32'd0;
-    assign b_suc_ex = mux_ex[4] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
+    assign flags[2] = r_ex[31];
+    assign flags[0] = r_ex == 32'd0;
+    assign b_suc = mux_ex[4] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
 
     // Memory access
-    wire [31:0] pc_adder;
-    assign pc_adder = pc_ex + (b_suc_ex ? imm_ex : 4);
     always @(posedge clk_ma) begin
-        pc_ma      <= mux_ex[5] ? r_ex : pc_adder;
+        pc_ma      <= pc_ex;
         mux_ma     <= mux_ex;
         imm_ma     <= imm_ex;
         rd_addr_ma <= rd_addr_ex;
         r_ma       <= r_ex;
     end
+    always @(posedge clk)
+        pc <= rst ? 32'h00400000
+            : (mux_ex[5] & ena_ma ? r_ex : (b_suc & ena_ma ? pc_ex + imm_ex : pc + 4));
     wire dcache_valid;
     wire [31:0] d_out;
     dcache dcache_inst(.clk(clk_ma), .w_ena(mem_w_ex), .addr(r_ex),
@@ -101,18 +99,19 @@ module core(
                        .data_in(rs2_ex), .valid(dcache_valid), .data_out(d_out));
 
     // Write back
-    always @(posedge clk_wb) pc_wb <= rst ? 32'h00400000 : pc_wb + 32'd4; // normal situation
     wire [31:0] rd;
-    assign rd = mux_ma[1] ? (mux_ma[0] ? d_out : pc_adder) : (mux_ma[0] ? imm_ma : r_ma);
+    assign rd = mux_ma[1] ? (mux_ma[0] ? d_out : pc_ma + 32'd4) : (mux_ma[0] ? imm_ma : r_ma);
     gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr),
                      .rd_addr(rd_addr_ma), .rd(rd), .rs1(rs1), .rs2(rs2_if));
 
     // Enable control
+    wire jump;
+    assign jump = mux_ex[5] | b_suc;
     always @(posedge clk) begin
         ena_if <= 1'b1;
-        ena_ex <= 1'b1;
-        ena_ma <= 1'b1;
-        ena_wb <= 1'b1;
+        ena_ex <= rst | ena_ex & jump ? 1'b0 : ena_if;
+        ena_ma <= rst | ena_ma & jump ? 1'b0 : ena_ex;
+        ena_wb <= rst ? 1'b0 : ena_ma;
     end
 endmodule
 
@@ -133,15 +132,17 @@ module gpreg(
 endmodule
 
 module alu(
+    input clk,
     input [31:0] a,
     input [31:0] b,
     input [2:0] funct3,
     input [6:0] funct7,
-    output [31:0] r,
-    output c // only for SUB
+    output reg [31:0] r,
+    output reg c // only for SUB
 );
     wire [31:0] r_arr[7:0];
-    assign {c, r_arr[3'd0]} = funct7[5] ? {1'b0, a} - {1'b0, b} : a + b; // ADD/SUB
+    wire c_wire;
+    assign {c_wire, r_arr[3'd0]} = funct7[5] ? {1'b0, a} - {1'b0, b} : a + b; // ADD/SUB
     assign r_arr[3'd1] = a << b[4:0]; // SLL
     assign r_arr[3'd2] = $signed(a) < $signed(b); // SLT
     assign r_arr[3'd3] = a < b; // SLTU
@@ -149,7 +150,8 @@ module alu(
     assign r_arr[3'd5] = funct7[5] ? $signed($signed(a) >>> b[4:0]) : a >> b[4:0]; // SRA/SRL
     assign r_arr[3'd6] = a | b; // OR
     assign r_arr[3'd7] = a & b; // AND
-    assign r = r_arr[funct3];
+    always @(posedge clk) r <= r_arr[funct3];
+    always @(posedge clk) c <= c_wire;
 endmodule
 
 module icache(
