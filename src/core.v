@@ -28,6 +28,7 @@ module core(
     wire [31:0] ir;
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr, rs2_addr;
+    wire [6:0] funct7;
     icache icache_inst(.clk(clk_if), .addr(pc_wb), .valid(icache_valid), .data(ir));
     always @(posedge clk_if) pc_if <= pc_wb;
     assign opcode    = ir[6:0];
@@ -74,7 +75,8 @@ module core(
     assign b = mux_if[2] ? rs2_if : imm_if;
     alu alu_inst(.a(a), .b(b), .r(r), .c(flags[3]), 
                  .funct3(op | op_imm ? funct3_if : 3'b000),
-                 .funct7(op | op_imm ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
+                 .funct7(op | op_imm & funct3_if == 3'b101 // SRL/SRA (special I-type)
+                         ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
     reg [31:0] r_reg;
     always @(posedge clk_ex) if (ena_ex) r_reg <= r;
     assign r_ex = r_reg;
@@ -99,7 +101,7 @@ module core(
                        .data_in(rs2_ex), .valid(dcache_valid), .data_out(d_out));
 
     // Write back
-    always @(posedge clk_wb) pc_wb <= rst ? 32'd0 : pc_wb + 32'd4; // normal situation
+    always @(posedge clk_wb) pc_wb <= rst ? 32'h00400000 : pc_wb + 32'd4; // normal situation
     wire [31:0] rd;
     assign rd = mux_ma[1] ? (mux_ma[0] ? d_out : pc_adder) : (mux_ma[0] ? imm_ma : r_ma);
     gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr),
@@ -161,7 +163,7 @@ module icache(
     initial
         fd <= $fopen("/home/ubuntu/Desktop/test.dump", "r");
     always @(posedge clk) begin
-        $fseek(fd, (addr>>2)*9, 0);
+        $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
         $fscanf(fd, "%h", data);
     end
 endmodule

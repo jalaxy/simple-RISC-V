@@ -29,10 +29,4 @@ module core_tb();
     always @(*)
         for (i = 0; i < 32; i = i + 1)
             r[i] <= core_inst.gpreg_inst.r[i];
-    wire [5:0] mux_if, mux_ex, mux_ma;
-    assign mux_if = core_inst.mux_if;
-    assign mux_ex = core_inst.mux_ex;
-    assign mux_ma = core_inst.mux_ma;
-    wire [31:0] rd_ma;
-    assign rd = core_inst.rd;
 endmodule
