@@ -45,9 +45,9 @@ module core(
     assign store     = opcode == 7'b0100011;
     assign mem_w_if  = store;
     assign enc = {op, op_imm | jalr | load, store, branch, lui | auipc, jal}; // R I S B U J
-    assign rs1_addr = enc & 6'b111100 == 6'd0 ? 5'd0 : ir[19:15];
-    assign rs2_addr = enc & 6'b101100 == 6'd0 ? 5'd0 : ir[24:20];
-    assign rd_addr_if = enc & 6'b110011 == 6'd0 ? 5'd0 : ir[11:7];
+    assign rs1_addr = (enc & 6'b111100) == 6'd0 ? 5'd0 : ir[19:15];
+    assign rs2_addr = (enc & 6'b101100) == 6'd0 ? 5'd0 : ir[24:20];
+    assign rd_addr_if = (enc & 6'b110011) == 6'd0 ? 5'd0 : ir[11:7];
     assign imm_if = enc[4] ? {{21{ir[31]}}, ir[30:20]} : (                        // I type
                     enc[3] ? {{21{ir[31]}}, ir[30:25], ir[11:7]} : (              // S type
                     enc[2] ? {{20{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} : ( // B type
@@ -66,7 +66,7 @@ module core(
         funct3_ex  <= funct3_if;
         mem_w_ex   <= mem_w_if;
         imm_ex     <= imm_if;
-        rs2_ex     <= rs2_ex;
+        rs2_ex     <= rs2_if;
         rd_addr_ex <= rd_addr_if;
     end
     wire [31:0] a, b, rs1;
@@ -178,8 +178,18 @@ module dcache(
     input ext, // if extend with sign
     input [31:0] data_in,
     output valid,
-    output [31:0] data_out
+    output reg [31:0] data_out
 );
     assign valid = 1'b1;
-    assign data_out = 32'd0;
+    reg [32:0] mem[0:1024];
+    integer i;
+    initial begin
+        for (i = 0; i < 1024; i = i + 1)
+            mem[i] = 1;
+    end
+    always @(posedge clk) begin
+        data_out <= mem[addr - 32'h10010000];
+        if (w_ena)
+            mem[addr - 32'h10010000] <= data_in;
+    end
 endmodule
