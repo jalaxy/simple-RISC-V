@@ -66,10 +66,6 @@ module core(
     assign rd_byp_ma = mux_ma[1] ? (mux_ma[0] ? d_out_ma : pc_ma + 32'd4) : (mux_ma[0] ? imm_ma : r_ma);
     assign dout_ex = 32'd0; // unable to fetch previous d_out before current EX stage
     assign rs1_byp    = ena_ma & rd_addr_ex == rs1_addr ? rd_byp_ex :
-
-    // WHY IS ENA_MA INSTEAD OF ENA_EX 
-    // ??????????????????????????????????????????
-
                        (ena_wb & rd_addr_ma == rs1_addr ? rd_byp_ma : rs1);
     assign rs2_if_byp = ena_ma & rd_addr_ex == rs2_addr ? rd_byp_ex :
                        (ena_wb & rd_addr_ma == rs2_addr ? rd_byp_ma : rs2_if);
