@@ -3,12 +3,7 @@ module core(
     input clk,
     input rst
 );
-    wire ena_if, ena_ex, ena_ma, ena_wb;
-    wire clk_if, clk_ex, clk_ma, clk_wb;
-    assign clk_if = clk & ena_if;
-    assign clk_ex = clk & ena_ex;
-    assign clk_ma = clk & ena_ma;
-    assign clk_wb = clk & ena_wb;
+    wire ena_pc, ena_if, ena_ex, ena_ma, ena_wb;
 
     // Pipeline start control
     reg start_if, start_ex, start_ma; // each stage has been started
@@ -40,8 +35,8 @@ module core(
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr;
     wire [6:0] funct7;
-    icache icache_inst(.clk(clk_if), .addr(pc), .valid(icache_valid), .data(ir));
-    always @(posedge clk_if) pc_if <= pc;
+    icache icache_inst(.clk(clk), .addr(pc), .valid(icache_valid), .data(ir));
+    always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
     assign funct7    = ir[31:25];
@@ -84,20 +79,20 @@ module core(
                         (start_ma & rd_addr_ma == rs2_addr_if ? rd_byp_ma : rs2_if));
 
     // Execution
-    always @(posedge clk_ex) begin
-        pc_ex       <= pc_if;
-        mux_ex      <= mux_if;
-        funct3_ex   <= funct3_if;
-        mem_w_ex    <= mem_w_if;
-        imm_ex      <= imm_if;
-        rs2_ex      <= rs2_if;
-        rs2_addr_ex <= rs2_addr_if;
-        rd_addr_ex  <= rd_addr_if;
+    always @(posedge clk) begin
+        pc_ex       <= ena_ex ? pc_if : pc_ex;
+        mux_ex      <= ena_ex ? mux_if : mux_ex;
+        funct3_ex   <= ena_ex ? funct3_if : funct3_ex;
+        mem_w_ex    <= ena_ex ? mem_w_if : mem_w_ex;
+        imm_ex      <= ena_ex ? imm_if : imm_ex;
+        rs2_ex      <= ena_ex ? rs2_if : rs2_ex;
+        rs2_addr_ex <= ena_ex ? rs2_addr_if : rs2_addr_ex;
+        rd_addr_ex  <= ena_ex ? rd_addr_if : rd_addr_ex;
     end
     wire [3:0] flags; // carry, negative, (placeholder), zero
     assign a = mux_if[3] ? pc_if : rs1_byp;
     assign b = mux_if[2] ? rs2_if_byp : imm_if;
-    alu alu_inst(.clk(clk_ex), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
+    alu alu_inst(.clk(clk), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
                  .funct3(op | op_imm ? funct3_if : 3'b000),
                  .funct7(op | op_imm & funct3_if == 3'b101 // SRL/SRA (special I-type)
                          ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
@@ -111,29 +106,36 @@ module core(
     assign jump = mux_ex[5] | b_suc;
 
     // Memory access
-    always @(posedge clk_ma) begin
-        pc_ma      <= pc_ex;
-        mux_ma     <= mux_ex;
-        imm_ma     <= imm_ex;
-        rd_addr_ma <= rd_addr_ex;
-        r_ma       <= r_ex;
+    always @(posedge clk) begin
+        pc_ma      <= ena_ma ? pc_ex : pc_ma;
+        mux_ma     <= ena_ma ? mux_ex : mux_ma;
+        imm_ma     <= ena_ma ? imm_ex : imm_ma;
+        rd_addr_ma <= ena_ma ? rd_addr_ex : rd_addr_ma;
+        r_ma       <= ena_ma ? r_ex : r_ma;
     end
-    always @(posedge clk)
-        pc <= rst ? 32'h00400000
-            : (mux_ex[5] & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4));
     wire dcache_valid;
-    dcache dcache_inst(.clk(clk_ma), .w_ena(mem_w_ex), .addr(r_ex),
+    dcache dcache_inst(.clk(clk), .w_ena(mem_w_ex), .addr(r_ex),
                        .width(funct3_ex[1:0]), .ext(funct3_ex[2]),
                        .data_in(rs2_ex_byp), .valid(dcache_valid), .data_out(d_out_ma));
 
     // Write back
-    gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr_if),
+    gpreg gpreg_inst(.clk(clk), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr_if),
                      .rd_addr(rd_addr_ma), .rd(rd_byp_ma), .rs1(rs1), .rs2(rs2_if));
 
+    // PC control
+    always @(posedge clk)
+        pc <= ena_pc ? (rst ? 32'h00400000
+            : (mux_ex[5] & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4))) : pc;
+
     // Enable control
-    //     eg. EX is enabled only when IF been started (IF registers are ready)
-    assign ena_if = 1'b1;
-    assign ena_ex = start_if;
+    wire ma_ex_stall;
+    assign ma_ex_stall = ((~mux_if[3] & rs1_addr    != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
+                          ( mux_if[2] & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) & // LUI???
+                            mux_ex[1:0] == 2'b11; // some wires in this expression are existed
+    // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
+    assign ena_pc = ~ma_ex_stall;
+    assign ena_if = ~ma_ex_stall;
+    assign ena_ex = ~ma_ex_stall & start_if;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
 endmodule
