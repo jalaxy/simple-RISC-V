@@ -9,7 +9,8 @@ addi x2, x2, 2
 blt x1, x3, l1
 j l2
 l2: addi x1, x1, 4
-nop
+jal x4, l3
+l3: nop
 nop
 nop
 nop

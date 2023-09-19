@@ -3,24 +3,34 @@ module core(
     input clk,
     input rst
 );
-    reg ena_if, ena_ex, ena_ma, ena_wb;
+    wire ena_if, ena_ex, ena_ma, ena_wb;
     wire clk_if, clk_ex, clk_ma, clk_wb;
     assign clk_if = clk & ena_if;
     assign clk_ex = clk & ena_ex;
     assign clk_ma = clk & ena_ma;
     assign clk_wb = clk & ena_wb;
 
+    // Pipeline start control
+    reg start_if, start_ex, start_ma; // each stage has been started
+    wire jump; // Jump can be implemented by start control as program restart from new PC
+    always @(posedge clk) begin
+        start_if <= rst | start_ex & jump ? 1'b0 : 1'b1;
+        start_ex <= rst | start_ex & jump ? 1'b0 : start_if;
+        start_ma <= rst ? 1'b0 : start_ex;
+    end
+
     // pipeline registers
     reg [31:0]  pc;
-    reg [31:0]  pc_if;      reg [31:0]  pc_ex;      reg [31:0]  pc_ma;
-    wire [5:0]  mux_if;     reg [5:0]   mux_ex;     reg [5:0]   mux_ma;
-    wire [2:0]  funct3_if;  reg [2:0]   funct3_ex;
-    wire        mem_w_if;   reg         mem_w_ex;
-    wire [31:0] imm_if;     reg [31:0]  imm_ex;     reg [31:0]  imm_ma;
-    wire [31:0] rs2_if;     reg [31:0]  rs2_ex;
-    wire [4:0]  rd_addr_if; reg [4:0]   rd_addr_ex; reg [4:0]   rd_addr_ma;
-                            wire [31:0] r_ex;       reg [31:0]  r_ma;
-                            wire [31:0] d_out_ex;   wire [31:0] d_out_ma;
+    reg [31:0]  pc_if;       reg [31:0]  pc_ex;      reg [31:0]  pc_ma;
+    wire [5:0]  mux_if;      reg [5:0]   mux_ex;     reg [5:0]   mux_ma;
+    wire [2:0]  funct3_if;   reg [2:0]   funct3_ex;
+    wire        mem_w_if;    reg         mem_w_ex;
+    wire [31:0] imm_if;      reg [31:0]  imm_ex;     reg [31:0]  imm_ma;
+    wire [31:0] rs2_if;      reg [31:0]  rs2_ex;
+    wire [4:0]  rs2_addr_if; reg [31:0]  rs2_addr_ex;
+    wire [4:0]  rd_addr_if;  reg [4:0]   rd_addr_ex; reg [4:0]   rd_addr_ma;
+                             wire [31:0] r_ex;       reg [31:0]  r_ma;
+                             wire [31:0] d_out_ex;   wire [31:0] d_out_ma;
 
     // Instruction fetch & decode
     wire icache_valid;
@@ -28,7 +38,7 @@ module core(
     wire [5:0] enc;
     wire [31:0] ir;
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
-    wire [4:0] rs1_addr, rs2_addr;
+    wire [4:0] rs1_addr;
     wire [6:0] funct7;
     icache icache_inst(.clk(clk_if), .addr(pc), .valid(icache_valid), .data(ir));
     always @(posedge clk_if) pc_if <= pc;
@@ -47,7 +57,7 @@ module core(
     assign mem_w_if  = store;
     assign enc = {op, op_imm | jalr | load, store, branch, lui | auipc, jal}; // R I S B U J
     assign rs1_addr = (enc & 6'b111100) == 6'd0 ? 5'd0 : ir[19:15];
-    assign rs2_addr = (enc & 6'b101100) == 6'd0 ? 5'd0 : ir[24:20];
+    assign rs2_addr_if = (enc & 6'b101100) == 6'd0 ? 5'd0 : ir[24:20];
     assign rd_addr_if = (enc & 6'b110011) == 6'd0 ? 5'd0 : ir[11:7];
     assign imm_if = enc[4] ? {{21{ir[31]}}, ir[30:20]} : (                        // I type
                     enc[3] ? {{21{ir[31]}}, ir[30:25], ir[11:7]} : (              // S type
@@ -62,23 +72,27 @@ module core(
     // Handle data bypass in IF -> EX
     wire [31:0] rd_byp_ex, rd_byp_ma;
     wire [31:0] a, b, rs1_byp, rs2_if_byp, rs1;
+    assign d_out_ex = 32'd0; // Unable to fetch d_out of last instruction which just done EX stage
     assign rd_byp_ex = mux_ex[1] ? (mux_ex[0] ? d_out_ex : pc_ex + 32'd4) : (mux_ex[0] ? imm_ex : r_ex);
     assign rd_byp_ma = mux_ma[1] ? (mux_ma[0] ? d_out_ma : pc_ma + 32'd4) : (mux_ma[0] ? imm_ma : r_ma);
     assign dout_ex = 32'd0; // unable to fetch previous d_out before current EX stage
-    assign rs1_byp    = ena_ma & rd_addr_ex == rs1_addr ? rd_byp_ex :
-                       (ena_wb & rd_addr_ma == rs1_addr ? rd_byp_ma : rs1);
-    assign rs2_if_byp = ena_ma & rd_addr_ex == rs2_addr ? rd_byp_ex :
-                       (ena_wb & rd_addr_ma == rs2_addr ? rd_byp_ma : rs2_if);
+    assign rs1_byp    = rs1_addr == 5'd0 ? 32'd0 :
+                        (start_ex & rd_addr_ex == rs1_addr ? rd_byp_ex :
+                        (start_ma & rd_addr_ma == rs1_addr ? rd_byp_ma : rs1));
+    assign rs2_if_byp = rs2_addr_if == 5'd0 ? 32'd0 :
+                        (start_ex & rd_addr_ex == rs2_addr_if ? rd_byp_ex :
+                        (start_ma & rd_addr_ma == rs2_addr_if ? rd_byp_ma : rs2_if));
 
     // Execution
     always @(posedge clk_ex) begin
-        pc_ex      <= pc_if;
-        mux_ex     <= mux_if;
-        funct3_ex  <= funct3_if;
-        mem_w_ex   <= mem_w_if;
-        imm_ex     <= imm_if;
-        rs2_ex     <= rs2_if;
-        rd_addr_ex <= rd_addr_if;
+        pc_ex       <= pc_if;
+        mux_ex      <= mux_if;
+        funct3_ex   <= funct3_if;
+        mem_w_ex    <= mem_w_if;
+        imm_ex      <= imm_if;
+        rs2_ex      <= rs2_if;
+        rs2_addr_ex <= rs2_addr_if;
+        rd_addr_ex  <= rd_addr_if;
     end
     wire [3:0] flags; // carry, negative, (placeholder), zero
     assign a = mux_if[3] ? pc_if : rs1_byp;
@@ -92,7 +106,9 @@ module core(
     assign b_suc = mux_ex[4] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
     // Handle data bypass in EX -> MA
     wire [31:0] rs2_ex_byp;
-    assign rs2_ex_byp = ena_wb & rd_addr_ma == rs2_addr ? rd_byp_ma : rs2_ex;
+    assign rs2_ex_byp = rs2_addr_ex == 5'd0 ? 32'd0 :
+                        (start_ma & rd_addr_ma == rs2_addr_ex ? rd_byp_ma : rs2_ex);
+    assign jump = mux_ex[5] | b_suc;
 
     // Memory access
     always @(posedge clk_ma) begin
@@ -104,25 +120,22 @@ module core(
     end
     always @(posedge clk)
         pc <= rst ? 32'h00400000
-            : (mux_ex[5] & ena_ma ? r_ex : (b_suc & ena_ma ? pc_ex + imm_ex : pc + 4));
+            : (mux_ex[5] & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4));
     wire dcache_valid;
     dcache dcache_inst(.clk(clk_ma), .w_ena(mem_w_ex), .addr(r_ex),
                        .width(funct3_ex[1:0]), .ext(funct3_ex[2]),
                        .data_in(rs2_ex_byp), .valid(dcache_valid), .data_out(d_out_ma));
 
     // Write back
-    gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr),
+    gpreg gpreg_inst(.clk(clk_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr_if),
                      .rd_addr(rd_addr_ma), .rd(rd_byp_ma), .rs1(rs1), .rs2(rs2_if));
 
     // Enable control
-    wire jump;
-    assign jump = mux_ex[5] | b_suc;
-    always @(posedge clk) begin
-        ena_if <= 1'b1;
-        ena_ex <= rst | ena_ex & jump ? 1'b0 : ena_if;
-        ena_ma <= rst | ena_ma & jump ? 1'b0 : ena_ex;
-        ena_wb <= rst ? 1'b0 : ena_ma;
-    end
+    //     eg. EX is enabled only when IF been started (IF registers are ready)
+    assign ena_if = 1'b1;
+    assign ena_ex = start_if;
+    assign ena_ma = start_ex;
+    assign ena_wb = start_ma;
 endmodule
 
 module gpreg(
@@ -171,12 +184,12 @@ module icache(
     output reg [31:0] data
 );
     assign valid = 1'b1;
-    integer fd;
+    integer fd, res;
     initial
         fd <= $fopen("/home/ubuntu/Desktop/test.dump", "r");
     always @(posedge clk) begin
-        $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
-        $fscanf(fd, "%h", data);
+        res = $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
+        res = $fscanf(fd, "%h", data);
     end
 endmodule
 
@@ -198,8 +211,8 @@ module dcache(
             mem[i] = 1;
     end
     always @(posedge clk) begin
-        data_out <= mem[addr - 32'h10010000];
+        data_out <= mem[(addr-32'h10010000)>>2];
         if (w_ena)
-            mem[addr - 32'h10010000] <= data_in;
+            mem[(addr-32'h10010000)>>2] <= data_in;
     end
 endmodule
