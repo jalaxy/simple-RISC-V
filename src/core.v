@@ -35,7 +35,7 @@ module core(
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr;
     wire [6:0] funct7;
-    icache icache_inst(.clk(clk), .addr(pc), .valid(icache_valid), .data(ir));
+    icache icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid), .data(ir));
     always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
@@ -92,7 +92,7 @@ module core(
     wire [3:0] flags; // carry, negative, (placeholder), zero
     assign a = mux_if[3] ? pc_if : rs1_byp;
     assign b = mux_if[2] ? rs2_if_byp : imm_if;
-    alu alu_inst(.clk(clk), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
+    alu alu_inst(.clk(clk), .ena(ena_ex), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
                  .funct3(op | op_imm ? funct3_if : 3'b000),
                  .funct7(op | op_imm & funct3_if == 3'b101 // SRL/SRA (special I-type)
                          ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
@@ -114,12 +114,12 @@ module core(
         r_ma       <= ena_ma ? r_ex : r_ma;
     end
     wire dcache_valid;
-    dcache dcache_inst(.clk(clk), .w_ena(mem_w_ex), .addr(r_ex),
+    dcache dcache_inst(.clk(clk), .r_ena(ena_ma), .w_ena(mem_w_ex), .addr(r_ex),
                        .width(funct3_ex[1:0]), .ext(funct3_ex[2]),
                        .data_in(rs2_ex_byp), .valid(dcache_valid), .data_out(d_out_ma));
 
     // Write back
-    gpreg gpreg_inst(.clk(clk), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr_if),
+    gpreg gpreg_inst(.clk(clk), .ena(ena_wb), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr_if),
                      .rd_addr(rd_addr_ma), .rd(rd_byp_ma), .rs1(rs1), .rs2(rs2_if));
 
     // PC control
@@ -142,6 +142,7 @@ endmodule
 
 module gpreg(
     input clk,
+    input ena,
     input [4:0] rs1_addr,
     input [4:0] rs2_addr,
     input [4:0] rd_addr,
@@ -153,11 +154,12 @@ module gpreg(
     assign rs1 = rs1_addr == 5'd0 ? 32'd0 : r[rs1_addr];
     assign rs2 = rs2_addr == 5'd0 ? 32'd0 : r[rs2_addr];
     always @(posedge clk)
-        r[rd_addr] <= rd;
+        r[rd_addr] <= ena ? rd : r[rd_addr];
 endmodule
 
 module alu(
     input clk,
+    input ena,
     input [31:0] a,
     input [31:0] b,
     input [2:0] funct3,
@@ -165,6 +167,7 @@ module alu(
     output reg [31:0] r,
     output reg c // only for SUB
 );
+// as sync module, maybe it's better to change to behavior block
     wire [31:0] r_arr[0:7];
     wire c_wire;
     assign {c_wire, r_arr[3'd0]} = funct7[5] ? {1'b0, a} - {1'b0, b} : a + b; // ADD/SUB
@@ -175,12 +178,13 @@ module alu(
     assign r_arr[3'd5] = funct7[5] ? $signed($signed(a) >>> b[4:0]) : a >> b[4:0]; // SRA/SRL
     assign r_arr[3'd6] = a | b; // OR
     assign r_arr[3'd7] = a & b; // AND
-    always @(posedge clk) r <= r_arr[funct3];
-    always @(posedge clk) c <= c_wire;
+    always @(posedge clk) r <= ena ? r_arr[funct3] : r;
+    always @(posedge clk) c <= ena ? c_wire : c;
 endmodule
 
 module icache(
     input clk,
+    input ena,
     input [31:0] addr,
     output valid,
     output reg [31:0] data
@@ -190,13 +194,16 @@ module icache(
     initial
         fd <= $fopen("/home/ubuntu/Desktop/test.dump", "r");
     always @(posedge clk) begin
-        res = $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
-        res = $fscanf(fd, "%h", data);
+        if (ena) begin
+            res <= $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
+            res <= $fscanf(fd, "%h", data);
+        end
     end
 endmodule
 
 module dcache(
     input clk,
+    input r_ena,
     input w_ena,
     input [31:0] addr,
     input [1:0] width,
@@ -213,7 +220,8 @@ module dcache(
             mem[i] = 1;
     end
     always @(posedge clk) begin
-        data_out <= mem[(addr-32'h10010000)>>2];
+        if (r_ena)
+            data_out <= mem[(addr-32'h10010000)>>2];
         if (w_ena)
             mem[(addr-32'h10010000)>>2] <= data_in;
     end
