@@ -167,7 +167,6 @@ module alu(
     output reg [31:0] r,
     output reg c // only for SUB
 );
-// as sync module, maybe it's better to change to behavior block
     wire [31:0] r_arr[0:7];
     wire c_wire;
     assign {c_wire, r_arr[3'd0]} = funct7[5] ? {1'b0, a} - {1'b0, b} : a + b; // ADD/SUB
@@ -214,11 +213,6 @@ module dcache(
 );
     assign valid = 1'b1;
     reg [32:0] mem[0:1024];
-    integer i;
-    initial begin
-        for (i = 0; i < 1024; i = i + 1)
-            mem[i] = 1;
-    end
     always @(posedge clk) begin
         if (r_ena)
             data_out <= mem[(addr-32'h10010000)>>2];
