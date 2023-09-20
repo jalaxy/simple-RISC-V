@@ -1,7 +1,8 @@
 `timescale 1ns/1ns
 module core(
     input clk,
-    input rst
+    input rst,
+    output [3:0] signal
 );
     wire ena_pc, ena_if, ena_ex, ena_ma, ena_wb;
 
@@ -35,7 +36,7 @@ module core(
     wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr;
     wire [6:0] funct7;
-    icache icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid), .data(ir));
+    icache_synth icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid), .data(ir));
     always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
@@ -138,6 +139,11 @@ module core(
     assign ena_ex = start_if;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
+
+    assign signal[0] = pc >= 32'h0040007c & pc <= 32'h0040007c;
+    assign signal[1] = pc >= 32'h0040007c & pc <= 32'h00400080;
+    assign signal[2] = pc >= 32'h0040007c & pc <= 32'h00400084;
+    assign signal[3] = 1'b1;
 endmodule
 
 module gpreg(
@@ -198,6 +204,20 @@ module icache(
             res <= $fscanf(fd, "%h", data);
         end
     end
+endmodule
+
+module icache_synth(
+    input clk,
+    input ena,
+    input [31:0] addr,
+    output valid,
+    output reg [31:0] data
+);
+    assign valid = 1'b1;
+    wire [31:0] data_w, addr_relative;
+    assign addr_relative = addr - 32'h00400000;
+    rom rom_inst(.a(addr_relative[9:0] >> 2), .spo(data_w));
+    always @(posedge clk) data <= ena ? data_w : data;
 endmodule
 
 module dcache(
