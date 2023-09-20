@@ -79,6 +79,7 @@ module core(
                         (start_ma & rd_addr_ma == rs2_addr_if ? rd_byp_ma : rs2_if));
 
     // Execution
+    wire ma_ex_stall;
     always @(posedge clk) begin
         pc_ex       <= ena_ex ? pc_if : pc_ex;
         mux_ex      <= ena_ex ? mux_if : mux_ex;
@@ -87,7 +88,7 @@ module core(
         imm_ex      <= ena_ex ? imm_if : imm_ex;
         rs2_ex      <= ena_ex ? rs2_if : rs2_ex;
         rs2_addr_ex <= ena_ex ? rs2_addr_if : rs2_addr_ex;
-        rd_addr_ex  <= ena_ex ? rd_addr_if : rd_addr_ex;
+        rd_addr_ex  <= ena_ex ? (ma_ex_stall ? 5'd0 : rd_addr_if) : rd_addr_ex; // NOP when stall
     end
     wire [3:0] flags; // carry, negative, (placeholder), zero
     assign a = mux_if[3] ? pc_if : rs1_byp;
@@ -128,14 +129,13 @@ module core(
             : (mux_ex[5] & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4))) : pc;
 
     // Enable control
-    wire ma_ex_stall;
     assign ma_ex_stall = ((~mux_if[3] & rs1_addr    != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
                           ( mux_if[2] & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) & // LUI???
                             mux_ex[1:0] == 2'b11; // some wires in this expression are existed
     // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
     assign ena_pc = ~ma_ex_stall;
     assign ena_if = ~ma_ex_stall;
-    assign ena_ex = ~ma_ex_stall & start_if;
+    assign ena_ex = start_if;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
 endmodule
