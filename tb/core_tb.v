@@ -1,7 +1,8 @@
 `timescale 1ns/1ns
 module core_tb();
     reg clk, rst;
-    core core_inst(clk, rst);
+    wire signal;
+    core core_inst(clk, rst, signal);
     integer num;
     initial begin
         rst = 0;

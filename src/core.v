@@ -1,7 +1,8 @@
 `timescale 1ns/1ns
 module core(
     input clk,
-    input rst
+    input rst,
+    output signal
 );
     wire ena_pc, ena_if, ena_ex, ena_ma, ena_wb;
 
@@ -138,6 +139,8 @@ module core(
     assign ena_ex = start_if;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
+
+    assign signal = pc == 32'h0040007c;
 endmodule
 
 module gpreg(
