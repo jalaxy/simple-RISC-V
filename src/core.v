@@ -1,4 +1,13 @@
 `timescale 1ns/1ns
+`define OP_IMM 5'b00100
+`define LUI    5'b01101
+`define AUIPC  5'b00101
+`define OP     5'b01100
+`define JAL    5'b11011
+`define JALR   5'b11001
+`define BRANCH 5'b11000
+`define LOAD   5'b00000
+`define STORE  5'b01000
 module core(
     input clk,
     input rst,
@@ -18,9 +27,8 @@ module core(
     // pipeline registers
     reg [31:0]  pc;
     reg [31:0]  pc_if;       reg [31:0]  pc_ex;      reg [31:0]  pc_ma;
-    wire [5:0]  mux_if;      reg [5:0]   mux_ex;     reg [5:0]   mux_ma;
+    wire [31:0] op_if;       reg [31:0]  op_ex;      reg [31:0]  op_ma;
     wire [2:0]  funct3_if;   reg [2:0]   funct3_ex;
-    wire        mem_w_if;    reg         mem_w_ex;
     wire [31:0] imm_if;      reg [31:0]  imm_ex;     reg [31:0]  imm_ma;
     wire [31:0] rs2_if;      reg [31:0]  rs2_ex;
     wire [4:0]  rs2_addr_if; reg [31:0]  rs2_addr_ex;
@@ -33,7 +41,6 @@ module core(
     wire [6:0] opcode;
     wire [5:0] enc;
     wire [31:0] ir;
-    wire op_imm, lui, auipc, op, jal, jalr, branch, load, store;
     wire [4:0] rs1_addr;
     wire [6:0] funct7;
     icache_synth icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid), .data(ir));
@@ -41,17 +48,11 @@ module core(
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
     assign funct7    = ir[31:25];
-    assign op_imm    = opcode == 7'b0010011;
-    assign lui       = opcode == 7'b0110111;
-    assign auipc     = opcode == 7'b0010111;
-    assign op        = opcode == 7'b0110011;
-    assign jal       = opcode == 7'b1101111;
-    assign jalr      = opcode == 7'b1100111;
-    assign branch    = opcode == 7'b1100011;
-    assign load      = opcode == 7'b0000011;
-    assign store     = opcode == 7'b0100011;
-    assign mem_w_if  = store;
-    assign enc = {op, op_imm | jalr | load, store, branch, lui | auipc, jal}; // R I S B U J
+    genvar igen;
+    for (igen = 0; igen < 32; igen = igen + 1) begin : decoder
+        assign op_if[igen[4:0]] = opcode[6:2] == igen[4:0]; end
+    assign enc = {op_if[`OP], op_if[`OP_IMM] | op_if[`JALR] | op_if[`LOAD], op_if[`STORE],
+                  op_if[`BRANCH], op_if[`LUI] | op_if[`AUIPC], op_if[`JAL]}; // R I S B U J
     assign rs1_addr = (enc & 6'b111100) == 6'd0 ? 5'd0 : ir[19:15];
     assign rs2_addr_if = (enc & 6'b101100) == 6'd0 ? 5'd0 : ir[24:20];
     assign rd_addr_if = (enc & 6'b110011) == 6'd0 ? 5'd0 : ir[11:7];
@@ -61,16 +62,12 @@ module core(
                     enc[1] ? {ir[31:12], 12'd0} : (                               // U type
                     enc[0] ? {{12{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} : // J type
                              32'd0))));                                           // R type
-    // MUX selection signal: H -> L
-    // PC input (5), PC adder (4), ALU a (3), ALU b (2), rd input (1:0)
-    assign mux_if = {jal | jalr, branch, auipc | jal, branch | op,
-                     load | jal | jalr, load | lui};
     // Handle data bypass in IF -> EX
     wire [31:0] rd_byp_ex, rd_byp_ma;
     wire [31:0] a, b, rs1_byp, rs2_if_byp, rs1;
     assign d_out_ex = 32'd0; // Unable to fetch d_out of last instruction which just done EX stage
-    assign rd_byp_ex = mux_ex[1] ? (mux_ex[0] ? d_out_ex : pc_ex + 32'd4) : (mux_ex[0] ? imm_ex : r_ex);
-    assign rd_byp_ma = mux_ma[1] ? (mux_ma[0] ? d_out_ma : pc_ma + 32'd4) : (mux_ma[0] ? imm_ma : r_ma);
+    assign rd_byp_ex = op_ex[`LOAD] | op_ex[`JAL] | op_ex[`JALR] ? (op_ex[`LOAD] | op_ex[`LUI] ? d_out_ex : pc_ex + 32'd4) : (op_ex[`LOAD] | op_ex[`LUI] ? imm_ex : r_ex);
+    assign rd_byp_ma = op_ma[`LOAD] | op_ma[`JAL] | op_ma[`JALR] ? (op_ma[`LOAD] | op_ma[`LUI] ? d_out_ma : pc_ma + 32'd4) : (op_ma[`LOAD] | op_ma[`LUI] ? imm_ma : r_ma);
     assign dout_ex = 32'd0; // unable to fetch previous d_out before current EX stage
     assign rs1_byp    = rs1_addr == 5'd0 ? 32'd0 :
                         (start_ex & rd_addr_ex == rs1_addr ? rd_byp_ex :
@@ -83,40 +80,39 @@ module core(
     wire ma_ex_stall;
     always @(posedge clk) begin
         pc_ex       <= ena_ex ? pc_if : pc_ex;
-        mux_ex      <= ena_ex ? mux_if : mux_ex;
         funct3_ex   <= ena_ex ? funct3_if : funct3_ex;
-        mem_w_ex    <= ena_ex ? mem_w_if : mem_w_ex;
+        op_ex       <= ena_ex ? op_if : op_ex;
         imm_ex      <= ena_ex ? imm_if : imm_ex;
         rs2_ex      <= ena_ex ? rs2_if : rs2_ex;
         rs2_addr_ex <= ena_ex ? rs2_addr_if : rs2_addr_ex;
         rd_addr_ex  <= ena_ex ? (ma_ex_stall ? 5'd0 : rd_addr_if) : rd_addr_ex; // NOP when stall
     end
     wire [3:0] flags; // carry, negative, (placeholder), zero
-    assign a = mux_if[3] ? pc_if : rs1_byp;
-    assign b = mux_if[2] ? rs2_if_byp : imm_if;
+    assign a = op_if[`AUIPC] | op_if[`JAL] ? pc_if : rs1_byp;
+    assign b = op_if[`BRANCH] | op_if[`OP] ? rs2_if_byp : imm_if;
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
-                 .funct3(op | op_imm ? funct3_if : 3'b000),
-                 .funct7(op | op_imm & funct3_if == 3'b101 // SRL/SRA (special I-type)
-                         ? funct7 : (branch ? 7'b0100000 : 7'b0000000)));
+                 .funct3(op_if[`OP] | op_if[`OP_IMM] ? funct3_if : 3'b000),
+                 .funct7(op_if[`OP] | op_if[`OP_IMM] & funct3_if == 3'b101 // SRL/SRA (special I-type)
+                         ? funct7 : (op_if[`BRANCH] ? 7'b0100000 : 7'b0000000)));
     assign flags[2] = r_ex[31];
     assign flags[0] = r_ex == 32'd0;
-    assign b_suc = mux_ex[4] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
+    assign b_suc = op_ex[`BRANCH] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
     // Handle data bypass in EX -> MA
     wire [31:0] rs2_ex_byp;
     assign rs2_ex_byp = rs2_addr_ex == 5'd0 ? 32'd0 :
                         (start_ma & rd_addr_ma == rs2_addr_ex ? rd_byp_ma : rs2_ex);
-    assign jump = mux_ex[5] | b_suc;
+    assign jump = op_ex[`JAL] | op_ex[`JALR] | b_suc;
 
     // Memory access
     always @(posedge clk) begin
         pc_ma      <= ena_ma ? pc_ex : pc_ma;
-        mux_ma     <= ena_ma ? mux_ex : mux_ma;
+        op_ma      <= ena_ma ? op_ex : op_ma;
         imm_ma     <= ena_ma ? imm_ex : imm_ma;
         rd_addr_ma <= ena_ma ? rd_addr_ex : rd_addr_ma;
         r_ma       <= ena_ma ? r_ex : r_ma;
     end
     wire dcache_valid;
-    dcache dcache_inst(.clk(clk), .r_ena(ena_ma), .w_ena(mem_w_ex), .addr(r_ex),
+    dcache dcache_inst(.clk(clk), .r_ena(ena_ma), .w_ena(op_ex[`STORE]), .addr(r_ex),
                        .width(funct3_ex[1:0]), .ext(funct3_ex[2]),
                        .data_in(rs2_ex_byp), .valid(dcache_valid), .data_out(d_out_ma));
 
@@ -127,12 +123,12 @@ module core(
     // PC control
     always @(posedge clk)
         pc <= ena_pc ? (rst ? 32'h00400000
-            : (mux_ex[5] & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4))) : pc;
+            : ((op_ex[`JAL] | op_ex[`JALR]) & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4))) : pc;
 
     // Enable control
-    assign ma_ex_stall = ((~mux_if[3] & rs1_addr    != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
-                          ( mux_if[2] & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) & // LUI???
-                            mux_ex[1:0] == 2'b11; // some wires in this expression are existed
+    assign ma_ex_stall = ((~(op_if[`AUIPC] | op_if[`JAL]) & rs1_addr    != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
+                          ( (op_if[`BRANCH] | op_if[`OP]) & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) & // LUI???
+                            op_ex[`LOAD]; // some wires in this expression are existed
     // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
     assign ena_pc = ~ma_ex_stall;
     assign ena_if = ~ma_ex_stall;
