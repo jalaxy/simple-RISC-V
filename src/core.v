@@ -15,18 +15,9 @@ module core(
 );
     wire ena_pc, ena_if, ena_ex, ena_ma, ena_wb;
 
-    // Pipeline start control
-    reg start_if, start_ex, start_ma; // each stage has been started
-    wire jump; // Jump can be implemented by start control as program restart from new PC
-    always @(posedge clk) begin
-        start_if <= rst | start_ex & jump ? 1'b0 : 1'b1;
-        start_ex <= rst | start_ex & jump ? 1'b0 : start_if;
-        start_ma <= rst ? 1'b0 : start_ex;
-    end
-
     // pipeline registers
     reg [31:0]  pc;
-    reg [31:0]  pc_if;       reg [31:0]  pc_ex;      reg [31:0]  pc_ma;
+    reg [31:0]  pc_if;       reg [31:0]  pc_ex;
     wire [31:0] op_if;       reg [31:0]  op_ex;      reg [31:0]  op_ma;
     wire [2:0]  funct3_if;   reg [2:0]   funct3_ex;
     wire [31:0] imm_if;      reg [31:0]  imm_ex;     reg [31:0]  imm_ma;
@@ -35,6 +26,17 @@ module core(
     wire [4:0]  rd_addr_if;  reg [4:0]   rd_addr_ex; reg [4:0]   rd_addr_ma;
                              wire [31:0] r_ex;       reg [31:0]  r_ma;
                              wire [31:0] d_out_ex;   wire [31:0] d_out_ma;
+
+    // Pipeline start control
+    reg start_if, start_ex, start_ma; // each stage has been started
+    wire b_suc, ma_ex_stall;
+    always @(posedge clk) begin // Jump can be implemented by start control as program restart from new PC
+        start_if <= rst | start_ex & op_ex[`BRANCH] & b_suc
+                        | start_if & op_if[`JAL]
+                        | start_if & op_if[`JALR] & ~ma_ex_stall ? 1'b0 : 1'b1;
+        start_ex <= rst | start_ex & op_ex[`BRANCH] & b_suc ? 1'b0 : start_if;
+        start_ma <= rst ? 1'b0 : start_ex;
+    end
 
     // Instruction fetch & decode
     wire icache_valid;
@@ -48,9 +50,15 @@ module core(
     assign opcode    = ir[6:0];
     assign funct3_if = ir[14:12];
     assign funct7    = ir[31:25];
-    genvar igen;
-    for (igen = 0; igen < 32; igen = igen + 1) begin : decoder
-        assign op_if[igen[4:0]] = opcode[6:2] == igen[4:0]; end
+    assign op_if[`OP_IMM] = opcode[6:2] == `OP_IMM;
+    assign op_if[`LUI]    = opcode[6:2] == `LUI;
+    assign op_if[`AUIPC]  = opcode[6:2] == `AUIPC;
+    assign op_if[`OP]     = opcode[6:2] == `OP;
+    assign op_if[`JAL]    = opcode[6:2] == `JAL;
+    assign op_if[`JALR]   = opcode[6:2] == `JALR;
+    assign op_if[`BRANCH] = opcode[6:2] == `BRANCH;
+    assign op_if[`LOAD]   = opcode[6:2] == `LOAD;
+    assign op_if[`STORE]  = opcode[6:2] == `STORE;
     assign enc = {op_if[`OP], op_if[`OP_IMM] | op_if[`JALR] | op_if[`LOAD], op_if[`STORE],
                   op_if[`BRANCH], op_if[`LUI] | op_if[`AUIPC], op_if[`JAL]}; // R I S B U J
     assign rs1_addr = (enc & 6'b111100) == 6'd0 ? 5'd0 : ir[19:15];
@@ -65,10 +73,9 @@ module core(
     // Handle data bypass in IF -> EX
     wire [31:0] rd_byp_ex, rd_byp_ma;
     wire [31:0] a, b, rs1_byp, rs2_if_byp, rs1;
-    assign d_out_ex = 32'd0; // Unable to fetch d_out of last instruction which just done EX stage
-    assign rd_byp_ex = op_ex[`LOAD] | op_ex[`JAL] | op_ex[`JALR] ? (op_ex[`LOAD] | op_ex[`LUI] ? d_out_ex : pc_ex + 32'd4) : (op_ex[`LOAD] | op_ex[`LUI] ? imm_ex : r_ex);
-    assign rd_byp_ma = op_ma[`LOAD] | op_ma[`JAL] | op_ma[`JALR] ? (op_ma[`LOAD] | op_ma[`LUI] ? d_out_ma : pc_ma + 32'd4) : (op_ma[`LOAD] | op_ma[`LUI] ? imm_ma : r_ma);
-    assign dout_ex = 32'd0; // unable to fetch previous d_out before current EX stage
+    assign d_out_ex = 32'd0; // Unable to fetch data of previous instructions due to pipeline
+    assign rd_byp_ex = op_ex[`LOAD] ? d_out_ex : (op_ex[`LUI] ? imm_ex : r_ex); // RD of previous instructions
+    assign rd_byp_ma = op_ma[`LOAD] ? d_out_ma : (op_ma[`LUI] ? imm_ma : r_ma);
     assign rs1_byp    = rs1_addr == 5'd0 ? 32'd0 :
                         (start_ex & rd_addr_ex == rs1_addr ? rd_byp_ex :
                         (start_ma & rd_addr_ma == rs1_addr ? rd_byp_ma : rs1));
@@ -77,7 +84,6 @@ module core(
                         (start_ma & rd_addr_ma == rs2_addr_if ? rd_byp_ma : rs2_if));
 
     // Execution
-    wire ma_ex_stall;
     always @(posedge clk) begin
         pc_ex       <= ena_ex ? pc_if : pc_ex;
         funct3_ex   <= ena_ex ? funct3_if : funct3_ex;
@@ -85,27 +91,25 @@ module core(
         imm_ex      <= ena_ex ? imm_if : imm_ex;
         rs2_ex      <= ena_ex ? rs2_if : rs2_ex;
         rs2_addr_ex <= ena_ex ? rs2_addr_if : rs2_addr_ex;
-        rd_addr_ex  <= ena_ex ? (ma_ex_stall ? 5'd0 : rd_addr_if) : rd_addr_ex; // NOP when stall
+        rd_addr_ex  <= ma_ex_stall ? 5'd0 : (ena_ex ? rd_addr_if : rd_addr_ex); // NOP when stall
     end
     wire [3:0] flags; // carry, negative, (placeholder), zero
-    assign a = op_if[`AUIPC] | op_if[`JAL] ? pc_if : rs1_byp;
-    assign b = op_if[`BRANCH] | op_if[`OP] ? rs2_if_byp : imm_if;
+    assign a = op_if[`AUIPC] | op_if[`JAL] | op_if[`JALR] ? pc_if : rs1_byp;
+    assign b = op_if[`BRANCH] | op_if[`OP] ? rs2_if_byp : (op_if[`JAL] | op_if[`JALR] ? 32'd4 : imm_if);
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a), .b(b), .r(r_ex), .c(flags[3]), 
                  .funct3(op_if[`OP] | op_if[`OP_IMM] ? funct3_if : 3'b000),
                  .funct7(op_if[`OP] | op_if[`OP_IMM] & funct3_if == 3'b101 // SRL/SRA (special I-type)
                          ? funct7 : (op_if[`BRANCH] ? 7'b0100000 : 7'b0000000)));
     assign flags[2] = r_ex[31];
     assign flags[0] = r_ex == 32'd0;
-    assign b_suc = op_ex[`BRANCH] & flags[funct3_ex[2:1]] == ~funct3_ex[0];
+    assign b_suc = flags[funct3_ex[2:1]] == ~funct3_ex[0];
     // Handle data bypass in EX -> MA
     wire [31:0] rs2_ex_byp;
     assign rs2_ex_byp = rs2_addr_ex == 5'd0 ? 32'd0 :
                         (start_ma & rd_addr_ma == rs2_addr_ex ? rd_byp_ma : rs2_ex);
-    assign jump = op_ex[`JAL] | op_ex[`JALR] | b_suc;
 
     // Memory access
     always @(posedge clk) begin
-        pc_ma      <= ena_ma ? pc_ex : pc_ma;
         op_ma      <= ena_ma ? op_ex : op_ma;
         imm_ma     <= ena_ma ? imm_ex : imm_ma;
         rd_addr_ma <= ena_ma ? rd_addr_ex : rd_addr_ma;
@@ -121,18 +125,21 @@ module core(
                      .rd_addr(rd_addr_ma), .rd(rd_byp_ma), .rs1(rs1), .rs2(rs2_if));
 
     // PC control
+    wire [31:0] npc;
+    assign npc = start_ex & op_ex[`BRANCH] & b_suc ? pc_ex + imm_ex :
+                (start_if & op_if[`JALR] ? rs1_byp + imm_if :
+                (start_if & op_if[`JAL] ? pc_if + imm_if : pc + 4));
     always @(posedge clk)
-        pc <= ena_pc ? (rst ? 32'h00400000
-            : ((op_ex[`JAL] | op_ex[`JALR]) & start_ex ? r_ex : (b_suc & start_ex ? pc_ex + imm_ex : pc + 4))) : pc;
+        pc <= rst ? 32'h00400000 : (ena_pc ? npc : pc);
 
     // Enable control
-    assign ma_ex_stall = ((~(op_if[`AUIPC] | op_if[`JAL]) & rs1_addr    != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
+    assign ma_ex_stall = ((~(op_if[`AUIPC] | op_if[`JAL]) & rs1_addr != 5'd0 & start_ex & rd_addr_ex == rs1_addr) |
                           ( (op_if[`BRANCH] | op_if[`OP]) & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) & // LUI???
                             op_ex[`LOAD]; // some wires in this expression are existed
     // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
     assign ena_pc = ~ma_ex_stall;
     assign ena_if = ~ma_ex_stall;
-    assign ena_ex = start_if;
+    assign ena_ex = ~ma_ex_stall & start_if;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
 
