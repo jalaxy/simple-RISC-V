@@ -30,7 +30,7 @@ module core_tb();
     wire [31:0] pc;
     assign pc = core_inst.pc;
     wire [31:0] ir;
-    assign ir = core_inst.ir;
+    assign ir = core_inst.ir_if;
     reg [31:0] r[1:`N];
     integer i;
     always @(*)
