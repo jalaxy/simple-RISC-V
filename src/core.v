@@ -22,40 +22,60 @@ module core(
     wire [6:0]  opcode_if;
     wire [5:0]  enc_if;
     wire [31:0] ir_if;
-    wire [4:0]  rs1_addr_if;
-    wire [6:0]  funct7_if;
-    wire [31:0] rs1_if;
-    wire [31:0] a_if;
-    wire [31:0] b_if;
-    wire [31:0] rs1_byp_if;
-    wire [31:0] rs2_byp_if;
-    wire        ma_ex_stall_if;
-    wire [31:0] rd_ex;           wire [31:0] rd_ma;
-    reg  [31:0] pc_if;           reg  [31:0] pc_ex;
-    wire [2:0]  funct3_if;       reg  [2:0]  funct3_ex;
-    wire [4:0]  rs2_addr_if;     reg  [31:0] rs2_addr_ex;
-    wire [31:0] rs2_if;          reg  [31:0] rs2_ex;
-    wire [31:0] op_if;           reg  [31:0] op_ex;       reg  [31:0] op_ma;
-    wire [31:0] imm_if;          reg  [31:0] imm_ex;      reg  [31:0] imm_ma;
-    wire [4:0]  rd_addr_if;      reg  [4:0]  rd_addr_ex;  reg  [4:0]  rd_addr_ma;
-                                 wire [3:0]  flags_ex;
-                                 wire        b_suc_ex;
-                                 wire [31:0] rs2_byp_ex;
-                                 wire [31:0] r_ex;        reg  [31:0] r_ma;
-                                 wire [31:0] d_out_ex;    wire [31:0] d_out_ma;
-                                                          wire        dcache_valid_ma;
+    wire [6:0]  funct7_if;      reg  [6:0]  funct7_id;
+    wire [4:0]  rs1_addr_if;    reg  [4:0]  rs1_addr_id;
+    reg  [31:0] pc_if;          reg  [31:0] pc_id;          reg  [31:0] pc_ex;
+    wire [2:0]  funct3_if;      reg  [2:0]  funct3_id;      reg  [2:0]  funct3_ex;
+    wire [4:0]  rs2_addr_if;    reg  [4:0]  rs2_addr_id;    reg  [4:0]  rs2_addr_ex;
+    wire [31:0] op_if;          reg  [31:0] op_id;          reg  [31:0] op_ex;       reg  [31:0] op_ma;
+    wire [31:0] imm_if;         reg  [31:0] imm_id;         reg  [31:0] imm_ex;      reg  [31:0] imm_ma;
+    wire [4:0]  rd_addr_if;     reg  [4:0]  rd_addr_id;     reg  [4:0]  rd_addr_ex;  reg  [4:0]  rd_addr_ma;
+                                wire        ma_ex_stall_id;
+                                wire [31:0] a_id;
+                                wire [31:0] b_id;
+                                wire  [31:0] rs1_id;
+                                wire [31:0] rs1_byp_id;
+                                wire  [31:0] rs2_id;         reg  [31:0] rs2_ex;
+                                wire [31:0] rs2_byp_id;     wire [31:0] rs2_byp_ex;
+                                                            wire [3:0]  flags_ex;
+                                                            wire        b_suc_ex;
+                                                            wire [31:0] rd_ex;       wire [31:0] rd_ma;
+                                                            wire [31:0] r_ex;        reg  [31:0] r_ma;
+                                                            wire [31:0] d_out_ex;    wire [31:0] d_out_ma;
+                                                                                     wire        dcache_valid_ma;
 
     // Pipeline start control
-    reg start_if, start_ex, start_ma; // each stage has been started
+    reg start_if, start_id, start_ex, start_ma; // each stage has been started
     always @(posedge clk) begin // Jump can be implemented by start control as program restart from new PC
-        start_if <= rst | start_ex & op_ex[`BRANCH] & b_suc_ex
-                        | start_if & op_if[`JAL]
-                        | start_if & op_if[`JALR] & ~ma_ex_stall_if ? 1'b0 : 1'b1;
-        start_ex <= rst | start_ex & op_ex[`BRANCH] & b_suc_ex ? 1'b0 : start_if;
+        start_if <= rst | ~ma_ex_stall_id & (start_ex & op_ex[`BRANCH] & b_suc_ex |
+                                             start_id & op_id[`JALR] |
+                                             start_if & op_if[`JAL]) ? 1'b0 : 1'b1;
+        start_id <= rst | ~ma_ex_stall_id & (start_ex & op_ex[`BRANCH] & b_suc_ex |
+                                             start_id & op_id[`JALR]) ? 1'b0 : start_if;
+        start_ex <= rst | ~ma_ex_stall_id & start_ex & op_ex[`BRANCH] & b_suc_ex ? 1'b0 : start_id;
         start_ma <= rst ? 1'b0 : start_ex;
     end
 
-    // Instruction fetch & decode
+    // PC control
+    assign npc = start_ex & op_ex[`BRANCH] & b_suc_ex ? pc_ex + imm_ex :
+                (start_id & op_id[`JALR] ? rs1_byp_id + imm_id :
+                (start_if & op_if[`JAL] ? pc_if + imm_if : pc + 4));
+    always @(posedge clk)
+        pc <= rst ? 32'h00400000 : (ena_pc ? npc : pc);
+
+    // Enable control
+    assign ma_ex_stall_id = op_ex[`LOAD] &  // some wires in this expression are already existed
+        ((~(op_id[`AUIPC] | op_id[`JAL]) & rs1_addr_id != 5'd0 & start_ex & rd_addr_ex == rs1_addr_id) |
+         ( (op_id[`BRANCH] | op_id[`OP]) & rs2_addr_id != 5'd0 & start_ex & rd_addr_ex == rs2_addr_id));
+    // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
+    assign ena_pc = ~ma_ex_stall_id;
+    assign ena_if = ~ma_ex_stall_id;
+    assign ena_id = ~ma_ex_stall_id & start_if;
+    assign ena_ex = ~ma_ex_stall_id & start_id;
+    assign ena_ma = start_ex;
+    assign ena_wb = start_ma;
+
+    // Instruction fetch
     icache_synth icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid_if), .data(ir_if));
     always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode_if = ir_if[6:0];
@@ -81,29 +101,41 @@ module core(
                     enc_if[1] ? {ir_if[31:12], 12'd0} : (                                        // U type
                     enc_if[0] ? {{12{ir_if[31]}}, ir_if[19:12], ir_if[20], ir_if[30:21], 1'b0} : // J type
                                 32'd0))));                                                       // R type
-    assign rs1_byp_if = rs1_addr_if == 5'd0 ? 32'd0 :
-                        (start_ex & rd_addr_ex == rs1_addr_if ? rd_ex :
-                        (start_ma & rd_addr_ma == rs1_addr_if ? rd_ma : rs1_if));
-    assign rs2_byp_if = rs2_addr_if == 5'd0 ? 32'd0 :
-                        (start_ex & rd_addr_ex == rs2_addr_if ? rd_ex :
-                        (start_ma & rd_addr_ma == rs2_addr_if ? rd_ma : rs2_if));
-    assign a_if = op_if[`AUIPC] | op_if[`JAL] | op_if[`JALR] ? pc_if : rs1_byp_if;
-    assign b_if = op_if[`BRANCH] | op_if[`OP] ? rs2_byp_if : (op_if[`JAL] | op_if[`JALR] ? 32'd4 : imm_if);
+
+    // Instruction decode
+    always @(posedge clk) begin
+        pc_id       <= ena_id ? pc_if : pc_id;
+        funct7_id   <= ena_id ? funct7_if : funct7_id;
+        funct3_id   <= ena_id ? funct3_if : funct3_id;
+        op_id       <= ena_id ? op_if : op_id;
+        imm_id      <= ena_id ? imm_if : imm_id;
+        rs1_addr_id <= ena_id ? rs1_addr_if : rs1_addr_id;
+        rs2_addr_id <= ena_id ? rs2_addr_if : rs2_addr_id;
+        rd_addr_id  <= ena_id ? rd_addr_if : rd_addr_id;
+    end
+    assign rs1_byp_id = rs1_addr_id == 5'd0 ? 32'd0 :
+                        (start_ex & rd_addr_ex == rs1_addr_id ? rd_ex :
+                        (start_ma & rd_addr_ma == rs1_addr_id ? rd_ma : rs1_id));
+    assign rs2_byp_id = rs2_addr_id == 5'd0 ? 32'd0 :
+                        (start_ex & rd_addr_ex == rs2_addr_id ? rd_ex :
+                        (start_ma & rd_addr_ma == rs2_addr_id ? rd_ma : rs2_id));
+    assign a_id = op_id[`AUIPC] | op_id[`JAL] | op_id[`JALR] ? pc_id : rs1_byp_id;
+    assign b_id = op_id[`BRANCH] | op_id[`OP] ? rs2_byp_id : (op_id[`JAL] | op_id[`JALR] ? 32'd4 : imm_id);
 
     // Execution
     always @(posedge clk) begin
-        pc_ex       <= ena_ex ? pc_if : pc_ex;
-        funct3_ex   <= ena_ex ? funct3_if : funct3_ex;
-        op_ex       <= ena_ex ? op_if : op_ex;
-        imm_ex      <= ena_ex ? imm_if : imm_ex;
-        rs2_ex      <= ena_ex ? rs2_if : rs2_ex;
-        rs2_addr_ex <= ena_ex ? rs2_addr_if : rs2_addr_ex;
-        rd_addr_ex  <= ma_ex_stall_if ? 5'd0 : (ena_ex ? rd_addr_if : rd_addr_ex); // NOP when stall
+        pc_ex       <= ena_ex ? pc_id : pc_ex;
+        funct3_ex   <= ena_ex ? funct3_id : funct3_ex;
+        op_ex       <= ena_ex ? op_id : op_ex;
+        imm_ex      <= ena_ex ? imm_id : imm_ex;
+        rs2_ex      <= ena_ex ? rs2_id : rs2_ex;
+        rs2_addr_ex <= ena_ex ? rs2_addr_id : rs2_addr_ex;
+        rd_addr_ex  <= ma_ex_stall_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
     end
-    alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_if), .b(b_if), .r(r_ex), .c(flags_ex[3]), 
-                 .funct3(op_if[`OP] | op_if[`OP_IMM] ? funct3_if : 3'b000),
-                 .funct7(op_if[`OP] | op_if[`OP_IMM] & funct3_if == 3'b101 // SRL/SRA (special I-type)
-                         ? funct7_if : (op_if[`BRANCH] ? 7'b0100000 : 7'b0000000)));
+    alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_ex), .c(flags_ex[3]), 
+                 .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
+                 .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
+                         ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
     assign flags_ex[2] = r_ex[31];
     assign flags_ex[0] = r_ex == 32'd0; // flags: carry, negative, (placeholder), zero
     assign b_suc_ex = flags_ex[funct3_ex[2:1]] == ~funct3_ex[0];
@@ -125,26 +157,8 @@ module core(
     assign rd_ma = op_ma[`LOAD] ? d_out_ma : (op_ma[`LUI] ? imm_ma : r_ma);
 
     // Write back
-    gpreg gpreg_inst(.clk(clk), .ena(ena_wb), .rs1_addr(rs1_addr_if), .rs2_addr(rs2_addr_if),
-                     .rd_addr(rd_addr_ma), .rd(rd_ma), .rs1(rs1_if), .rs2(rs2_if));
-
-    // PC control
-    assign npc = start_ex & op_ex[`BRANCH] & b_suc_ex ? pc_ex + imm_ex :
-                (start_if & op_if[`JALR] ? rs1_byp_if + imm_if :
-                (start_if & op_if[`JAL] ? pc_if + imm_if : pc + 4));
-    always @(posedge clk)
-        pc <= rst ? 32'h00400000 : (ena_pc ? npc : pc);
-
-    // Enable control
-    assign ma_ex_stall_if = ((~(op_if[`AUIPC] | op_if[`JAL]) & rs1_addr_if != 5'd0 & start_ex & rd_addr_ex == rs1_addr_if) |
-                             ( (op_if[`BRANCH] | op_if[`OP]) & rs2_addr_if != 5'd0 & start_ex & rd_addr_ex == rs2_addr_if)) &
-                            op_ex[`LOAD]; // some wires in this expression are already existed
-    // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
-    assign ena_pc = ~ma_ex_stall_if;
-    assign ena_if = ~ma_ex_stall_if;
-    assign ena_ex = ~ma_ex_stall_if & start_if;
-    assign ena_ma = start_ex;
-    assign ena_wb = start_ma;
+    gpreg gpreg_inst(.clk(clk), .ena(ena_wb), .rs1_addr(rs1_addr_id), .rs2_addr(rs2_addr_id),
+                     .rd_addr(rd_addr_ma), .rd(rd_ma), .rs1(rs1_id), .rs2(rs2_id));
 
     assign signal = pc == 32'h0040007c;
 endmodule
