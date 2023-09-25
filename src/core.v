@@ -27,9 +27,9 @@ module core(
     reg  [31:0] pc_if;          reg  [31:0] pc_id;          reg  [31:0] pc_ex;
     wire [2:0]  funct3_if;      reg  [2:0]  funct3_id;      reg  [2:0]  funct3_ex;
     wire [4:0]  rs2_addr_if;    reg  [4:0]  rs2_addr_id;    reg  [4:0]  rs2_addr_ex;
-    wire [31:0] op_if;          reg  [31:0] op_id;          reg  [31:0] op_ex;       reg  [31:0] op_ma;
-    wire [31:0] imm_if;         reg  [31:0] imm_id;         reg  [31:0] imm_ex;      reg  [31:0] imm_ma;
-    wire [4:0]  rd_addr_if;     reg  [4:0]  rd_addr_id;     reg  [4:0]  rd_addr_ex;  reg  [4:0]  rd_addr_ma;
+    wire [31:0] op_if;          reg  [31:0] op_id;          reg  [31:0] op_ex;           reg  [31:0] op_ma;
+    wire [31:0] imm_if;         reg  [31:0] imm_id;         reg  [31:0] imm_ex;          reg  [31:0] imm_ma;
+    wire [4:0]  rd_addr_if;     reg  [4:0]  rd_addr_id;     reg  [4:0]  rd_addr_ex;      reg  [4:0]  rd_addr_ma;
                                 wire        ma_ex_stall_id;
                                 wire [31:0] a_id;
                                 wire [31:0] b_id;
@@ -39,11 +39,11 @@ module core(
                                 wire [31:0] rs2_byp_id;     wire [31:0] rs2_byp_ex;
                                                             wire [3:0]  flags_ex;
                                                             wire        b_suc_ex;
-                                                            wire        alu_valid_ex;
-                                                            wire [31:0] rd_ex;       wire [31:0] rd_ma;
-                                                            wire [31:0] r_ex;        reg  [31:0] r_ma;
-                                                            wire [31:0] d_out_ex;    wire [31:0] d_out_ma;
-                                                                                     wire        dcache_valid_ma;
+                                                            wire        muldiv_valid_ex;
+                                                            wire [31:0] rd_ex;           wire [31:0] rd_ma;
+                                                            wire [31:0] r_ex;            reg  [31:0] r_ma;
+                                                            wire [31:0] d_out_ex;        wire [31:0] d_out_ma;
+                                                                                         wire        dcache_valid_ma;
 
     // Pipeline start control
     reg start_if, start_id, start_ex, start_ma; // each stage has been started
@@ -134,9 +134,11 @@ module core(
         rd_addr_ex  <= ma_ex_stall_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
     end
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_ex), .c(flags_ex[3]), 
-                 .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000), .valid(alu_valid_ex),
+                 .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
                  .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
                          ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
+    muldiv muldiv_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .funct3(funct3_id),
+                       .valid(muldiv_valid_ex), .r(r_ex));
     assign flags_ex[2] = r_ex[31];
     assign flags_ex[0] = r_ex == 32'd0; // flags: carry, negative, (placeholder), zero
     assign b_suc_ex = flags_ex[funct3_ex[2:1]] == ~funct3_ex[0];
@@ -188,7 +190,6 @@ module alu(
     input [31:0] b,
     input [2:0] funct3,
     input [6:0] funct7,
-    output valid,
     output reg [31:0] r,
     output reg c // only for SUB
 );
@@ -204,7 +205,19 @@ module alu(
     assign r_arr[3'd7] = a & b; // AND
     always @(posedge clk) r <= ena ? r_arr[funct3] : r;
     always @(posedge clk) c <= ena ? c_wire : c;
+endmodule
+
+module muldiv(
+    input clk,
+    input ena,
+    input [31:0] a,
+    input [31:0] b,
+    input [31:0] funct3,
+    output valid,
+    output reg [31:0] r
+);
     assign valid = 1'b1;
+    wire [31:0] hi, lo;
 endmodule
 
 module icache(
