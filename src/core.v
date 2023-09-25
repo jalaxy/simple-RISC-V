@@ -33,12 +33,13 @@ module core(
                                 wire        ma_ex_stall_id;
                                 wire [31:0] a_id;
                                 wire [31:0] b_id;
-                                wire  [31:0] rs1_id;
+                                wire [31:0] rs1_id;
                                 wire [31:0] rs1_byp_id;
-                                wire  [31:0] rs2_id;         reg  [31:0] rs2_ex;
+                                wire [31:0] rs2_id;         reg  [31:0] rs2_ex;
                                 wire [31:0] rs2_byp_id;     wire [31:0] rs2_byp_ex;
                                                             wire [3:0]  flags_ex;
                                                             wire        b_suc_ex;
+                                                            wire        alu_valid_ex;
                                                             wire [31:0] rd_ex;       wire [31:0] rd_ma;
                                                             wire [31:0] r_ex;        reg  [31:0] r_ma;
                                                             wire [31:0] d_out_ex;    wire [31:0] d_out_ma;
@@ -133,7 +134,7 @@ module core(
         rd_addr_ex  <= ma_ex_stall_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
     end
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_ex), .c(flags_ex[3]), 
-                 .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
+                 .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000), .valid(alu_valid_ex),
                  .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
                          ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
     assign flags_ex[2] = r_ex[31];
@@ -187,6 +188,7 @@ module alu(
     input [31:0] b,
     input [2:0] funct3,
     input [6:0] funct7,
+    output valid,
     output reg [31:0] r,
     output reg c // only for SUB
 );
@@ -202,6 +204,7 @@ module alu(
     assign r_arr[3'd7] = a & b; // AND
     always @(posedge clk) r <= ena ? r_arr[funct3] : r;
     always @(posedge clk) c <= ena ? c_wire : c;
+    assign valid = 1'b1;
 endmodule
 
 module icache(
