@@ -22,10 +22,10 @@ module core(
     wire [6:0]  opcode_if;
     wire [5:0]  enc_if;
     wire [31:0] ir_if;
-    wire [6:0]  funct7_if;      reg  [6:0]  funct7_id;
     wire [4:0]  rs1_addr_if;    reg  [4:0]  rs1_addr_id;
     reg  [31:0] pc_if;          reg  [31:0] pc_id;          reg  [31:0] pc_ex;
     wire [2:0]  funct3_if;      reg  [2:0]  funct3_id;      reg  [2:0]  funct3_ex;
+    wire [6:0]  funct7_if;      reg  [6:0]  funct7_id;      reg  [6:0]  funct7_ex;
     wire [4:0]  rs2_addr_if;    reg  [4:0]  rs2_addr_id;    reg  [4:0]  rs2_addr_ex;
     wire [31:0] op_if;          reg  [31:0] op_id;          reg  [31:0] op_ex;           reg  [31:0] op_ma;
     wire [31:0] imm_if;         reg  [31:0] imm_id;         reg  [31:0] imm_ex;          reg  [31:0] imm_ma;
@@ -39,6 +39,8 @@ module core(
                                 wire [31:0] rs2_byp_id;     wire [31:0] rs2_byp_ex;
                                                             wire [3:0]  flags_ex;
                                                             wire        b_suc_ex;
+                                                            wire [31:0] r_alu_ex;
+                                                            wire [31:0] r_muldiv_ex;
                                                             wire        muldiv_valid_ex;
                                                             wire [31:0] rd_ex;           wire [31:0] rd_ma;
                                                             wire [31:0] r_ex;            reg  [31:0] r_ma;
@@ -77,20 +79,13 @@ module core(
     assign ena_wb = start_ma;
 
     // Instruction fetch
-    icache_synth icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid_if), .data(ir_if));
+    icache icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid_if), .data(ir_if));
     always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode_if = ir_if[6:0];
     assign funct3_if = ir_if[14:12];
     assign funct7_if = ir_if[31:25];
-    assign op_if[`OP_IMM] = opcode_if[6:2] == `OP_IMM;
-    assign op_if[`LUI]    = opcode_if[6:2] == `LUI;
-    assign op_if[`AUIPC]  = opcode_if[6:2] == `AUIPC;
-    assign op_if[`OP]     = opcode_if[6:2] == `OP;
-    assign op_if[`JAL]    = opcode_if[6:2] == `JAL;
-    assign op_if[`JALR]   = opcode_if[6:2] == `JALR;
-    assign op_if[`BRANCH] = opcode_if[6:2] == `BRANCH;
-    assign op_if[`LOAD]   = opcode_if[6:2] == `LOAD;
-    assign op_if[`STORE]  = opcode_if[6:2] == `STORE;
+    for (genvar igen = 0; igen < 32; igen = igen + 1) begin : decoder
+        assign op_if[igen[4:0]] = opcode_if[6:2] == igen[4:0]; end
     assign enc_if = {op_if[`OP], op_if[`OP_IMM] | op_if[`JALR] | op_if[`LOAD], op_if[`STORE],
                      op_if[`BRANCH], op_if[`LUI] | op_if[`AUIPC], op_if[`JAL]}; // R I S B U J
     assign rs1_addr_if = (enc_if & 6'b111100) == 6'd0 ? 5'd0 : ir_if[19:15];
@@ -127,18 +122,20 @@ module core(
     always @(posedge clk) begin
         pc_ex       <= ena_ex ? pc_id : pc_ex;
         funct3_ex   <= ena_ex ? funct3_id : funct3_ex;
+        funct7_ex   <= ena_ex ? funct7_id : funct7_ex;
         op_ex       <= ena_ex ? op_id : op_ex;
         imm_ex      <= ena_ex ? imm_id : imm_ex;
         rs2_ex      <= ena_ex ? rs2_id : rs2_ex;
         rs2_addr_ex <= ena_ex ? rs2_addr_id : rs2_addr_ex;
         rd_addr_ex  <= ma_ex_stall_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
     end
-    alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_ex), .c(flags_ex[3]), 
+    alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_alu_ex), .c(flags_ex[3]), 
                  .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
                  .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
                          ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
     muldiv muldiv_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .funct3(funct3_id),
-                       .valid(muldiv_valid_ex), .r(r_ex));
+                       .valid(muldiv_valid_ex), .r(r_muldiv_ex));
+    assign r_ex = op_ex[`OP] & funct7_ex == 7'b0000001 ? r_muldiv_ex : r_alu_ex;
     assign flags_ex[2] = r_ex[31];
     assign flags_ex[0] = r_ex == 32'd0; // flags: carry, negative, (placeholder), zero
     assign b_suc_ex = flags_ex[funct3_ex[2:1]] == ~funct3_ex[0];
@@ -212,12 +209,25 @@ module muldiv(
     input ena,
     input [31:0] a,
     input [31:0] b,
-    input [31:0] funct3,
+    input [2:0] funct3,
     output valid,
-    output reg [31:0] r
+    output [31:0] r
 );
     assign valid = 1'b1;
-    wire [31:0] hi, lo;
+    wire [31:0] a_abs, b_abs;
+    wire [63:0] r_abs, r_neg;
+    reg a_neg, b_neg;
+    reg [2:0] funct3_reg;
+    assign a_abs = (funct3[1] ^ funct3[0]) & a[31] ? -a : a;
+    assign b_abs = funct3[1:0] == 2'b01 & b[31] ? -b : b;
+    always @(posedge clk) funct3_reg <= ena ? funct3 : funct3_reg;
+    always @(posedge clk) a_neg <= a[31];
+    always @(posedge clk) b_neg <= b[31];
+    mul mul_inst(.A(a_abs), .B(b_abs), .P(r_abs), .CLK(clk), .CE(ena));
+    assign r_neg = -r_abs;
+    assign r = funct3_reg == 3'b000 ? r_abs[31:0] :
+              (funct3_reg == 3'b001 ? (a_neg ^ b_neg ? r_neg[63:32] : r_abs[63:32]) :
+              (funct3_reg == 3'b010 ? (a_neg ? r_neg[63:32] : r_abs[63:32]) : r_abs[63:32]));
 endmodule
 
 module icache(
