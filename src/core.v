@@ -213,21 +213,33 @@ module muldiv(
     output valid,
     output [31:0] r
 );
-    assign valid = 1'b1;
-    wire [31:0] a_abs, b_abs;
-    wire [63:0] r_abs, r_neg;
+    wire [31:0] a_abs, b_abs, q_abs, r_abs, q_neg, r_neg;
+    wire [63:0] m_abs, m_neg;
     reg a_neg, b_neg;
     reg [2:0] funct3_reg;
-    assign a_abs = (funct3[1] ^ funct3[0]) & a[31] ? -a : a;
-    assign b_abs = funct3[1:0] == 2'b01 & b[31] ? -b : b;
+    assign a_abs = (~funct3[2] & (funct3[1] ^ funct3[0]) | funct3[2] & ~funct3[0]) & a[31] ? -a : a;
+    assign b_abs = (funct3 == 3'b001 | funct3[2] & ~funct3[0]) & b[31] ? -b : b;
     always @(posedge clk) funct3_reg <= ena ? funct3 : funct3_reg;
     always @(posedge clk) a_neg <= a[31];
     always @(posedge clk) b_neg <= b[31];
-    mul mul_inst(.A(a_abs), .B(b_abs), .P(r_abs), .CLK(clk), .CE(ena));
+    mul mul_inst(.A(a_abs), .B(b_abs), .P(m_abs), .CLK(clk), .CE(ena));
+    div div_inst(.s_axis_divisor_tdata(b_abs), .s_axis_divisor_tvalid(1'b1),
+                 .s_axis_dividend_tdata(a_abs), .s_axis_dividend_tvalid(1'b1),
+                 .m_axis_dout_tdata({q_abs, r_abs}), .m_axis_dout_tvalid(valid),
+                 .aclk(clk), .aclken(ena));
+    assign m_neg = -m_abs;
+    assign q_neg = -q_abs;
     assign r_neg = -r_abs;
-    assign r = funct3_reg == 3'b000 ? r_abs[31:0] :
-              (funct3_reg == 3'b001 ? (a_neg ^ b_neg ? r_neg[63:32] : r_abs[63:32]) :
-              (funct3_reg == 3'b010 ? (a_neg ? r_neg[63:32] : r_abs[63:32]) : r_abs[63:32]));
+    wire [31:0] r_arr[0:7];
+    assign r_arr[0] = m_abs[31:0];
+    assign r_arr[1] = a_neg ^ b_neg ? m_neg[63:32] : m_abs[63:32];
+    assign r_arr[2] = a_neg ? m_neg[63:32] : m_abs[63:32];
+    assign r_arr[3] = m_abs[63:32];
+    assign r_arr[4] = a_neg ^ b_neg ? q_neg : q_abs;
+    assign r_arr[5] = q_abs;
+    assign r_arr[6] = a_neg ? r_neg : r_abs;
+    assign r_arr[7] = r_abs;
+    assign r = r_arr[funct3_reg];
 endmodule
 
 module icache(
