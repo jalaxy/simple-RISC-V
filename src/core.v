@@ -295,3 +295,25 @@ module dcache(
             mem[(addr-32'h10010000)>>2] <= data_in;
     end
 endmodule
+
+module queue #(
+    LENGTH = 32,
+    SIZE = 8
+) (
+    input clk,
+    input rst,
+    input pop,
+    input push,
+    output empty,
+    input [LENGTH:0] rear,
+    output [LENGTH:0] front
+);
+    reg [68:0] buf_data [0:SIZE-1];
+    reg        buf_ena  [0:SIZE-1];
+    assign empty = buf_ena[0];
+    for (genvar igen = 0; igen < SIZE; igen = igen + 1) begin : buffer_transfer
+        always @(posedge clk) begin
+            buf_ena[igen]  <= rst ? 1'b0 : (/*need to change*/ buf_ena[igen]);
+            buf_data[igen] <= /*need to change*/ buf_data[igen];
+        end end
+endmodule
