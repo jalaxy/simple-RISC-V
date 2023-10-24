@@ -13,7 +13,7 @@ module core(
     input rst,
     output signal
 );
-    wire ena_pc, ena_if, ena_ex, ena_ma, ena_wb;
+    wire ena_pc, ena_if, ena_id, ena_ex, ena_ma, ena_wb;
     reg [31:0] pc;
     wire [31:0] npc;
 
@@ -194,8 +194,8 @@ module alu(
     wire c_wire;
     assign {c_wire, r_arr[3'd0]} = funct7[5] ? {1'b0, a} - {1'b0, b} : a + b; // ADD/SUB
     assign r_arr[3'd1] = a << b[4:0]; // SLL
-    assign r_arr[3'd2] = $signed(a) < $signed(b); // SLT
-    assign r_arr[3'd3] = a < b; // SLTU
+    assign r_arr[3'd2] = {31'd0, $signed(a) < $signed(b)}; // SLT
+    assign r_arr[3'd3] = {31'd0, a < b}; // SLTU
     assign r_arr[3'd4] = a ^ b; // XOR
     assign r_arr[3'd5] = funct7[5] ? $signed($signed(a) >>> b[4:0]) : a >> b[4:0]; // SRA/SRL
     assign r_arr[3'd6] = a | b; // OR
@@ -252,7 +252,7 @@ module icache(
     assign valid = 1'b1;
     integer fd, res;
     initial
-        fd <= $fopen("/home/ubuntu/Desktop/test.dump", "r");
+        fd = $fopen("/home/ubuntu/Desktop/test.dump", "r");
     always @(posedge clk) begin
         if (ena) begin
             res <= $fseek(fd, ((addr-32'h00400000)>>2)*9, 0);
@@ -287,7 +287,7 @@ module dcache(
     output reg [31:0] data_out
 );
     assign valid = 1'b1;
-    reg [32:0] mem[0:1024];
+    reg [31:0] mem[0:1024];
     always @(posedge clk) begin
         if (r_ena)
             data_out <= mem[(addr-32'h10010000)>>2];
