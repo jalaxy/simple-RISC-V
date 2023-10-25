@@ -2,7 +2,7 @@
 module core_tb();
     reg clk, rst;
     wire signal;
-    core core_inst(clk, rst, signal);
+    top inst(clk, rst, signal);
     integer num;
     initial begin
         rst = 0;
@@ -28,12 +28,12 @@ module core_tb();
     end
 `define N 16
     wire [31:0] pc;
-    assign pc = core_inst.pc;
+    assign pc = inst.core_inst.pc;
     wire [31:0] ir;
-    assign ir = core_inst.ir_if;
+    assign ir = inst.core_inst.ir_if;
     reg [31:0] r[1:`N];
     integer i;
     always @(*)
         for (i = 1; i <= `N; i = i + 1)
-            r[i] = core_inst.gpreg_inst.r[i];
+            r[i] = inst.core_inst.gpreg_inst.r[i];
 endmodule

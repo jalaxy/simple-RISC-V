@@ -11,7 +11,18 @@
 module core(
     input clk,
     input rst,
-    output signal
+    input icache_valid,
+    input [31:0] icache_data,
+    input dcache_valid,
+    input [31:0] dcache_data_out,
+    output icache_ena,
+    output [31:0] icache_addr,
+    output dcache_r_ena,
+    output dcache_w_ena,
+    output dcache_ext,
+    output [1:0] dcache_width,
+    output [31:0] dcache_addr,
+    output [31:0] dcache_data_in
 );
     wire ena_pc, ena_if, ena_id, ena_ex, ena_ma, ena_wb;
     reg [31:0] pc;
@@ -79,7 +90,10 @@ module core(
     assign ena_wb = start_ma;
 
     // Instruction fetch
-    icache icache_inst(.clk(clk), .ena(ena_if), .addr(pc), .valid(icache_valid_if), .data(ir_if));
+    assign icache_ena = ena_if;
+    assign icache_addr = pc;
+    assign icache_valid_if = icache_valid;
+    assign ir_if = icache_data;
     always @(posedge clk) pc_if <= ena_if ? pc : pc_if;
     assign opcode_if = ir_if[6:0];
     assign funct3_if = ir_if[14:12];
@@ -151,16 +165,19 @@ module core(
         rd_addr_ma <= ena_ma ? rd_addr_ex : rd_addr_ma;
         r_ma       <= ena_ma ? r_ex : r_ma;
     end
-    dcache dcache_inst(.clk(clk), .r_ena(ena_ma), .w_ena(op_ex[`STORE]), .addr(r_ex),
-                       .width(funct3_ex[1:0]), .ext(funct3_ex[2]),
-                       .data_in(rs2_byp_ex), .valid(dcache_valid_ma), .data_out(d_out_ma));
+    assign dcache_r_ena = ena_ma;
+    assign dcache_w_ena = op_ex[`STORE];
+    assign dcache_addr = r_ex;
+    assign dcache_ext = funct3_ex[2];
+    assign dcache_width = funct3_ex[1:0];
+    assign dcache_data_in = rs2_byp_ex;
+    assign dcache_valid_ma = dcache_valid;
+    assign d_out_ma = dcache_data_out;
     assign rd_ma = op_ma[`LOAD] ? d_out_ma : (op_ma[`LUI] ? imm_ma : r_ma);
 
     // Write back
     gpreg gpreg_inst(.clk(clk), .ena(ena_wb), .rs1_addr(rs1_addr_id), .rs2_addr(rs2_addr_id),
                      .rd_addr(rd_addr_ma), .rd(rd_ma), .rs1(rs1_id), .rs2(rs2_id));
-
-    assign signal = pc == 32'h0040007c;
 endmodule
 
 module gpreg(
