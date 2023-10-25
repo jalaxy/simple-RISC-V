@@ -223,6 +223,7 @@ module muldiv(
     always @(posedge clk) a_neg <= a[31];
     always @(posedge clk) b_neg <= b[31];
     mul mul_inst(.A(a_abs), .B(b_abs), .P(m_abs), .CLK(clk), .CE(ena));
+    // CE may be not simply ena after using valid
     div div_inst(.s_axis_divisor_tdata(b_abs), .s_axis_divisor_tvalid(1'b1),
                  .s_axis_dividend_tdata(a_abs), .s_axis_dividend_tvalid(1'b1),
                  .m_axis_dout_tdata({q_abs, r_abs}), .m_axis_dout_tvalid(valid),
