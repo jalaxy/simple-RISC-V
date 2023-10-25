@@ -2,16 +2,22 @@ DOCKER=docker
 
 # Verilator variables
 VERILATOR_IMAGE=jxy324/verilator:v0
-VERILATOR_SRC=src/core.v
-VERILATOR_TOP=core
+VERILATOR_V=src/core.v tb/verilator/core_tb.v
+VERILATOR_CPP=tb/verilator/core_tb.cpp
+VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
+VERILATOR_TOP=core_tb
 
-VERILATOR_FLAGS=--cc --top-module $(VERILATOR_TOP)
-VERILATOR_CMD=/opt/verilator/bin/verilator $(VERILATOR_FLAGS) $(VERILATOR_SRC)
+VERILATOR_FLAGS=--cc --exe --trace --top-module $(VERILATOR_TOP)
+VERILATOR_TOCPP=/opt/verilator/bin/verilator $(VERILATOR_FLAGS) $(VERILATOR_SRC)
+VERILATOR_COMPILE=make -C obj_dir -f V$(VERILATOR_TOP).mk
 
 # Verilator obj_dir target
-obj_dir: $(VERILATOR_SRC)
+obj_dir: $(VERILATOR_V)
 	$(RM) -r obj_dir
-	$(DOCKER) run --rm -w /work -v .:/work $(VERILATOR_IMAGE) $(VERILATOR_CMD)
+	$(DOCKER) run --rm -w /work -v .:/work $(VERILATOR_IMAGE) $(VERILATOR_TOCPP)
+
+obj_dir/V$(VERILATOR_TOP): obj_dir $(VERILATOR_CPP)
+	$(DOCKER) run --rm -w /work -v .:/work $(VERILATOR_IMAGE) $(VERILATOR_COMPILE)
 
 clean:
 	$(RM) -r obj_dir

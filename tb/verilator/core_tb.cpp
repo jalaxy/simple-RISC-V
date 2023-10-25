@@ -1,25 +1,20 @@
 #include <cstdio>
 #include <verilated.h>
-#include <verilated_vcd_c.h>
-#include "Vcore.h"
+#include "Vcore_tb.h"
 int main()
 {
-    Vcore *dut = new Vcore;
-    Verilated::traceEverOn(true);
-    VerilatedVcdC *m_trace=new VerilatedVcdC;
-    dut->trace(m_trace, 5);
-    m_trace->open("waveform.vcd");
-    vluint64_t sim_time = 0;
-    dut->a = dut->b = 0;
-    while (sim_time < 20)
+    Vcore_tb *tb = new Vcore_tb;
+    tb->rst = 0, tb->eval();
+    tb->rst = 1, tb->clk = 0, tb->eval();
+    for (int i = 0; i < 8; i++)
+        tb->clk = !tb->clk, tb->eval();
+    tb->rst = 0, tb->eval();
+    for (int i = 0; i < 100; i++)
     {
-        dut->a++;
-        dut->b++;
-        dut->eval();
-        m_trace->dump(sim_time);
-        sim_time++;
+        printf("cycle %d:\n    pc: 0x%08x\n", i, tb->pc);
+        tb->clk = 0, tb->eval();
+        tb->clk = 1, tb->eval();
     }
-    m_trace->close();
-    delete dut;
+    delete tb;
     return 0;
 }
