@@ -165,8 +165,8 @@ module core(
         rd_addr_ma <= ena_ma ? rd_addr_ex : rd_addr_ma;
         r_ma       <= ena_ma ? r_ex : r_ma;
     end
-    assign dcache_r_ena = ena_ma;
-    assign dcache_w_ena = op_ex[`STORE];
+    assign dcache_r_ena = ena_ma & op_ex[`LOAD];
+    assign dcache_w_ena = ena_ma & op_ex[`STORE];
     assign dcache_addr = r_ex;
     assign dcache_ext = funct3_ex[2];
     assign dcache_width = funct3_ex[1:0];
