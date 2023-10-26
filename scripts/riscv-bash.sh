@@ -1,0 +1,1 @@
+docker run --rm -it -w /work -v .:/work docker.io/jxy324/riscv-toolchain:v0 /bin/bash
