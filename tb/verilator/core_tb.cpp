@@ -75,7 +75,7 @@ int main(int argc, char **argv)
         0x01c12403,
         0x02010113,
         0x0000006f,
-        0, 0, 0, 0, 0};
+        0x13, 0x13, 0x13, 0x13, 0x13};
     uint32_t rst_addr;
     for (int i = 0; i < sizeof(rst_code) / sizeof(uint32_t); i++)
         for (int j = 0; j < 4; j++)
@@ -123,6 +123,17 @@ int main(int argc, char **argv)
     // memset(show, 0xff, sizeof(show));
     for (int i = 0; i < 1024; i++)
     {
+        // print info
+        printf("cycle %d:\n    pc: 0x%08x\n", i, tb->pc);
+        for (int i = 0; i < 32; i++)
+            if (show[i])
+                printf("    x%d: 0x%08x\n", i, tb->gpr[i]);
+        for (int addr = 0x100100e4; addr < 0x100100f0; addr += 4)
+            printf("    %08x\n", BTOW(memory[addr + 0].data, memory[addr + 1].data,
+                                      memory[addr + 2].data, memory[addr + 3].data));
+        // negedge clock
+        tb->clk = 0, tb->eval();
+        // before posedge clock read signals
         uint32_t icache_data, dcache_data;
         if (memory.count(tb->icache_addr) && memory.count(tb->icache_addr + 1) &&
             memory.count(tb->icache_addr + 2) && memory.count(tb->icache_addr + 3))
@@ -137,24 +148,17 @@ int main(int argc, char **argv)
         else if (tb->dcache_r_ena)
             return printf("Invalid data addr: 0x%08x\n", tb->icache_addr), 0;
         tb->icache_valid = tb->dcache_valid = 1;
-        printf("cycle %d:\n    pc: 0x%08x    ir: 0x%08x\n", i, tb->pc, icache_data);
-        for (int i = 0; i < 32; i++)
-            if (show[i])
-                printf("    x%d: 0x%08x\n", i, tb->gpr[i]);
-        printf("    %08x    %08x    %08x\n",
-               BTOW(memory[0x100100e4].data, memory[0x100100e5].data, memory[0x100100e6].data, memory[0x100100e7].data),
-               BTOW(memory[0x100100e8].data, memory[0x100100e9].data, memory[0x100100ea].data, memory[0x100100eb].data),
-               BTOW(memory[0x100100ec].data, memory[0x100100ed].data, memory[0x100100ee].data, memory[0x100100ef].data));
-        tb->clk = 0, tb->eval();
+        printf("    dcache_addr: 0x%08x\n", tb->dcache_addr);
+        if (tb->dcache_w_ena)
+            for (int j = 0; j < 4; j++)
+                memory[tb->dcache_addr + j] = {.data = WTOB(tb->dcache_data_in, j), .rw = 1};
+        // posedge clock
         tb->clk = 1, tb->eval();
+        // after posedge clock set registers
         if (tb->icache_ena)
             tb->icache_data = icache_data;
         if (tb->dcache_r_ena)
             tb->dcache_data_out = dcache_data;
-        printf("    %d    0x%08x\n", tb->dcache_w_ena, tb->dcache_addr);
-        if (tb->dcache_w_ena)
-            for (int j = 0; j < 4; j++)
-                memory[tb->dcache_addr + j] = {.data = WTOB(tb->dcache_data_in, j), .rw = 1};
     }
 
     // Clean
