@@ -33,7 +33,8 @@ module core_tb(
         .dcache_addr(dcache_addr),
         .dcache_data_in(dcache_data_in));
     assign pc = core_inst.pc;
-    for (genvar igen = 0; igen < 32; igen = igen + 1) begin: gpreg_out
+    assign gpr[0] = 32'd0;
+    for (genvar igen = 1; igen < 32; igen = igen + 1) begin: gpreg_out
         assign gpr[igen] = core_inst.gpreg_inst.r[igen]; end
 endmodule
 
