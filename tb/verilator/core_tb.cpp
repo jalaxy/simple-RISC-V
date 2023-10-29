@@ -6,6 +6,7 @@
 #include "Vcore_tb.h"
 #define BTOW(b0, b1, b2, b3) (((uint8_t)(b0)) | (((uint8_t)(b1)) << 8) | (((uint8_t)(b2)) << 16) | (((uint8_t)(b3)) << 24))
 #define WTOB(x, i) ((uint8_t)(0xff & ((x) >> (8 * ((uint32_t)(i))))))
+#define NOP ((uint32_t)0x13u)
 typedef struct memrec
 {
     uint8_t data, rw; // R/W -> 1,  RO -> 0
@@ -34,51 +35,16 @@ int main(int argc, char **argv)
     // load and set data in memory
     std::map<uint64_t, memrec_t> memory;
     // start section: jump from reset address to ELF entry
-    // uint32_t rst_code[] = {
-    //     0x00000537, // lui a0, 0x00000
-    //     0x00050513, // addi a0, a0, 0x000
-    //     0, 0, 0, 0, 0,
-    //     0x00050067, // jalr zero, a0, 0
-    //     0, 0, 0, 0, 0};
-    // rst_code[0] |= elf_h.e_entry & 0xfffff000;
-    // rst_code[1] |= (elf_h.e_entry & 0x00000fff) << 20;
     uint32_t rst_code[] = {
-        0x10010137,
-        0x10010113,
-        0xfe010113,
-        0x00812e23,
-        0x02010413,
-        0xfe042623,
-        0x06400793,
-        0xfef42223,
-        0x00100793,
-        0xfef42423,
-        0x0380006f,
-        0xfe842783,
-        0x0017f793,
-        0x00079863,
-        0xfe842783,
-        0x00179793,
-        0x0080006f,
-        0xfe842783,
-        0xfec42703,
-        0x00f707b3,
-        0xfef42623,
-        0xfe842783,
-        0x00178793,
-        0xfef42423,
-        0xfe842703,
-        0xfe442783,
-        0xfce7d2e3,
-        0xfec42783,
-        0x00f00533,
-        0x01c12403,
-        0x02010113,
-        0x0000006f,
-        0x13, 0x13, 0x13, 0x13, 0x13};
-    uint32_t rst_addr;
+        0x00000537, // lui a0, 0x00000
+        0x00050513, // addi a0, a0, 0x000
+        NOP, NOP, NOP, NOP, NOP,
+        0x00050067, // jalr zero, a0, 0
+        NOP, NOP, NOP, NOP, NOP};
+    rst_code[0] |= elf_h.e_entry & 0xfffff000;
+    rst_code[1] |= (elf_h.e_entry & 0x00000fff) << 20;
     for (int i = 0; i < sizeof(rst_code) / sizeof(uint32_t); i++)
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = {.data = WTOB(rst_code[i], j), .rw = 0};
     // sections from ELF file
     Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
@@ -120,7 +86,7 @@ int main(int argc, char **argv)
         1, 0, 0, 0, 0, 0, 1, 1,
         0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0}; // may be implemented by command arguments
-    // memset(show, 0xff, sizeof(show));
+    memset(show, 0xff, sizeof(show));
     for (int i = 0; i < 4096; i++)
     {
         // print info
