@@ -1,3 +1,3 @@
-docker run -it -w /work --net=host -e DISPLAY \
+docker run --rm -it -w /work --net=host -e DISPLAY \
     -v .:/work -v /tmp/.X11-unix:/tmp/.X11-unix \
-    -v ~/.Xauthority:/root/.Xauthority ubuntu:22.04
+    -v ~/.Xauthority:/root/.Xauthority docker.io/jxy324/vivado:v0
