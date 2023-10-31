@@ -3,7 +3,7 @@ Simple Verilog HDL implementation of RISC-V.
 
 ## Behavior simulation
 
-### Prerequests
+### Prerequisites
 
 Running a behavior simulation requires docker environment.
 
