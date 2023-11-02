@@ -89,6 +89,15 @@ module core(
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
 
+    // General purpose registers and bypass control
+    reg [31:0] gpr [0:31];
+    always @(posedge clk) gpr[0] <= 32'd0;
+    for (genvar igen = 1; igen < 32; igen = igen + 1) begin : gpreg_set
+        always @(posedge clk)
+            gpr[igen[4:0]] <= ena_wb & rd_addr_ma == igen[4:0] ? rd_ma : gpr[igen[4:0]]; end
+    assign rs1_id = gpr[rs1_addr_id];
+    assign rs2_id = gpr[rs2_addr_id];
+
     // Instruction fetch
     assign icache_ena = ena_if;
     assign icache_addr = pc;
@@ -147,8 +156,8 @@ module core(
                  .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
                  .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
                          ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
-    muldiv muldiv_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .funct3(funct3_id),
-                       .valid(muldiv_valid_ex), .r(r_muldiv_ex));
+    // muldiv muldiv_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .funct3(funct3_id),
+    //                    .valid(muldiv_valid_ex), .r(r_muldiv_ex));
     assign r_ex = op_ex[`OP] & funct7_ex == 7'b0000001 ? r_muldiv_ex : r_alu_ex;
     assign flags_ex[2] = r_ex[31];
     assign flags_ex[0] = r_ex == 32'd0; // flags: carry, negative, (placeholder), zero
@@ -174,27 +183,6 @@ module core(
     assign dcache_valid_ma = dcache_valid;
     assign d_out_ma = dcache_data_out;
     assign rd_ma = op_ma[`LOAD] ? d_out_ma : (op_ma[`LUI] ? imm_ma : r_ma);
-
-    // Write back
-    gpreg gpreg_inst(.clk(clk), .ena(ena_wb), .rs1_addr(rs1_addr_id), .rs2_addr(rs2_addr_id),
-                     .rd_addr(rd_addr_ma), .rd(rd_ma), .rs1(rs1_id), .rs2(rs2_id));
-endmodule
-
-module gpreg(
-    input clk,
-    input ena,
-    input [4:0] rs1_addr,
-    input [4:0] rs2_addr,
-    input [4:0] rd_addr,
-    input [31:0] rd,
-    output [31:0] rs1,
-    output [31:0] rs2
-);
-    reg [31:0] r[0:31];
-    assign rs1 = rs1_addr == 5'd0 ? 32'd0 : r[rs1_addr];
-    assign rs2 = rs2_addr == 5'd0 ? 32'd0 : r[rs2_addr];
-    always @(posedge clk)
-        r[rd_addr] <= ena ? rd : r[rd_addr];
 endmodule
 
 module alu(
@@ -273,18 +261,23 @@ module queue #(
     input [LENGTH:0] rear,
     output [LENGTH:0] front
 );
+    // structure:
+    //          |  valid region   |
+    // no.    0 | 1   2   ...   S | S+1
+    // ena    1 | x   x   ...   x | 0
     reg [LENGTH-1:0] buf_data [0:SIZE+1];
     reg              buf_ena  [0:SIZE+1];
+    wire ins [1:SIZE]; // whether needs external data insertion
     assign empty = buf_ena[1];
-    assign full = buf_ena[SIZE];
+    assign full  = buf_ena[SIZE];
+    assign front = buf_data[1];
     always @(posedge clk) buf_ena[0] <= 1'b1;
     always @(posedge clk) buf_ena[SIZE + 1] <= 1'b0;
     for (genvar igen = 1; igen <= SIZE; igen = igen + 1) begin : buffer_transfer
+        assign ins[igen] = push & (pop & buf_ena[igen] & ~buf_ena[igen + 1] | // push and pop
+                                  ~pop & buf_ena[igen - 1] & ~buf_ena[igen]); // push and not pop
         always @(posedge clk) begin
-            buf_ena[igen]  <= rst ? 1'b0 :
-                (push & (pop & buf_ena[igen] & ~buf_ena[igen + 1] |
-                        ~pop & buf_ena[igen - 1] & ~buf_ena[igen]) ? 1'b1 :
-                (pop ? buf_ena[igen + 1] : buf_ena[igen]));
-            buf_data[igen] <= buf_data[igen];
+            buf_ena[igen]  <= rst ? 1'b0 : (ins[igen] ? 1'b1 : (pop ? buf_ena[igen + 1] : buf_ena[igen]));
+            buf_data[igen] <= ins[igen] ? rear : (pop ? buf_data[igen + 1] : buf_data[igen]);
         end end
 endmodule

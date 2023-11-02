@@ -35,5 +35,5 @@ module core_tb();
     integer i;
     always @(*)
         for (i = 1; i <= `N; i = i + 1)
-            r[i] = inst.core_inst.gpreg_inst.r[i];
+            r[i] = inst.core_inst.gpr[i];
 endmodule

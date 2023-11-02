@@ -35,7 +35,7 @@ module core_tb(
     assign pc = core_inst.pc;
     assign gpr[0] = 32'd0;
     for (genvar igen = 1; igen < 32; igen = igen + 1) begin: gpreg_out
-        assign gpr[igen] = core_inst.gpreg_inst.r[igen]; end
+        assign gpr[igen] = core_inst.gpr[igen]; end
 endmodule
 
 module mul(

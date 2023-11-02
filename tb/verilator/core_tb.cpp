@@ -35,14 +35,48 @@ int main(int argc, char **argv)
     // load and set data in memory
     std::map<uint64_t, memrec_t> memory;
     // start section: jump from reset address to ELF entry
+    // uint32_t rst_code[] = {
+    //     0x00000537, // lui a0, 0x00000
+    //     0x00050513, // addi a0, a0, 0x000
+    //     NOP, NOP, NOP, NOP, NOP,
+    //     0x00050067, // jalr zero, a0, 0
+    //     NOP, NOP, NOP, NOP, NOP};
+    // rst_code[0] |= elf_h.e_entry & 0xfffff000;
+    // rst_code[1] |= (elf_h.e_entry & 0x00000fff) << 20;
     uint32_t rst_code[] = {
-        0x00000537, // lui a0, 0x00000
-        0x00050513, // addi a0, a0, 0x000
-        NOP, NOP, NOP, NOP, NOP,
-        0x00050067, // jalr zero, a0, 0
-        NOP, NOP, NOP, NOP, NOP};
-    rst_code[0] |= elf_h.e_entry & 0xfffff000;
-    rst_code[1] |= (elf_h.e_entry & 0x00000fff) << 20;
+        0x10010137,
+        0x10010113,
+        0xfe010113,
+        0x00812e23,
+        0x02010413,
+        0xfe042623,
+        0x06400793,
+        0xfef42223,
+        0x00100793,
+        0xfef42423,
+        0x0380006f,
+        0xfe842783,
+        0x0017f793,
+        0x00079863,
+        0xfe842783,
+        0x00179793,
+        0x0080006f,
+        0xfe842783,
+        0xfec42703,
+        0x00f707b3,
+        0xfef42623,
+        0xfe842783,
+        0x00178793,
+        0xfef42423,
+        0xfe842703,
+        0xfe442783,
+        0xfce7d2e3,
+        0xfec42783,
+        0x00f00533,
+        0x01c12403,
+        0x02010113,
+        0x0000006f,
+        0x13, 0x13, 0x13, 0x13, 0x13};
     for (int i = 0; i < sizeof(rst_code) / sizeof(uint32_t); i++)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = {.data = WTOB(rst_code[i], j), .rw = 0};
