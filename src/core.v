@@ -62,12 +62,15 @@ module core(
     // Pipeline start control
     reg start_if, start_id, start_ex, start_ma; // each stage has been started
     always @(posedge clk) begin // Jump can be implemented by start control as program restart from new PC
-        start_if <= rst | ~stall_id & (start_ex & op_ex[`BRANCH] & b_suc_ex |
-                                             start_id & op_id[`JALR] |
-                                             start_if & op_if[`JAL]) ? 1'b0 : 1'b1;
-        start_id <= rst | ~stall_id & (start_ex & op_ex[`BRANCH] & b_suc_ex |
-                                             start_id & op_id[`JALR]) ? 1'b0 : start_if;
-        start_ex <= rst | ~stall_id & start_ex & op_ex[`BRANCH] & b_suc_ex ? 1'b0 : start_id;
+        start_if <= rst ? 1'b0 : (ena_if ?
+            (start_ex & op_ex[`BRANCH] & b_suc_ex |
+             start_id & op_id[`JALR] |
+             start_if & op_if[`JAL] ? 1'b0 : 1'b1) : start_if);
+        start_id <= rst ? 1'b0 : (ena_id ?
+            (start_ex & op_ex[`BRANCH] & b_suc_ex |
+             start_id & op_id[`JALR] ? 1'b0 : start_if) : start_id);
+        start_ex <= rst ? 1'b0 : (ena_ex ?
+            (start_ex & op_ex[`BRANCH] & b_suc_ex ? 1'b0 : start_id) : start_ex);
         start_ma <= rst ? 1'b0 : start_ex;
     end
 
@@ -79,9 +82,6 @@ module core(
         pc <= rst ? 32'h00400000 : (ena_pc ? npc : pc);
 
     // Enable control
-    assign stall_id = start_id &
-        ((~(op_id[`AUIPC] | op_id[`JAL]) & ~gpr_valid[rs1_addr_id]) |
-         ( (op_id[`BRANCH] | op_id[`OP]) & ~gpr_valid[rs2_addr_id]));
     // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
     assign ena_pc = ~stall_id;
     assign ena_if = ~stall_id;
@@ -141,6 +141,24 @@ module core(
     end
     assign a_id = op_id[`AUIPC] | op_id[`JAL] | op_id[`JALR] ? pc_id : rs1_byp_id;
     assign b_id = op_id[`BRANCH] | op_id[`OP] ? rs2_byp_id : (op_id[`JAL] | op_id[`JALR] ? 32'd4 : imm_id);
+    // FIFO for stalling
+    // pc(31:0) op(63:32) imm(95:64) funct3(98:96) funct7(105:99) rs1_addr(110:106) rs2_addr(115:111) rd_addr(120:116)
+    assign stall_id = start_id &
+        ((~(op_id[`AUIPC] | op_id[`JAL]) & ~gpr_valid[rs1_addr_id]) |
+         ( (op_id[`BRANCH] | op_id[`OP]) & ~gpr_valid[rs2_addr_id]));
+    wire [31:0] pc_queue_id, op_queue_id, imm_queue_id;
+    wire [2:0] funct3_queue_id;
+    wire [6:0] funct7_queue_id;
+    wire [4:0] rs1_addr_queue_id, rs2_addr_queue_id, rd_addr_queue_id;
+    wire queue_full_id, queue_empty_id, queue_pop_id, queue_push_id;
+    assign queue_push_id = stall_id;
+    assign queue_pop_id = gpr_valid[rs1_addr_queue_id];
+    queue #(.LENGTH(121), .SIZE(4)) queue_id_stall_inst(
+        .clk(clk), .rst(rst), .pop(queue_pop_id), .push(queue_push_id),
+        .empty(queue_empty_id), .full(queue_full_id),
+        .rear({pc_id, op_id, imm_id, funct3_id, funct7_id, rs1_addr_id, rs2_addr_id, rd_addr_id}),
+        .front({pc_queue_id, op_queue_id, imm_queue_id, funct3_queue_id, funct7_queue_id,
+                rs1_addr_queue_id, rs2_addr_queue_id, rd_addr_queue_id}));
 
     // Execution
     always @(posedge clk) begin
@@ -276,8 +294,8 @@ module queue #(
     input push,
     output empty,
     output full,
-    input [LENGTH:0] rear,
-    output [LENGTH:0] front
+    input [LENGTH-1:0] rear,
+    output [LENGTH-1:0] front
 );
     // structure:
     //          |  valid region   |
