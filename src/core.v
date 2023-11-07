@@ -29,6 +29,13 @@ module core(
     wire [31:0] npc;
     wire [31:0] gpr_valid;
 
+    // Stalling FIFO wires
+    wire [31:0] pc_q_id, op_q_id, imm_q_id; // ID stage queuing signals
+    wire [2:0] funct3_q_id;
+    wire [6:0] funct7_q_id;
+    wire [4:0] rs1_addr_q_id, rs2_addr_q_id, rd_addr_q_id;
+    wire q_full_id, q_empty_id, q_pop_id, q_push_id;
+
     // pipeline wires and registers
     wire        icache_valid_if;
     wire [6:0]  opcode_if;
@@ -42,7 +49,6 @@ module core(
     wire [31:0] op_if;          reg  [31:0] op_id;          reg  [31:0] op_ex;           reg  [31:0] op_ma;
     wire [31:0] imm_if;         reg  [31:0] imm_id;         reg  [31:0] imm_ex;          reg  [31:0] imm_ma;
     wire [4:0]  rd_addr_if;     reg  [4:0]  rd_addr_id;     reg  [4:0]  rd_addr_ex;      reg  [4:0]  rd_addr_ma;
-                                wire        stall_id;
                                 wire [31:0] a_id;
                                 wire [31:0] b_id;
                                 wire [31:0] rs1_id;
@@ -83,10 +89,10 @@ module core(
 
     // Enable control
     // EX/MA/WB is enabled only when IF/EX/MA been started (IF/EX/MA registers are ready)
-    assign ena_pc = ~stall_id;
-    assign ena_if = ~stall_id;
-    assign ena_id = ~stall_id & start_if;
-    assign ena_ex = ~stall_id & start_id;
+    assign ena_pc = ~q_push_id;
+    assign ena_if = ~q_push_id;
+    assign ena_id = ~q_push_id & start_if;
+    assign ena_ex = ~q_push_id & start_id;
     assign ena_ma = start_ex;
     assign ena_wb = start_ma;
 
@@ -104,6 +110,17 @@ module core(
     assign gpr_valid[0] = 1'b1;
     for (genvar igen = 1; igen < 32; igen = igen + 1) begin : gpreg_valid
         assign gpr_valid[igen[4:0]] = ~(start_ex & rd_addr_ex == igen[4:0] & op_ex[`LOAD]); end
+
+    // Stalling control
+    // pc(31:0) op(63:32) imm(95:64) funct3(98:96) funct7(105:99) rs1_addr(110:106) rs2_addr(115:111) rd_addr(120:116)
+    assign q_push_id = start_id & ((~(op_id[`AUIPC] | op_id[`JAL]) & ~gpr_valid[rs1_addr_id]) |
+                                   ( (op_id[`BRANCH] | op_id[`OP]) & ~gpr_valid[rs2_addr_id]));
+    assign q_pop_id = gpr_valid[rs1_addr_q_id];
+    queue #(.LENGTH(121), .SIZE(4)) queue_id_stall_inst(
+        .clk(clk), .rst(rst), .pop(q_pop_id), .push(q_push_id), .empty(q_empty_id), .full(q_full_id),
+        .rear({ pc_id,   op_id,   imm_id,   funct3_id,   funct7_id,   rs1_addr_id,   rs2_addr_id,   rd_addr_id}),
+        .front({pc_q_id, op_q_id, imm_q_id, funct3_q_id, funct7_q_id, rs1_addr_q_id, rs2_addr_q_id, rd_addr_q_id}));
+
 
     // Instruction fetch
     assign icache_ena = ena_if;
@@ -141,24 +158,6 @@ module core(
     end
     assign a_id = op_id[`AUIPC] | op_id[`JAL] | op_id[`JALR] ? pc_id : rs1_byp_id;
     assign b_id = op_id[`BRANCH] | op_id[`OP] ? rs2_byp_id : (op_id[`JAL] | op_id[`JALR] ? 32'd4 : imm_id);
-    // FIFO for stalling
-    // pc(31:0) op(63:32) imm(95:64) funct3(98:96) funct7(105:99) rs1_addr(110:106) rs2_addr(115:111) rd_addr(120:116)
-    assign stall_id = start_id &
-        ((~(op_id[`AUIPC] | op_id[`JAL]) & ~gpr_valid[rs1_addr_id]) |
-         ( (op_id[`BRANCH] | op_id[`OP]) & ~gpr_valid[rs2_addr_id]));
-    wire [31:0] pc_queue_id, op_queue_id, imm_queue_id;
-    wire [2:0] funct3_queue_id;
-    wire [6:0] funct7_queue_id;
-    wire [4:0] rs1_addr_queue_id, rs2_addr_queue_id, rd_addr_queue_id;
-    wire queue_full_id, queue_empty_id, queue_pop_id, queue_push_id;
-    assign queue_push_id = stall_id;
-    assign queue_pop_id = gpr_valid[rs1_addr_queue_id];
-    queue #(.LENGTH(121), .SIZE(4)) queue_id_stall_inst(
-        .clk(clk), .rst(rst), .pop(queue_pop_id), .push(queue_push_id),
-        .empty(queue_empty_id), .full(queue_full_id),
-        .rear({pc_id, op_id, imm_id, funct3_id, funct7_id, rs1_addr_id, rs2_addr_id, rd_addr_id}),
-        .front({pc_queue_id, op_queue_id, imm_queue_id, funct3_queue_id, funct7_queue_id,
-                rs1_addr_queue_id, rs2_addr_queue_id, rd_addr_queue_id}));
 
     // Execution
     always @(posedge clk) begin
@@ -169,7 +168,7 @@ module core(
         imm_ex      <= ena_ex ? imm_id : imm_ex;
         rs2_ex      <= ena_ex ? rs2_id : rs2_ex;
         rs2_addr_ex <= ena_ex ? rs2_addr_id : rs2_addr_ex;
-        rd_addr_ex  <= stall_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
+        rd_addr_ex  <= q_push_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_ex); // NOP when stall
     end
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_alu_ex), .c(flags_ex[3]), 
                  .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
@@ -304,7 +303,7 @@ module queue #(
     reg [LENGTH-1:0] buf_data [0:SIZE+1];
     reg              buf_ena  [0:SIZE+1];
     wire ins [1:SIZE]; // whether needs external data insertion
-    assign empty = buf_ena[1];
+    assign empty = ~buf_ena[1];
     assign full  = buf_ena[SIZE];
     assign front = buf_data[1];
     always @(posedge clk) buf_ena[0] <= 1'b1;
