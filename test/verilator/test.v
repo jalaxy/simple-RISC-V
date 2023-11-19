@@ -1,4 +1,4 @@
-module core_tb(
+module test(
     input clk,
     input rst,
     output [31:0] pc,

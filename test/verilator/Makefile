@@ -1,4 +1,4 @@
-.PHONY: verilator
+.PHONY: all
 
 clean:
 	$(RM) -r obj_dir
@@ -8,13 +8,13 @@ clean:
 # Execute in docker.io/jxy324/verilator:v0
 
 # Verilator variables
-VERILATOR_V=src/core.v tb/verilator/core_tb.v
-VERILATOR_CPP=tb/verilator/core_tb.cpp
+VERILATOR_V=../../src/core.v test.v
+VERILATOR_CPP=test.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
-VERILATOR_TOP=core_tb
+VERILATOR_TOP=test
 VERILATOR_FLAGS=--cc --exe --trace --top-module $(VERILATOR_TOP)
 
-verilator: obj_dir/V$(VERILATOR_TOP)
+all: obj_dir/V$(VERILATOR_TOP)
 
 # Verilator bin target
 obj_dir/V$(VERILATOR_TOP): obj_dir $(VERILATOR_CPP)
