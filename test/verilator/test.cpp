@@ -2,6 +2,7 @@
 #include <map>
 #include <algorithm>
 #include <verilated.h>
+#include <verilated_vcd_c.h>
 #include "elf.h"
 #include "Vtest.h"
 #define BTOW(b0, b1, b2, b3) (((uint8_t)(b0)) | (((uint8_t)(b1)) << 8) | (((uint8_t)(b2)) << 16) | (((uint8_t)(b3)) << 24))
@@ -43,40 +44,13 @@ int main(int argc, char **argv)
     //     NOP, NOP, NOP, NOP, NOP};
     // rst_code[0] |= elf_h.e_entry & 0xfffff000;
     // rst_code[1] |= (elf_h.e_entry & 0x00000fff) << 20;
-    uint32_t rst_code[] = {
-        0x10010137,
-        0x10010113,
-        0xfe010113,
-        0x00812e23,
-        0x02010413,
-        0xfe042623,
-        0x06400793,
-        0xfef42223,
-        0x00100793,
-        0xfef42423,
-        0x0380006f,
-        0xfe842783,
-        0x0017f793,
-        0x00079863,
-        0xfe842783,
-        0x00179793,
-        0x0080006f,
-        0xfe842783,
-        0xfec42703,
-        0x00f707b3,
-        0xfef42623,
-        0xfe842783,
-        0x00178793,
-        0xfef42423,
-        0xfe842703,
-        0xfe442783,
-        0xfce7d2e3,
-        0xfec42783,
-        0x00f00533,
-        0x01c12403,
-        0x02010113,
-        0x0000006f,
-        0x13, 0x13, 0x13, 0x13, 0x13};
+    uint32_t rst_code[1024];
+    for (int i = 0; i < 1024; i++)
+        rst_code[i] = NOP;
+    FILE *fp_dump = fopen("test.dump", "r");
+    int i_dump = 0;
+    while (fscanf(fp_dump, "%x", &rst_code[i_dump++]) != EOF)
+        ;
     for (int i = 0; i < sizeof(rst_code) / sizeof(uint32_t); i++)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = {.data = WTOB(rst_code[i], j), .rw = 0};
@@ -110,11 +84,16 @@ int main(int argc, char **argv)
     Vtest *dut = new (std::nothrow) Vtest;
     if (!dut)
         return printf("Memory allocation error.\n"), 0;
-    dut->rst = 0, dut->eval();
-    dut->rst = 1, dut->clk = 0, dut->eval();
+    Verilated::traceEverOn(true); // trace waveform
+    VerilatedVcdC *trace = new VerilatedVcdC;
+    dut->trace(trace, 5);
+    trace->open("waveform.vcd");
+    int st = 0; // simulation time
+    dut->rst = 0, dut->eval(), trace->dump(st++);
+    dut->rst = 1, dut->clk = 0, dut->eval(), trace->dump(st++);
     for (int i = 0; i < 8; i++)
-        dut->clk = !dut->clk, dut->eval();
-    dut->rst = 0, dut->eval();
+        dut->clk = !dut->clk, dut->eval(), trace->dump(st++);
+    dut->rst = 0, dut->eval(), trace->dump(st++);
     unsigned char show[] = {
         0, 0, 1, 0, 0, 0, 0, 0,
         1, 0, 0, 0, 0, 0, 1, 1,
@@ -151,16 +130,18 @@ int main(int argc, char **argv)
             for (int j = 0; j < 4; j++)
                 memory[dut->dcache_addr + j] = {.data = WTOB(dut->dcache_data_in, j), .rw = 1};
         // posedge clock
-        dut->clk = 1, dut->eval();
+        dut->clk = 1, dut->eval(), trace->dump(st++);
         // after posedge clock set registers
         dut->icache_valid = dut->dcache_valid = 1;
         dut->icache_data = icache_data;
         dut->dcache_data_out = dcache_data;
         // negedge clock
-        dut->clk = 0, dut->eval();
+        dut->clk = 0, dut->eval(), trace->dump(st++);
     }
 
     // Clean
     delete dut;
+    trace->close();
+    delete trace;
     return 0;
 }
