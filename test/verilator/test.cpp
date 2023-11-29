@@ -174,14 +174,20 @@ int main(int argc, char **argv)
             icache_data = BTOW(memory[dut->icache_addr + 0].data, memory[dut->icache_addr + 1].data,
                                memory[dut->icache_addr + 2].data, memory[dut->icache_addr + 3].data);
         else if (dut->icache_ena)
-            return printf("Invalid instruction addr: 0x%08x\n", dut->icache_addr), 0;
+        {
+            printf("Invalid instruction addr: 0x%08x\n", dut->icache_addr);
+            break;
+        }
         if (dut->dcache_r_ena &&
             memory.count(dut->dcache_addr + 0) && memory.count(dut->dcache_addr + 1) &&
             memory.count(dut->dcache_addr + 2) && memory.count(dut->dcache_addr + 3))
             dcache_data = BTOW(memory[dut->dcache_addr + 0].data, memory[dut->dcache_addr + 1].data,
                                memory[dut->dcache_addr + 2].data, memory[dut->dcache_addr + 3].data);
         else if (dut->dcache_r_ena)
-            return printf("Invalid data addr: 0x%08x\n", dut->dcache_addr), 0;
+        {
+            printf("Invalid data addr: 0x%08x\n", dut->dcache_addr);
+            break;
+        }
         if (dut->dcache_w_ena)
             for (int j = 0; j < 4; j++)
                 memory[dut->dcache_addr + j] = {.data = WTOB(dut->dcache_data_in, j), .rw = 1};
