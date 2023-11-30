@@ -48,6 +48,12 @@ module core(
     wire [4:0] rs2_addr_q_ex, rs2_addr_ex, rd_addr_q_ex, rd_addr_ex;
     wire q_full_ex, q_empty_ex, q_pop_ex, q_push_ex, q_stall_ex;
 
+    // Multiplier and divider wires
+    wire q_mul_empty, q_mul_full, q_mul_push, q_mul_pop;
+    wire [31:0] q_mul_front, q_mul_rear;
+    wire q_div_empty, q_div_full, q_div_push, q_div_pop;
+    wire [31:0] q_div_front, q_div_rear;
+
     // pipeline wires and registers
     wire        icache_valid_if;
     wire [6:0]  opcode_if;
@@ -70,10 +76,6 @@ module core(
                                                             wire [3:0]  flags_ex;
                                                             wire        b_suc_ex;
                                                             wire [31:0] r_alu_ex;
-                                                            wire [31:0] r_mul_ex;
-                                                            wire [31:0] r_div_ex;
-                                                            wire        mul_valid_ex;
-                                                            wire        div_valid_ex;
                                                             wire [31:0] rd_ex;         wire [31:0] rd_ma;
                                                             wire [31:0] r_ex;          reg  [31:0] r_ma;
                                                             wire [31:0] d_out_ex;      wire [31:0] d_out_ma;
@@ -131,7 +133,7 @@ module core(
     assign q_push_id = ena_ex & ((~(op_r_id[`AUIPC] | op_r_id[`JAL]) & ~gpr_valid[rs1_addr_r_id]) |
                                  ( (op_r_id[`BRANCH] | op_r_id[`OP]) & ~gpr_valid[rs2_addr_r_id]));
     assign q_pop_id = ~q_empty_id & gpr_valid[rs1_addr_q_id];
-    assign q_stall_id = q_push_id & q_full_id | q_pop_id & ~op_id[`JALR];
+    assign q_stall_id = q_push_id & ~q_pop_id & q_full_id | ~q_push_id & q_pop_id & ~op_id[`JALR];
     queue #(.LENGTH(121), .SIZE(4)) queue_id_stall_inst(
         .clk(clk), .rst(rst), .pop(q_pop_id), .push(q_push_id), .empty(q_empty_id), .full(q_full_id),
         .rear({ pc_r_id, op_r_id, imm_r_id, funct3_r_id, funct7_r_id, rs1_addr_r_id, rs2_addr_r_id, rd_addr_r_id}),
@@ -140,10 +142,9 @@ module core(
         {pc_q_id, op_q_id, imm_q_id, funct3_q_id, funct7_q_id, rs1_addr_q_id, rs2_addr_q_id, rd_addr_q_id} :
         {pc_r_id, op_r_id, imm_r_id, funct3_r_id, funct7_r_id, rs1_addr_r_id, rs2_addr_r_id, rd_addr_r_id};
     // EX stage
-    assign q_push_ex = ena_ma & (op_r_ex[`OP] & funct7_r_ex == 7'b0000001 &
-        (funct3_r_ex[1] & ~div_valid_ex | ~funct3_r_ex[1] & ~mul_valid_ex));
-    assign q_pop_ex = ~q_empty_ex & op_q_ex[`OP] & funct7_q_ex == 7'b0000001 & mul_valid_ex;
-    assign q_stall_ex = q_push_ex & q_full_ex | q_pop_ex;
+    assign q_push_ex = ena_ma & (op_r_ex[`OP] & funct7_r_ex == 7'b0000001);
+    assign q_pop_ex = q_mul_pop;
+    assign q_stall_ex = q_push_ex & ~q_pop_ex & q_full_ex | ~q_push_ex & q_pop_ex;
     queue #(.LENGTH(148), .SIZE(4)) queue_ex_stall_inst(
         .clk(clk), .rst(rst), .pop(q_pop_ex), .push(q_push_ex), .empty(q_empty_ex), .full(q_full_ex),
         .rear({ pc_r_ex, op_r_ex, imm_r_ex, funct3_r_ex, funct7_r_ex, rs2_addr_r_ex, rd_addr_r_ex, rs2_r_ex}),
@@ -151,6 +152,16 @@ module core(
     assign {pc_ex, op_ex, imm_ex, funct3_ex, funct7_ex, rs2_addr_ex, rd_addr_ex, rs2_ex} = q_pop_ex ?
         {pc_q_ex, op_q_ex, imm_q_ex, funct3_q_ex, funct7_q_ex, rs2_addr_q_ex, rd_addr_q_ex, rs2_q_ex} :
         {pc_r_ex, op_r_ex, imm_r_ex, funct3_r_ex, funct7_r_ex, rs2_addr_r_ex, rd_addr_r_ex, rs2_r_ex};
+
+    // Multiplier and divider
+    assign q_mul_pop = ~q_mul_empty & op_q_ex[`OP] & funct7_q_ex == 7'b0000001;
+    mul mul_inst(.clk(clk), .ena(ena_ex & op_id[`OP] & funct7_id == 7'b0000001 & ~funct3_id[2]),
+                 .a(a_id), .b(b_id), .funct3(funct3_id), .valid(q_mul_push), .r(q_mul_rear));
+    queue #(.LENGTH(32), .SIZE(8)) queue_mul_inst(
+            .clk(clk), .rst(rst), .pop(q_mul_pop), .push(q_mul_push),
+            .empty(q_mul_empty), .full(q_mul_full), .rear(q_mul_rear), .front(q_mul_front));
+    div div_inst(.clk(clk), .ena(ena_ex & op_id[`OP] & funct7_id == 7'b0000001 & funct3_id[2]),
+                 .a(a_id), .b(b_id), .funct3(funct3_id), .valid(q_div_push), .r(q_div_rear));
 
     // Instruction fetch
     assign icache_ena = ena_if;
@@ -198,17 +209,13 @@ module core(
         imm_r_ex      <= ena_ex ? imm_id : imm_r_ex;
         rs2_r_ex      <= ena_ex ? rs2_id : rs2_r_ex;
         rs2_addr_r_ex <= ena_ex ? rs2_addr_id : rs2_addr_r_ex;
-        rd_addr_r_ex  <= q_push_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_r_ex); // NOP when stall
+        rd_addr_r_ex  <= q_push_id & ~q_pop_id ? 5'd0 : (ena_ex ? rd_addr_id : rd_addr_r_ex); // NOP when stall
     end
     alu alu_inst(.clk(clk), .ena(ena_ex), .a(a_id), .b(b_id), .r(r_alu_ex), .c(flags_ex[3]), 
                  .funct3(op_id[`OP] | op_id[`OP_IMM] ? funct3_id : 3'b000),
                  .funct7(op_id[`OP] | op_id[`OP_IMM] & funct3_id == 3'b101 // SRL/SRA (special I-type)
                          ? funct7_id : (op_id[`BRANCH] ? 7'b0100000 : 7'b0000000)));
-    mul mul_inst(.clk(clk), .ena(ena_ex & op_id[`OP] & funct7_id == 7'b0000001 & ~funct3_id[1]),
-                 .a(a_id), .b(b_id), .funct3(funct3_id), .valid(mul_valid_ex), .r(r_mul_ex));
-    div div_inst(.clk(clk), .ena(ena_ex & op_id[`OP] & funct7_id == 7'b0000001 & funct3_id[1]),
-                 .a(a_id), .b(b_id), .funct3(funct3_id), .valid(div_valid_ex), .r(r_div_ex));
-    assign r_ex = op_ex[`OP] & funct7_ex == 7'b0000001 ? (funct3_ex[1] ? r_div_ex : r_mul_ex) : r_alu_ex;
+    assign r_ex = op_ex[`OP] & funct7_ex == 7'b0000001 ? (funct3_ex[2] ? q_div_front : q_mul_front) : r_alu_ex;
     assign flags_ex[2] = r_ex[31];
     assign flags_ex[0] = r_ex == 32'd0; // flags: carry, negative, (placeholder), zero
     assign b_suc_ex = flags_ex[funct3_ex[2:1]] == ~funct3_ex[0];
@@ -218,7 +225,7 @@ module core(
     always @(posedge clk) begin
         op_ma      <= ena_ma ? op_ex : op_ma;
         imm_ma     <= ena_ma ? imm_ex : imm_ma;
-        rd_addr_ma <= q_push_ex ? 5'd0 : (ena_ma ? rd_addr_ex : rd_addr_ma); // NOP when stall
+        rd_addr_ma <= q_push_ex & ~q_pop_ex ? 5'd0 : (ena_ma ? rd_addr_ex : rd_addr_ma); // NOP when stall
         r_ma       <= ena_ma ? r_ex : r_ma;
     end
     assign dcache_r_ena = ena_ma & op_ex[`LOAD];
@@ -286,13 +293,12 @@ module mul(
     output [31:0] r
 );
     wire [31:0] a_abs, b_abs;
-    wire [31:0] h_abs, l_abs;
     assign a_abs = (funct3[1] ^ funct3[0]) & a[31] ? -a : a;
     assign b_abs = (funct3 == 3'b001) & b[31] ? -b : b;
 
     // unsigned r = a * b and unsigned r = a / b
     // valid and ena are correspondent
-    wire [63:0] r_abs;
+    wire [63:0] r_abs, r_neg;
     assign r_abs = ((b_abs[0] ? {32'b0, a_abs} : 64'b0) +
                     (b_abs[1] ? {31'b0, a_abs, 1'b0} : 64'b0) +
                     (b_abs[2] ? {30'b0, a_abs, 2'b0} : 64'b0) +
@@ -325,13 +331,12 @@ module mul(
                     (b_abs[29] ? {3'b0, a_abs, 29'b0} : 64'b0) +
                     (b_abs[30] ? {2'b0, a_abs, 30'b0} : 64'b0) +
                     (b_abs[31] ? {1'b0, a_abs, 31'b0} : 64'b0));
-    assign h_abs = r_abs[63:32];
-    assign l_abs = r_abs[31:0];
+    assign r_neg = -r_abs;
     wire [31:0] r_arr[0:3];
-    assign r_arr[0] = l_abs;
-    assign r_arr[1] = a[31] ^ b[31] ? -h_abs : h_abs;
-    assign r_arr[2] = a[31] ? -{h_abs, r_abs}[63:32] : h_abs;
-    assign r_arr[3] = h_abs;
+    assign r_arr[0] = r_abs[31:0];
+    assign r_arr[1] = a[31] ^ b[31] ? r_neg[63:32] : r_abs[63:32];
+    assign r_arr[2] = a[31] ? r_neg[63:32] : r_abs[63:32];
+    assign r_arr[3] = r_abs[63:32];
 
     reg [31:0] r_reg[1:5];
     reg done[1:5];
