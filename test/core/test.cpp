@@ -6,20 +6,23 @@
 #include <elf.h>
 #include "Vtest.h"
 
-#define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                     \
-    ((((uint8_t)(b0)) << (uint64_t)0x00) | (((uint8_t)(b1)) << (uint64_t)0x08) | \
-     (((uint8_t)(b2)) << (uint64_t)0x10) | (((uint8_t)(b3)) << (uint64_t)0x18) | \
-     (((uint8_t)(b4)) << (uint64_t)0x10) | (((uint8_t)(b5)) << (uint64_t)0x18) | \
-     (((uint8_t)(b6)) << (uint64_t)0x10) | (((uint8_t)(b7)) << (uint64_t)0x18))
-#define DTOB(x, i) ((uint8_t)(0xff & ((x) >> (8 * ((uint64_t)(i))))))
+#define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                                         \
+    ((((uint64_t)(uint8_t)(b0)) << (uint64_t)0x00) | (((uint64_t)(uint8_t)(b1)) << (uint64_t)0x08) | \
+     (((uint64_t)(uint8_t)(b2)) << (uint64_t)0x10) | (((uint64_t)(uint8_t)(b3)) << (uint64_t)0x18) | \
+     (((uint64_t)(uint8_t)(b4)) << (uint64_t)0x20) | (((uint64_t)(uint8_t)(b5)) << (uint64_t)0x28) | \
+     (((uint64_t)(uint8_t)(b6)) << (uint64_t)0x30) | (((uint64_t)(uint8_t)(b7)) << (uint64_t)0x38))
+#define DTOB(x, i) ((uint8_t)((x) >> (8 * (uint64_t)(i))))
 #define BTOW(b0, b1, b2, b3) ((uint32_t)BTOD(b0, b1, b2, b3, 0, 0, 0, 0))
+#define WLE(pb, addr) (BTOW((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3]))
+#define DLE(pb, addr) (BTOD((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3], \
+                            (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
 #define NOP ((uint64_t)0x13)
 
 typedef struct struct_cmd
 {
     const char *filename = 0;
     std::vector<const char *> args;
-    uint8_t filetype = 0, showpc = 0, vcd = 1;
+    uint8_t help = 0, filetype = 0, showpc = 0, vcd = 1;
     uint32_t showreg = 0;
     int simtime = INT32_MAX;
 } cmd_t;
@@ -87,13 +90,27 @@ int main(int argc, char **argv)
                 if (all)
                     cmd.showreg = -1;
             }
+            else if (strcmp(argv[i] + j, "h") == 0)
+                cmd.help = 1;
         }
         else if (cmd.filename == NULL)
             cmd.filename = argv[i];
         else
             cmd.args.push_back(argv[i]);
     if (cmd.filename == NULL)
-        return printf("Not enough arguments.\n"), 0;
+        printf("Not enough arguments.\n"), cmd.help = 1;
+    if (cmd.help)
+    {
+        printf("Usage: exec [options] file\n");
+        printf("Available options:\n");
+        printf("    -dump: (default) input file as hex hump\n");
+        printf("    -elf: (force) input file as RISC-V ELF executable\n");
+        printf("    -no-vcd: no waveform output\n");
+        printf("    -t `time`: maximum simulation time of `time`\n");
+        printf("    -pc: PC output\n");
+        printf("    -r `r1` `r2` ...: registers output\n");
+        return 0;
+    }
     printf("Running simulation in %s mode with:\n    %s",
            cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
     for (int i = 0; i < cmd.args.size(); i++)
@@ -190,13 +207,10 @@ int main(int argc, char **argv)
     for (int i = 0; i < ini_code.size(); i++)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
-    dumpmem(memory, 0x400000, 128);
 
     // Simulation
     Vtest *dut = new (std::nothrow) Vtest;
     VerilatedVcdC *trace = NULL;
-    if (!dut)
-        return printf("Memory allocation error.\n"), 0;
     if (cmd.vcd)
     {
         Verilated::traceEverOn(true); // trace waveform
@@ -204,45 +218,46 @@ int main(int argc, char **argv)
         trace->open("waveform.vcd");
     }
     int st = 0; // simulation time
+    // reset
     dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     dut->rst = 1, dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     for (int i = 0; i < 8; i++)
         dut->clk = !dut->clk, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+    // clock and memory loop
     for (int i = 0; i < cmd.simtime; i++)
     {
         // print info
-        if (cmd.showpc || cmd.showreg)
-            printf("cycle %d:\n", i);
-        if (cmd.showpc)
-            printf("    pc: 0x%08x\n", dut->pc);
+        cmd.showpc || cmd.showreg ? printf("cycle %d:\n", i) : 0;
+        cmd.showpc ? printf("    pc: 0x%016lx\n", dut->pc) : 0;
         for (int i = 0; i < 32; i++)
-            if (cmd.showreg & (1u << i))
-                printf("    x%d: 0x%08x\n", i, dut->gpr[i]);
-        // before posedge clock read signals
-        uint32_t icache_data, dcache_data;
-        if (dut->icache_ena)
-            icache_data = BTOW(memory[dut->icache_addr + 0], memory[dut->icache_addr + 1],
-                               memory[dut->icache_addr + 2], memory[dut->icache_addr + 3]);
-        if (dut->dcache_r_ena)
-            dcache_data = BTOW(memory[dut->dcache_addr + 0], memory[dut->dcache_addr + 1],
-                               memory[dut->dcache_addr + 2], memory[dut->dcache_addr + 3]);
-        if (dut->dcache_w_ena)
-            for (int j = 0; j < 4; j++)
-                memory[dut->dcache_addr + j] = DTOB(dut->dcache_data_in, j);
-        // posedge clock
-        dut->clk = 1, dut->eval(), trace ? trace->dump(st++), 0 : 0;
-        // after posedge clock set registers
-        dut->icache_valid = dut->dcache_valid = 1;
-        dut->icache_data = icache_data;
-        dut->dcache_data_out = dcache_data;
+            cmd.showreg & (1u << i) ? printf("    x%d: 0x%016lx\n", i, dut->gpr[i]) : 0;
         // negedge clock
         dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+        // posedge clock
+        uint8_t icache_rqst = dut->icache_rqst; // record stats of BEFORE posedge
+        uint8_t dcache_r_rqst = dut->dcache_r_rqst, dcache_w_rqst = dut->dcache_w_rqst;
+        uint64_t icache_addr = dut->icache_addr, dcache_r_addr = dut->dcache_r_addr;
+        uint64_t dcache_w_addr = dut->dcache_w_addr, dcache_w_data = dut->dcache_w_data;
+        uint8_t dcache_r_bits = dut->dcache_r_bits & 7, dcache_w_bits = dut->dcache_w_bits & 7;
+        dut->clk = 1, dut->eval(); // evaluate AT posedge
+        dut->icache_done = icache_rqst;
+        dut->icache_data = icache_rqst ? DLE(memory, icache_addr) : 0;
+        dut->dcache_r_done = dcache_r_rqst;
+        dut->dcache_r_data = dcache_r_rqst ? DLE(memory, dcache_r_addr) : 0;
+        // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
+        uint64_t bitwidth = 8 * (1 << (dcache_r_bits & 3));
+        dut->dcache_r_data &= (1 << bitwidth) - 1;
+        if (((1 << bitwidth - 1) & dut->dcache_r_data) && (dcache_r_bits >> 2))
+            dut->dcache_r_data |= ~((1 << bitwidth) - 1); // msb = 1 and sign extended
+        dut->dcache_w_done = dcache_w_rqst;
+        for (int j = 0; dcache_w_rqst && j < (1 << (dcache_w_bits & 3)); j++)
+            memory[dcache_w_addr + j] = DTOB(dcache_w_data, j);
+        trace ? trace->dump(st++), 0 : 0; // update waveform AFTER posedge (zero latency)
     }
 
     // Clean
-    trace ? trace->close(), 0 : 0;
-    delete trace;
+    delete (trace ? trace->close(), trace : NULL);
     delete dut;
     return 0;
 }
