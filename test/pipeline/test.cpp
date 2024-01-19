@@ -229,7 +229,7 @@ int main(int argc, char **argv)
     {
         // print info
         cmd.showpc || cmd.showreg ? printf("cycle %d:\n", i) : 0;
-        cmd.showpc ? printf("    pc: 0x%016lx\n", dut->pc) : 0;
+        cmd.showpc ? printf("    icache addr: 0x%016lx\n", dut->icache_addr) : 0;
         for (int i = 0; i < 32; i++)
             cmd.showreg & (1u << i) ? printf("    x%d: 0x%016lx\n", i, dut->gpr[i]) : 0;
         // negedge clock
