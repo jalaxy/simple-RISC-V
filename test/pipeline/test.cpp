@@ -5,7 +5,7 @@
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include <elf.h>
-#include "Vtest.h"
+#include "Vpipeline.h"
 
 #define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                                         \
     ((((uint64_t)(uint8_t)(b0)) << (uint64_t)0x00) | (((uint64_t)(uint8_t)(b1)) << (uint64_t)0x08) | \
@@ -23,8 +23,7 @@ typedef struct struct_cmd
 {
     const char *filename = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, showpc = 0, vcd = 1;
-    uint32_t showreg = 0;
+    uint8_t help = 0, filetype = 0, vcd = 1, verbose = 0;
     int simtime = INT32_MAX;
 } cmd_t;
 
@@ -99,16 +98,8 @@ int main(int argc, char **argv)
                     cmd.simtime = 1024;
                 i++;
             }
-            else if (strcmp(argv[i] + j, "pc") == 0)
-                cmd.showpc = 1;
-            else if (strcmp(argv[i] + j, "r") == 0)
-            {
-                int all = 1;
-                while (i + 1 < argc && atoi(argv[i + 1]) > 0 && atoi(argv[i + 1]) < 32)
-                    cmd.showreg |= 1u << atoi(argv[++i]), all = 0;
-                if (all)
-                    cmd.showreg = -1;
-            }
+            else if (strcmp(argv[i] + j, "v") == 0)
+                cmd.verbose = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
         }
@@ -116,7 +107,7 @@ int main(int argc, char **argv)
             cmd.filename = argv[i];
         else
             cmd.args.push_back(argv[i]);
-    if (cmd.filename == NULL)
+    if (!cmd.help && cmd.filename == NULL)
         printf("Not enough arguments.\n"), cmd.help = 1;
     if (cmd.help)
     {
@@ -126,15 +117,16 @@ int main(int argc, char **argv)
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
         printf("    -no-vcd: no waveform output\n");
         printf("    -t `time`: maximum simulation time of `time`\n");
-        printf("    -pc: PC output\n");
-        printf("    -r `r1` `r2` ...: registers output\n");
         return 0;
     }
-    printf("Running simulation in %s mode with:\n    %s",
-           cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
-    for (int i = 0; i < cmd.args.size(); i++)
-        printf(" %s", cmd.args[i]);
-    printf("\n");
+    if (cmd.verbose)
+    {
+        printf("Running simulation in %s mode with:\n    %s",
+               cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
+        for (int i = 0; i < cmd.args.size(); i++)
+            printf(" %s", cmd.args[i]);
+        printf("\n");
+    }
 
     // Load and set reset code in memory
     std::map<uint64_t, uint8_t> memory;
@@ -228,7 +220,7 @@ int main(int argc, char **argv)
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
 
     // Simulation
-    Vtest *dut = new (std::nothrow) Vtest;
+    Vpipeline *dut = new (std::nothrow) Vpipeline;
     VerilatedVcdC *trace = NULL;
     if (cmd.vcd)
     {
@@ -249,11 +241,6 @@ int main(int argc, char **argv)
     std::queue<dcache_w_req_t> dw_delay;
     for (int i = 0; i < cmd.simtime; i++)
     {
-        // print info
-        cmd.showpc || cmd.showreg ? printf("cycle %d:\n", i) : 0;
-        cmd.showpc ? printf("    icache addr: 0x%016lx\n", dut->icache_addr) : 0;
-        for (int i = 0; i < 32; i++)
-            cmd.showreg & (1u << i) ? printf("    x%d: 0x%016lx\n", i, dut->gpr[i]) : 0;
         // negedge clock
         dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
         // posedge clock
@@ -287,6 +274,7 @@ int main(int argc, char **argv)
         i_delay.pop(), dr_delay.pop(), dw_delay.pop();
         dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
     }
+    cmd.verbose ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);

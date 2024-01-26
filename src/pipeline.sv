@@ -185,7 +185,7 @@ module if_stage(
         else if (off0 + len0 <= 8'd64) if_out.offset = off0 + len0;
         else if_out.offset = 8'd0; else if_out.offset = 8'd0;
     always_comb free = ~busy & ~ena_q[2];
-    always_comb if_out.valid_ir = icache_done | ena_q[0];
+    always_comb if_out.valid_ir = ena_q[0];
     // calculate instruction length and offset
     always_comb off0 = 8'd0;
     always_comb off1 = len0;
@@ -204,10 +204,10 @@ module if_stage(
         end else if (icache_done) begin
             ena_q <= {off3 + len3 <= 8'd64, off2 + len2 <= 8'd64,
                       off1 + len1 <= 8'd64, off0 + len0 <= 8'd64};
-            pc[0] <= if_in.pc;
-            pc[1] <= pc[0] + {56'd0, off0};
-            pc[2] <= pc[1] + {56'd0, off1};
-            pc[3] <= pc[2] + {56'd0, off2};
+            pc[0] <= if_in.pc + {59'd0, off0[7:3]};
+            pc[1] <= if_in.pc + {59'd0, off1[7:3]};
+            pc[2] <= if_in.pc + {59'd0, off2[7:3]};
+            pc[3] <= if_in.pc + {59'd0, off3[7:3]};
             ir[0] <= len0 == 8'd32 ? icache_data[off0+31-:32] : inst_x[off0[5:4]];
             ir[1] <= len1 == 8'd32 ? icache_data[off1+31-:32] : inst_x[off1[5:4]];
             ir[2] <= len2 == 8'd32 ? icache_data[off2+31-:32] : inst_x[off2[5:4]];

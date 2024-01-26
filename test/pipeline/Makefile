@@ -8,10 +8,10 @@ clean:
 # Execute in docker.io/jxy324/verilator:v0
 
 # Verilator variables
-VERILATOR_V=../../src/pipeline.sv test.sv
+VERILATOR_V=../../src/pipeline.sv
 VERILATOR_CPP=test.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
-VERILATOR_TOP=test
+VERILATOR_TOP=pipeline
 VERILATOR_FLAGS=-cc -exe -trace -trace-structs -top-module $(VERILATOR_TOP)
 
 all: obj_dir/V$(VERILATOR_TOP)
