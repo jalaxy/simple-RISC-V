@@ -12,7 +12,7 @@ VERILATOR_V=../../src/pipeline.sv test.sv
 VERILATOR_CPP=test.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
 VERILATOR_TOP=test
-VERILATOR_FLAGS=--cc --exe --trace --top-module $(VERILATOR_TOP)
+VERILATOR_FLAGS=-cc -exe -trace -trace-structs -top-module $(VERILATOR_TOP)
 
 all: obj_dir/V$(VERILATOR_TOP)
 

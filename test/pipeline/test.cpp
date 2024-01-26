@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <map>
+#include <queue>
 #include <algorithm>
 #include <verilated.h>
 #include <verilated_vcd_c.h>
@@ -31,6 +32,24 @@ typedef struct struct_htif
 {
     uint64_t fromhost = 0, tohost = 0, lock = 0;
 } htif_t;
+
+typedef struct struct_icache_req
+{
+    uint8_t rqst = 0;
+    uint64_t addr = 0;
+} icache_req_t;
+
+typedef struct struct_dcache_r_req
+{
+    uint8_t rqst = 0, bits = 0;
+    uint64_t addr = 0;
+} dcache_r_req_t;
+
+typedef struct struct_dcache_w_req
+{
+    uint8_t rqst = 0, bits = 0;
+    uint64_t addr = 0, data = 0;
+} dcache_w_req_t;
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
@@ -225,6 +244,9 @@ int main(int argc, char **argv)
         dut->clk = !dut->clk, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     // clock and memory loop
+    std::queue<icache_req_t> i_delay;
+    std::queue<dcache_r_req_t> dr_delay;
+    std::queue<dcache_w_req_t> dw_delay;
     for (int i = 0; i < cmd.simtime; i++)
     {
         // print info
@@ -235,25 +257,35 @@ int main(int argc, char **argv)
         // negedge clock
         dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
         // posedge clock
-        uint8_t icache_rqst = dut->icache_rqst; // record stats of BEFORE posedge
-        uint8_t dcache_r_rqst = dut->dcache_r_rqst, dcache_w_rqst = dut->dcache_w_rqst;
-        uint64_t icache_addr = dut->icache_addr, dcache_r_addr = dut->dcache_r_addr;
-        uint64_t dcache_w_addr = dut->dcache_w_addr, dcache_w_data = dut->dcache_w_data;
-        uint8_t dcache_r_bits = dut->dcache_r_bits & 7, dcache_w_bits = dut->dcache_w_bits & 7;
-        dut->clk = 1, dut->eval(); // evaluate AT posedge
-        dut->icache_done = icache_rqst;
-        dut->icache_data = icache_rqst ? DLE(memory, icache_addr) : 0;
-        dut->dcache_r_done = dcache_r_rqst;
-        dut->dcache_r_data = dcache_r_rqst ? DLE(memory, dcache_r_addr) : 0;
+        if (dut->icache_rqst) // record stats before posedge
+        {
+            if (i == 0004) // delay for some cycles in some conditions
+                for (int i = 0; i < 0004; i++)
+                    i_delay.push({0, 0});
+            i_delay.push({1, dut->icache_addr});
+        }
+        if (dut->dcache_r_rqst)
+            dr_delay.push({1, dut->dcache_r_bits, dut->dcache_r_addr});
+        if (dut->dcache_w_rqst)
+            dw_delay.push({1, dut->dcache_w_bits, dut->dcache_w_addr, dut->dcache_w_data});
+        dut->clk = 1, dut->eval(); // clock changes first
+        i_delay.empty() ? i_delay.push({0, 0}), 0 : 0;
+        dr_delay.empty() ? dr_delay.push({0, 0}), 0 : 0;
+        dw_delay.empty() ? dw_delay.push({0, 0}), 0 : 0;
+        dut->icache_done = i_delay.front().rqst; // other signals change after clk
+        dut->icache_data = i_delay.front().rqst ? DLE(memory, i_delay.front().addr) : 0;
+        dut->dcache_r_done = dr_delay.front().rqst;
+        dut->dcache_r_data = dr_delay.front().rqst ? DLE(memory, dr_delay.front().addr) : 0;
         // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
-        uint64_t bitwidth = 8 * (1 << (dcache_r_bits & 3));
+        uint64_t bitwidth = 8 * (1 << (dr_delay.front().bits & 3));
         dut->dcache_r_data &= (1 << bitwidth) - 1;
-        if (((1 << bitwidth - 1) & dut->dcache_r_data) && (dcache_r_bits >> 2))
+        if (((1 << bitwidth - 1) & dut->dcache_r_data) && (dr_delay.front().bits >> 2))
             dut->dcache_r_data |= ~((1 << bitwidth) - 1); // msb = 1 and sign extended
-        dut->dcache_w_done = dcache_w_rqst;
-        for (int j = 0; dcache_w_rqst && j < (1 << (dcache_w_bits & 3)); j++)
-            memory[dcache_w_addr + j] = DTOB(dcache_w_data, j);
-        trace ? trace->dump(st++), 0 : 0; // update waveform AFTER posedge (zero latency)
+        dut->dcache_w_done = dw_delay.front().rqst;
+        for (int j = 0; dw_delay.front().rqst && j < (1 << (dw_delay.front().bits & 3)); j++)
+            memory[dw_delay.front().addr + j] = DTOB(dw_delay.front().data, j);
+        i_delay.pop(), dr_delay.pop(), dw_delay.pop();
+        dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
     }
 
     // Clean
