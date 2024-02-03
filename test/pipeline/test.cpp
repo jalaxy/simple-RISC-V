@@ -117,6 +117,7 @@ int main(int argc, char **argv)
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
         printf("    -no-vcd: no waveform output\n");
         printf("    -t `time`: maximum simulation time of `time`\n");
+        printf("    -v: verbose mode\n");
         return 0;
     }
     if (cmd.verbose)
@@ -260,9 +261,11 @@ int main(int argc, char **argv)
         dr_delay.empty() ? dr_delay.push({0, 0}), 0 : 0;
         dw_delay.empty() ? dw_delay.push({0, 0}), 0 : 0;
         dut->icache_done = i_delay.front().rqst; // other signals change after clk
-        dut->icache_data = i_delay.front().rqst ? DLE(memory, i_delay.front().addr) : 0;
+        if (i_delay.front().rqst)
+            dut->icache_data = DLE(memory, i_delay.front().addr);
         dut->dcache_r_done = dr_delay.front().rqst;
-        dut->dcache_r_data = dr_delay.front().rqst ? DLE(memory, dr_delay.front().addr) : 0;
+        if (dr_delay.front().rqst)
+            dut->dcache_r_data = DLE(memory, dr_delay.front().addr);
         // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
         uint64_t bitwidth = 8 * (1 << (dr_delay.front().bits & 3));
         dut->dcache_r_data &= (1 << bitwidth) - 1;

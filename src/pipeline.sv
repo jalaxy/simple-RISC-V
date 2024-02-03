@@ -48,9 +48,15 @@ typedef struct packed {
     logic valid;
     logic [31:0] ir;
     logic [63:0] pc;
+    logic compressed;
 } if1_out_t;
 
-typedef struct packed { logic valid; logic [31:0] ir; logic [63:0] pc; } id_in_t;
+typedef struct packed {
+    logic valid;
+    logic [31:0] ir;
+    logic [63:0] pc;
+    logic compressed;
+} id_in_t;
 typedef struct packed {
     logic valid;
     logic [63:0] pc;
@@ -59,6 +65,7 @@ typedef struct packed {
     logic [6:0] funct7;
     logic [63:0] imm;
     logic [4:0] rs1addr, rs2addr, rdaddr, uimm;
+    logic compressed, illegal;
 } id_out_t;
 
 typedef struct packed { logic valid; } ex_in_t;
@@ -156,6 +163,7 @@ module pipeline(
     always_comb id_in.ir = if1_out.ir;
     always_comb id_in.pc = if1_out.pc;
     always_comb id_in.valid = if1_out.valid;
+    always_comb id_in.compressed = if1_out.compressed;
     id_stage id_stage_inst(.clk(clk), .rst(srst.id), .ena(ena.id),
         .get(get.id), .in(id_in), .out(id_out));
 
@@ -186,6 +194,7 @@ module pc_stage(
                 out.pc <= out.pc + {59'd0, in.delta};
                 out.valid <= 1'b1;
             end else out.valid <= 1'b0;
+    always_comb get = 1'b1;
 endmodule
 
 module if0_stage(
@@ -222,7 +231,7 @@ module if0_stage(
         else if (off2 <= 8'd64) out.delta = off2[7:3];
         else if (off1 <= 8'd64) out.delta = off1[7:3];
         else out.delta = 5'd0;
-    always_ff @(posedge clk) pc <= rst ? 64'd0 : (ena ? in.pc : pc);
+    always_ff @(posedge clk) pc <= rst ? 64'd0 : (icache_rqst ? in.pc : pc);
 endmodule
 
 module if1_stage(
@@ -231,36 +240,41 @@ module if1_stage(
 );
     logic [63:0] base;
     logic [3:0][7:0] offset;
-    logic [3:0][31:0] ir, ix; // instruction extended
-    logic [3:0] ena_q;
+    logic [3:0][31:0] ir, ic, ix; // instruction compressed and extended
+    logic [3:0] ena_q, compressed;
     always_comb get = ena & ~ena_q[1] | ~in.valid;
     always_comb out.pc = base + {59'd0, offset[0][7:3]};
     always_comb out.ir = ir[0];
+    always_comb out.compressed = compressed[0];
     always_comb out.valid = ena_q[0];
+    always_comb for (int i = 0; i < 4; i++)
+        ic[i] = in.data[in.offset[i][5:0]+31-:32];
     always_ff @(posedge clk)
-        if (rst) {ena_q, base, offset, ir} <= 0;
+        if (rst) ena_q <= 0;
         else if (get & in.valid) begin
             ena_q <= {in.offset[4] <= 8'd64, in.offset[3] <= 8'd64,
                       in.offset[2] <= 8'd64, in.offset[1] <= 8'd64};
             base <= in.pc;
             offset <= in.offset[3:0];
             ir <= ix;
+            compressed <= {ic[3][1:0] != 2'b11, ic[2][1:0] != 2'b11,
+                           ic[1][1:0] != 2'b11, ic[0][1:0] != 2'b11};
         end else if (ena) begin
             ena_q <= ena_q >> 1;
+            compressed <= compressed >> 1;
             offset <= offset >> 8;
             ir <= ir >> 32;
         end
-    ci2i ci2i_inst1(.ci(in.data[in.offset[0]+31-:32]), .i(ix[0]));
-    ci2i ci2i_inst2(.ci(in.data[in.offset[1]+31-:32]), .i(ix[1]));
-    ci2i ci2i_inst3(.ci(in.data[in.offset[2]+31-:32]), .i(ix[2]));
-    ci2i ci2i_inst4(.ci(in.data[in.offset[3]+31-:32]), .i(ix[3]));
+    ci2i ci2i_inst1(.ci(ic[0]), .i(ix[0]));
+    ci2i ci2i_inst2(.ci(ic[1]), .i(ix[1]));
+    ci2i ci2i_inst3(.ci(ic[2]), .i(ix[2]));
+    ci2i ci2i_inst4(.ci(ic[3]), .i(ix[3]));
 endmodule
 
 module id_stage(
     input logic clk, input logic rst, input logic ena, output logic get,
     input id_in_t in, output id_out_t out
 );
-    // decoding output: op, funct3, funct7, imm, uimm, rs1addr, rs2addr, rdaddr
     logic [31:0] ir, op;
     i_type_t enc; // instruction type
     always_comb ir = in.ir;
@@ -275,17 +289,18 @@ module id_stage(
         op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
         op[`BRANCH],                                               // B
         op[`JAL]};                                                 // J
-    always_ff @(posedge clk) out.pc <= in.pc;
-    always_ff @(posedge clk) out.funct3 <= ir[14:12];
-    always_ff @(posedge clk) out.funct7 <= ir[31:25];
-    always_ff @(posedge clk) out.uimm <= ir[19:15]; // same position as rs1addr
-    always_ff @(posedge clk) out.op <= op;
+    always_ff @(posedge clk) if (ena) out.pc <= in.pc;
+    always_ff @(posedge clk) if (ena) out.compressed <= in.compressed;
+    always_ff @(posedge clk) if (ena) out.funct3 <= ir[14:12];
+    always_ff @(posedge clk) if (ena) out.funct7 <= ir[31:25];
+    always_ff @(posedge clk) if (ena) out.uimm <= ir[19:15]; // same as rs1addr
+    always_ff @(posedge clk) if (ena) out.op <= op;
     always_ff @(posedge clk)
         out.imm <= {64{enc.i}} & {{53{ir[31]}}, ir[30:20]} |
-                      {64{enc.u}} & {{32{ir[31]}}, ir[31:12], 12'd0} |
-                      {64{enc.s}} & {{53{ir[31]}}, ir[30:25], ir[11:7]} |
-                      {64{enc.b}} & {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} |
-                      {64{enc.j}} & {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0};
+                   {64{enc.u}} & {{32{ir[31]}}, ir[31:12], 12'd0} |
+                   {64{enc.s}} & {{53{ir[31]}}, ir[30:25], ir[11:7]} |
+                   {64{enc.b}} & {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} |
+                   {64{enc.j}} & {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0};
     always_ff @(posedge clk)
         if (op[`SYSTEM] & ir[14]) out.rs1addr <= 5'd0; // CSR[*]I
         else out.rs1addr <= enc.i | enc.s | enc.r | enc.r4 | enc.b ? ir[19:15] : 5'd0;
@@ -293,8 +308,12 @@ module id_stage(
     always_ff @(posedge clk)
         out.rdaddr <= enc.i | enc.u | enc.r | enc.r4 | enc.j ? ir[11:7] : 5'd0;
     always_ff @(posedge clk)
-        if (rst) out.valid <= 1'b0; else if (ena) out.valid <= in.valid;
-    always_comb get = 1'b1;
+        if (rst) {out.valid, out.illegal} <= 0;
+        else if (ena) begin
+            out.valid <= in.valid;
+            out.illegal <= in.ir[1:0] != 2'b11;
+        end
+    always_comb get = ena | ~in.valid;
 endmodule
 
 module ex_stage(
@@ -322,5 +341,125 @@ module wb_stage(
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
-    assign i = ci;
+    logic [7:0][4:0] map;
+    always_comb map = {5'd15, 5'd14, 5'd13, 5'd12, 5'd11, 5'd10, 5'd9, 5'd8};
+    always_comb
+        if (ci[1:0] == 2'b11) i = ci; // normal 32-bit instruction
+        else case ({ci[15:13], ci[1:0]})
+            5'b00000:
+                if (ci[12:5] == 8'd0) // illegal
+                    i = 0;
+                else // C.ADDI4SPN ==> addi rd', x2, nzuimm
+                    i = {{2'd0, ci[10:7], ci[12:11], ci[5], ci[6], 2'd0},
+                         5'd2, 3'd0, map[ci[4:2]], 7'h13};
+            5'b00100: // C.FLD ==> FLD rd', offset(rs1')
+                i = {{4'd0, ci[6:5], ci[12:10], 3'd0},
+                     map[ci[9:7]], 3'b011, map[ci[4:2]], 7'h7};
+            5'b01000: // C.LW ==> LW rd', offset(rs1')
+                i = {{5'd0, ci[5], ci[12:10], ci[6], 2'd0},
+                     map[ci[9:7]], 3'b010, map[ci[4:2]], 7'h3};
+            5'b01100: // C.LD ==> LD rd', offset(rs1')
+                i = {{4'd0, ci[6:5], ci[12:10], 3'd0},
+                     map[ci[9:7]], 3'b011, map[ci[4:2]], 7'h3};
+            5'b10100: // C.FSD ==> FSD rs2', offset(rs1')
+                i = {{4'd0, ci[6:5], ci[12]}, map[ci[4:2]], map[ci[9:7]],
+                     3'b011, {ci[11:10], 3'd0}, 7'h27};
+            5'b11000: // C.SW ==> SW rs2', offset(rs1')
+                i = {{5'd0, ci[5], ci[12]}, map[ci[4:2]], map[ci[9:7]],
+                     3'b010, {ci[11:10], ci[6], 2'd0}, 7'h23};
+            5'b11100: // C.SD ==> SD rs2', offset(rs1')
+                i = {{4'd0, ci[6:5], ci[12]}, map[ci[4:2]], map[ci[9:7]],
+                     3'b011, {ci[11:10], 3'd0}, 7'h23};
+            5'b00001: // C.ADDI / C.NOP ==> ADDI rd, rd, nzimm / NOP
+                i = {{{7{ci[12]}}, ci[6:2]}, ci[11:7], 3'b000, ci[11:7], 7'h13};
+            5'b00101: // C.ADDIW ==> ADDIW rd, rd, imm
+                i = {{{7{ci[12]}}, ci[6:2]}, ci[11:7], 3'b000, ci[11:7], 7'h1B};
+            5'b01001: // C.LI ==> ADDI rd, x0, imm
+                i = {{{7{ci[12]}}, ci[6:2]}, 5'd0, 3'b000, ci[11:7], 7'h13};
+            5'b01101:
+                if ({ci[12], ci[6:2]} == 6'd0) // illegal
+                    i = 0;
+                else if (ci[11:7] == 5'd2) // C.ADDI16SP ==> ADDI x2, x2, nzimm
+                    i = {{{3{ci[12]}}, ci[4:3], ci[5], ci[2], ci[6], 4'd0},
+                         5'd2, 3'b000, 5'd2, 7'h13};
+                else // C.LUI ==> LUI rd, nzimm
+                    i = {{{3{ci[12]}}, ci[6:2], 12'd0}, ci[11:7], 7'h37};
+            5'b10001:
+                if (ci[11] == 1'd0) // C.SRLI/C.SRAI ==> SRLI/SRAI rd', rd', shamt
+                    i = {ci[11:10], 4'd0, {ci[12], ci[6:2]},
+                         map[ci[9:7]], 3'b101, map[ci[9:7]], 7'h13};
+                else if (ci[10] == 1'd0) // C.ANDI ==> ANDI rd', rd', imm
+                    i = {{{7{ci[12]}}, ci[6:2]},
+                         map[ci[9:7]], 3'b111, map[ci[9:7]], 7'h13};
+                else case ({ci[12], ci[6:5]})
+                    3'b000: // C.SUB ==> SUB rd', rd', rs2'
+                        i = {7'b0100000, map[ci[4:2]], map[ci[9:7]],
+                             3'b000, map[ci[9:7]], 7'h33};
+                    3'b001: // C.XOR ==> XOR rd', rd', rs2'
+                        i = {7'd0, map[ci[4:2]], map[ci[9:7]],
+                             3'b100, map[ci[9:7]], 7'h33};
+                    3'b010: // C.OR ==> OR rd', rd', rs2'
+                        i = {7'd0, map[ci[4:2]], map[ci[9:7]],
+                             3'b110, map[ci[9:7]], 7'h33};
+                    3'b011: // C.AND ==> AND rd', rd', rs2'
+                        i = {7'd0, map[ci[4:2]], map[ci[9:7]],
+                             3'b111, map[ci[9:7]], 7'h33};
+                    3'b100: // C.SUBW ==> SUBW rd', rd', rs2'
+                        i = {7'b0100000, map[ci[4:2]], map[ci[9:7]],
+                             3'b000, map[ci[9:7]], 7'h3B};
+                    3'b101: // C.ADDW ==> ADDW rd', rd', rs2'
+                        i = {7'b0000000, map[ci[4:2]], map[ci[9:7]],
+                             3'b000, map[ci[9:7]], 7'h3B};
+                    default: i = 0;
+                endcase
+            5'b10101: // C.J ==> JAL x0, offset
+                i = {ci[12], ci[8], ci[10:9], ci[6], ci[7], ci[2], ci[11], ci[5:3],
+                     ci[12], {8{ci[12]}}, 5'd0, 7'h6F};
+            5'b11001: // C.BEQZ ==> BEQ rs1', x0, offset
+                i = {{4{ci[12]}}, ci[6:5], ci[2], 5'd0, map[ci[9:7]], 3'b000,
+                     ci[11:10], ci[4:3], ci[12], 7'h63};
+            5'b11101: // C.BNEZ ==> BNE rs1', x0, offset
+                i = {{4{ci[12]}}, ci[6:5], ci[2], 5'd0, map[ci[9:7]], 3'b001,
+                     ci[11:10], ci[4:3], ci[12], 7'h63};
+            5'b00010:
+                if ({ci[12], ci[6:2]} == 6'd0) // illegal
+                    i = 0;
+                else // C.SLLI ==> SLLI rd, rd, shamt
+                    i = {6'd0, {ci[12], ci[6:2]}, ci[11:7], 3'b001, ci[11:7], 7'h13};
+            5'b00110: // C.FLDSP ==> FLD rd, offset(x2)
+                i = {{3'd0, ci[4:2], ci[12], ci[6:5], 3'd0},
+                     5'd2, 3'b011, ci[11:7], 7'h7};
+            5'b01010: // C.LWSP ==> LW rd, offset(x2)
+                i = {{4'd0, ci[3:2], ci[12], ci[6:4], 2'd0},
+                     5'd2, 3'b010, ci[11:7], 7'h3};
+            5'b01110: // C.LDSP ==> LD rd, offset(x2)
+                i = {{3'd0, ci[4:2], ci[12], ci[6:5], 3'd0},
+                     5'd2, 3'b011, ci[11:7], 7'h3};
+            5'b10010:
+                if (ci[12] == 1'd0)
+                    if (ci[6:2] == 5'd0)
+                        if (ci[11:7] == 5'd0) // illegal
+                            i = 0;
+                        else // C.JR ==> JALR x0, 0(rs1)
+                            i = {12'd0, ci[11:7], 3'b000, 5'd0, 7'h67};
+                    else // C.MV ==> ADD rd, x0, rs2
+                        i = {7'd0, ci[6:2], 5'd0, 3'b000, ci[11:7], 7'h33};
+                else if (ci[6:2] == 5'd0)
+                    if (ci[11:7] == 5'd0) // C.EBREAK ==> EBREAK
+                        i = {12'd1, 5'd0, 3'd0, 5'd0, 7'h73};
+                    else // C.JALR ==> JALR x1, 0(rs1)
+                        i = {12'd0, ci[11:7], 3'b000, 5'd1, 7'h67};
+                else // C.ADD ==> ADD rd, rd, rs2
+                    i = {7'd0, ci[6:2], ci[11:7], 3'b000, ci[11:7], 7'h33};
+            5'b10110: // C.FSDSP ==> FSD rs2, offset(x2)
+                i = {{3'd0, ci[9:7], ci[12]}, ci[6:2], 5'd2, 3'b011,
+                     {ci[11:10], 3'd0}, 7'h27};
+            5'b11010: // C.SWSP ==> SW rs2, offset(x2)
+                i = {{4'd0, ci[8:7], ci[12]}, ci[6:2], 5'd2, 3'b010,
+                     {ci[11:9], 2'd0}, 7'h23};
+            5'b11110: // C.SDSP ==> SD rs2, offset(x2)
+                i = {{3'd0, ci[9:7], ci[12]}, ci[6:2], 5'd2, 3'b011,
+                     {ci[11:10], 3'd0}, 7'h23};
+            default: i = 0; // an illegal instruction
+        endcase
 endmodule
