@@ -20,35 +20,63 @@
 `define JALR      5'b11001
 `define JAL       5'b11011
 `define SYSTEM    5'b11100
+`define EX_ADD    5'd0 // Execution stage operations
+`define EX_SUB    5'd1
+`define EX_SLL    5'd2
+`define EX_SLT    5'd3
+`define EX_SLTU   5'd4
+`define EX_XOR    5'd5
+`define EX_SRL    5'd6
+`define EX_SRA    5'd7
+`define EX_OR     5'd8
+`define EX_AND    5'd9
+`define EX_MUL    5'd10
+`define EX_MULH   5'd11
+`define EX_MULHSU 5'd12
+`define EX_MULHU  5'd13
+`define EX_DIV    5'd14
+`define EX_DIVU   5'd15
+`define EX_REM    5'd16
+`define EX_REMU   5'd17
 
-typedef struct packed { logic i, u, s, r, r4, b, j; } i_type_t;
-
+// PC -> IF0: PC stage generate an address for IF0 stage.
 typedef struct packed { logic valid; logic [63:0] pc; } pc_if0_t;
+// IF0 -> PC: IF0 get 64-bit data from icache and calculate the
+//            increment back to PC stage to generate new PC.
 typedef struct packed { logic valid; logic [4:0] delta; } if0_pc_t;
+// IF0 -> IF1: IF0 provide IF1 with 64-bit data to extract
+//             several 32-bit instructions.
 typedef struct packed {
     logic valid;
     logic [63:0] pc;
     logic [63:0] data;
     logic [4:0][7:0] offset;
 } if0_if1_t;
+// IF1 -> ID: IF1 gives instruction and its address.
 typedef struct packed {
     logic valid;
     logic [31:0] ir;
     logic [63:0] pc;
     logic compressed;
 } if1_id_t;
+// ID -> EX: ID gives EX infomation of how many registers used, the
+//           immediate, operator, and following stages info.
 typedef struct packed {
     logic valid;
-    logic [63:0] pc;
-    logic [31:0] op;
-    logic [2:0] funct3;
-    logic [6:0] funct7;
-    logic [63:0] imm;
-    logic [4:0] rs1addr, rs2addr, rdaddr, uimm;
-    logic compressed, illegal;
+    logic [2:0][64:0] oprand; // EX stage info
+    logic [31:0] operator;
+    logic mr, mw; // MA stage info
+    logic [2:0] bits;
+    logic [4:0] rmwa;
+    logic [4:0] rda; // WB stage info
 } id_ex_t;
-typedef struct packed { logic valid; } ex_ma_t;
-typedef struct packed { logic valid; } ma_wb_t;
+typedef struct packed {
+    logic valid;
+    logic mr, mw;
+    logic [2:0] bits;
+    logic [4:0] rma;
+} ex_ma_t;
+typedef struct packed { logic valid; logic [4:0] rda; logic [63:0] rd; } ma_ex_t;
 
 module pipeline(
     input  logic        clk,
@@ -77,36 +105,34 @@ module pipeline(
     if1_id_t data_if1_id;   logic get_if1_id;
     id_ex_t data_id_ex;     logic get_id_ex;
     ex_ma_t data_ex_ma;     logic get_ex_ma;
-    ma_wb_t data_ma_wb;     logic get_ma_wb;
+    ma_ex_t data_ma_ex;     logic get_ma_ex;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
-        .get_if0(get_if0_pc), .in_if0(data_if0_pc),
-        .ena_if0(get_pc_if0), .out_if0(data_pc_if0));
+        .in_if0(data_if0_pc), .get_if0(get_if0_pc),
+        .out_if0(data_pc_if0), .ena_if0(get_pc_if0));
     if0_stage if0_stage_inst(.clk(clk), .rst(rst),
-        .get_pc(get_pc_if0), .in_pc(data_pc_if0),
-        .ena_pc(get_if0_pc), .out_pc(data_if0_pc),
-        .ena_if1(get_if0_if1), .out_if1(data_if0_if1),
+        .in_pc(data_pc_if0), .get_pc(get_pc_if0),
+        .out_pc(data_if0_pc), .ena_pc(get_if0_pc),
+        .out_if1(data_if0_if1), .ena_if1(get_if0_if1),
         .icache_rqst(icache_rqst), .icache_addr(icache_addr),
         .icache_done(icache_done), .icache_data(icache_data));
     if1_stage if1_stage_inst(.clk(clk), .rst(rst),
-        .get_if0(get_if0_if1), .in_if0(data_if0_if1),
-        .ena_id(get_if1_id), .out_id(data_if1_id));
+        .in_if0(data_if0_if1), .get_if0(get_if0_if1),
+        .out_id(data_if1_id), .ena_id(get_if1_id));
     id_stage id_stage_inst(.clk(clk), .rst(rst),
-        .get_if1(get_if1_id), .in_if1(data_if1_id),
-        .ena_ex(get_id_ex), .out_ex(data_id_ex));
+        .in_if1(data_if1_id), .get_if1(get_if1_id),
+        .out_ex(data_id_ex), .ena_ex(get_id_ex));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst),
-        .get_id(get_id_ex), .in_id(data_id_ex),
-        .ena_ma(get_ex_ma), .out_ma(data_ex_ma));
+        .in_id(data_id_ex), .get_id(get_id_ex),
+        .out_ma(data_ex_ma), .ena_ma(get_ex_ma));
     ma_stage ma_stage_inst(.clk(clk), .rst(rst),
-        .get_ex(get_ex_ma), .in_ex(data_ex_ma),
-        .ena_wb(get_ma_wb), .out_wb(data_ma_wb));
-    wb_stage wb_stage_inst(.clk(clk), .rst(rst),
-        .get_ma(get_ma_wb), .in_ma(data_ma_wb));
+        .in_ex(data_ex_ma), .get_ex(get_ex_ma),
+        .out_ex(data_ma_ex), .ena_ex(get_ma_ex));
 endmodule
 
 module pc_stage(input logic clk, input logic rst,
-    output logic get_if0, input if0_pc_t in_if0,
-    input logic ena_if0, output pc_if0_t out_if0
+    input  if0_pc_t in_if0,  output logic get_if0,
+    output pc_if0_t out_if0, input  logic ena_if0
 );
     logic [63:0] pc;
     logic valid;
@@ -126,9 +152,9 @@ module pc_stage(input logic clk, input logic rst,
 endmodule
 
 module if0_stage(input logic clk, input logic rst,
-    output logic get_pc, input pc_if0_t in_pc,
-    input logic ena_pc, output if0_pc_t out_pc,
-    input logic ena_if1, output if0_if1_t out_if1,
+    input  pc_if0_t  in_pc,   output logic get_pc,
+    output if0_pc_t  out_pc,  input  logic ena_pc,
+    output if0_if1_t out_if1, input  logic ena_if1,
     output logic        icache_rqst,
     output logic [63:0] icache_addr,
     input  logic        icache_done,
@@ -168,8 +194,8 @@ module if0_stage(input logic clk, input logic rst,
 endmodule
 
 module if1_stage(input logic clk, input logic rst,
-    output logic get_if0, input if0_if1_t in_if0,
-    input logic ena_id, output if1_id_t out_id
+    input  if0_if1_t in_if0, output logic get_if0,
+    output if1_id_t  out_id, input  logic ena_id
 );
     logic [63:0] base;
     logic [3:0][7:0] offset;
@@ -205,71 +231,127 @@ module if1_stage(input logic clk, input logic rst,
 endmodule
 
 module id_stage(input logic clk, input logic rst,
-    output logic get_if1, input if1_id_t in_if1,
-    input logic ena_ex, output id_ex_t out_ex
+    input  if1_id_t in_if1, output logic get_if1,
+    output id_ex_t  out_ex, input  logic ena_ex
 );
+    //     op[`LOAD]  | op[`LOAD_FP]   | op[`MISC_MEM] | op[`OP_IMM]  // I
+    //                | op[`OP_IMM_32] | op[`JALR]     | op[`SYSTEM],
+    //     op[`AUIPC] | op[`LUI],                                     // U
+    //     op[`STORE] | op[`STORE_FP],                                // S
+    //     op[`AMO]   | op[`OP]        | op[`OP_32]    | op[`OP_FP],  // R
+    //     op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
+    //     op[`BRANCH],                                               // B
+    //     op[`JAL]                                                   // J
     logic [31:0] ir, op;
-    i_type_t enc; // instruction type
+    logic [63:0] imm;
     always_comb ir = in_if1.ir;
     always_comb for (int i = 0; i < 32; i++)
         op[i] = ir[6:2] == i[4:0];
-    always_comb enc = {
-        op[`LOAD]  | op[`LOAD_FP]   | op[`MISC_MEM] | op[`OP_IMM]  // I
-                   | op[`OP_IMM_32] | op[`JALR]     | op[`SYSTEM],
-        op[`AUIPC] | op[`LUI],                                     // U
-        op[`STORE] | op[`STORE_FP],                                // S
-        op[`AMO]   | op[`OP]        | op[`OP_32]    | op[`OP_FP],  // R
-        op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
-        op[`BRANCH],                                               // B
-        op[`JAL]};                                                 // J
-    always_ff @(posedge clk) if (ena_ex) out_ex.pc <= in_if1.pc;
-    always_ff @(posedge clk) if (ena_ex) out_ex.compressed <= in_if1.compressed;
-    always_ff @(posedge clk) if (ena_ex) out_ex.funct3 <= ir[14:12];
-    always_ff @(posedge clk) if (ena_ex) out_ex.funct7 <= ir[31:25];
-    always_ff @(posedge clk) if (ena_ex) out_ex.uimm <= ir[19:15]; // same as rs1addr
-    always_ff @(posedge clk) if (ena_ex) out_ex.op <= op;
-    always_ff @(posedge clk)
-        out_ex.imm <= {64{enc.i}} & {{53{ir[31]}}, ir[30:20]} |
-                   {64{enc.u}} & {{32{ir[31]}}, ir[31:12], 12'd0} |
-                   {64{enc.s}} & {{53{ir[31]}}, ir[30:25], ir[11:7]} |
-                   {64{enc.b}} & {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} |
-                   {64{enc.j}} & {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0};
-    always_ff @(posedge clk)
-        if (op[`SYSTEM] & ir[14]) out_ex.rs1addr <= 5'd0; // CSR[*]I
-        else if (enc.i | enc.s | enc.r | enc.r4 | enc.b) out_ex.rs1addr <= ir[19:15];
-        else out_ex.rs1addr <= 5'd0;
-    always_ff @(posedge clk) out_ex.rs2addr <= enc.r | enc.s | enc.b ? ir[24:20] : 5'd0;
-    always_ff @(posedge clk)
-        out_ex.rdaddr <= enc.i | enc.u | enc.r | enc.r4 | enc.j ? ir[11:7] : 5'd0;
-    always_ff @(posedge clk)
-        if (rst) {out_ex.valid, out_ex.illegal} <= 0;
-        else if (ena_ex) begin
-            out_ex.valid <= in_if1.valid;
-            out_ex.illegal <= in_if1.ir[1:0] != 2'b11;
-        end
+    always_comb imm =
+        {{53{ir[31]}}, ir[30:20]} & {64{
+            op[`LOAD] | op[`LOAD_FP] | op[`OP_IMM] |
+            op[`OP_IMM_32] | op[`JALR] | op[`SYSTEM]}} | // I type
+        {{32{ir[31]}}, ir[31:12], 12'd0} & {64{
+            op[`AUIPC] | op[`LUI]}} | // U type
+        {{53{ir[31]}}, ir[30:25], ir[11:7]} & {64{
+            op[`STORE] | op[`STORE_FP]}} | // S type
+        {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} & {64{op[`BRANCH]}} | // B type
+        {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} & {64{op[`JAL]}}; // J type
     always_comb get_if1 = ena_ex | ~in_if1.valid;
+    always_ff @(posedge clk)
+        if (rst) begin
+            out_ex.valid <= 0;
+        end else if (ena_ex) begin
+            out_ex.valid <= in_if1.valid;
+            // AMO can be separated to several instructions and pushed into a queue
+            out_ex.oprand[0] <=
+                {1'd1, 59'd0, ir[19:15]} & {65{
+                    op[`LOAD]  | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
+                    op[`STORE] | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
+                    op[`OP_FP] | op[`MADD]     | op[`MSUB]   | op[`NMSUB]     |
+                    op[`NMADD] | op[`BRANCH]}} |
+                {1'd0, in_if1.pc} & {65{
+                    op[`JALR] | op[`JAL] | op[`AUIPC]}};
+            out_ex.oprand[1] <=
+                {1'd1, 59'd0, ir[24:20]} & {65{
+                    op[`OP]   | op[`OP_32] | op[`OP_FP] | op[`MADD]  |
+                    op[`MSUB] | op[`NMSUB] | op[`NMADD] | op[`BRANCH]}} |
+                {1'd0, imm} & {65{
+                    op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
+                    op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
+                (in_if1.compressed ? 65'd2 : 65'd4) & {65{
+                    op[`JAL] | op[`JALR]}};
+            out_ex.oprand[2] <=
+                {1'd1, 59'd0, ir[31:27]} & {65{
+                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+    //                | op[`OP_IMM_32],
+    //     | op[`OP_32]    | op[`OP_FP],  // R
+    //     op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
+            out_ex.operator[`EX_ADD] <=
+                op[`LOAD]  | op[`LOAD_FP] | op[`JALR]     | op[`AUIPC] |
+                op[`LUI]   | op[`STORE]   | op[`STORE_FP] | op[`JAL]   |
+                op[`OP_IMM] & ir[14:12] == 3'b000 |
+                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_SUB] <=
+                op[`BRANCH] |
+                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
+            out_ex.operator[`EX_SLL] <=
+                op[`OP_IMM] & ir[14:12] == 3'b001 & ir[31:26] == 6'd0 |
+                op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_SLT] <=
+                op[`OP_IMM] & ir[14:12] == 3'b010 |
+                op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_SLTU] <=
+                op[`OP_IMM] & ir[14:12] == 3'b011 |
+                op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_XOR] <=
+                op[`OP_IMM] & ir[14:12] == 3'b100 |
+                op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_SRL] <=
+                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'd0 |
+                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_SRA] <=
+                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'b010000 |
+                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
+            out_ex.operator[`EX_OR] <=
+                op[`OP_IMM] & ir[14:12] == 3'b110 |
+                op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_AND] <=
+                op[`OP_IMM] & ir[14:12] == 3'b111 |
+                op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'd0;
+            out_ex.operator[`EX_MUL] <=
+                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_MULH] <=
+                op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_MULHSU] <=
+                op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_MULHU] <=
+                op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_DIV] <=
+                op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_DIVU] <=
+                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_REM] <=
+                op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'b0000001;
+            out_ex.operator[`EX_REMU] <=
+                op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'b0000001;
+        end
 endmodule
 
 module ex_stage(input logic clk, input logic rst,
-    output logic get_id, input id_ex_t in_id,
-    input logic ena_ma, output ex_ma_t out_ma
+    input  id_ex_t in_id,  output logic get_id,
+    output ex_ma_t out_ma, input  logic ena_ma
 );
     always_comb out_ma.valid = 1'b1;
     always_comb get_id = 1'b1;
 endmodule
 
 module ma_stage(input logic clk, input logic rst,
-    output logic get_ex, input ex_ma_t in_ex,
-    input logic ena_wb, output ma_wb_t out_wb
+    input  ex_ma_t in_ex,  output logic get_ex,
+    output ma_ex_t out_ex, input  logic ena_ex
 );
-    always_comb out_wb.valid = 1'b1;
+    always_comb out_ex.valid = 1'b1;
     always_comb get_ex = 1'b1;
-endmodule
-
-module wb_stage(input logic clk, input logic rst,
-    output logic get_ma, input ma_wb_t in_ma
-);
-    always_comb get_ma = 1'b1;
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
