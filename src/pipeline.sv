@@ -20,24 +20,59 @@
 `define JALR      5'b11001
 `define JAL       5'b11011
 `define SYSTEM    5'b11100
-`define EX_ADD    5'd0 // Execution stage operations
-`define EX_SUB    5'd1
-`define EX_SLL    5'd2
-`define EX_SLT    5'd3
-`define EX_SLTU   5'd4
-`define EX_XOR    5'd5
-`define EX_SRL    5'd6
-`define EX_SRA    5'd7
-`define EX_OR     5'd8
-`define EX_AND    5'd9
-`define EX_MUL    5'd10
-`define EX_MULH   5'd11
-`define EX_MULHSU 5'd12
-`define EX_MULHU  5'd13
-`define EX_DIV    5'd14
-`define EX_DIVU   5'd15
-`define EX_REM    5'd16
-`define EX_REMU   5'd17
+`define EX_ADD    6'd0 // Execution stage operations
+`define EX_SUB    6'd1
+`define EX_SLL    6'd2
+`define EX_SLT    6'd3
+`define EX_SLTU   6'd4
+`define EX_XOR    6'd5
+`define EX_SRL    6'd6
+`define EX_SRA    6'd7
+`define EX_OR     6'd8
+`define EX_AND    6'd9
+`define EX_MIN    6'd10
+`define EX_MAX    6'd11
+`define EX_MINU   6'd12
+`define EX_MAXU   6'd13
+`define EX_MUL    6'd14
+`define EX_MULH   6'd15
+`define EX_MULHSU 6'd16
+`define EX_MULHU  6'd17
+`define EX_DIV    6'd18
+`define EX_DIVU   6'd19
+`define EX_REM    6'd20
+`define EX_REMU   6'd21
+`define EX_ADDW   6'd22
+`define EX_SUBW   6'd23
+`define EX_SLLW   6'd24
+`define EX_SRLW   6'd25
+`define EX_SRAW   6'd26
+`define EX_MULW   6'd27
+`define EX_DIVW   6'd28
+`define EX_DIVUW  6'd29
+`define EX_REMW   6'd30
+`define EX_REMUW  6'd31
+`define EX_FADD   6'd32
+`define EX_FSUB   6'd33
+`define EX_FMUL   6'd34
+`define EX_FNMUL  6'd35
+`define EX_FDIV   6'd36
+`define EX_FSQRT  6'd37
+`define EX_FSGNJ  6'd38
+`define EX_FSGNJN 6'd39
+`define EX_FSGNJX 6'd40
+`define EX_FMIN   6'd41
+`define EX_FMAX   6'd42
+`define EX_FEQ    6'd43
+`define EX_FLT    6'd44
+`define EX_FLE    6'd45
+`define EX_FMVFI  6'd46
+`define EX_FCLASS 6'd47
+`define EX_FMVIF  6'd48
+`define EX_FCVTIF 6'd49
+`define EX_FCVTFI 6'd50
+`define EX_FCVTSD 6'd51
+`define EX_FCVTDS 6'd52
 
 // PC -> IF0: PC stage generate an address for IF0 stage.
 typedef struct packed { logic valid; logic [63:0] pc; } pc_if0_t;
@@ -63,18 +98,23 @@ typedef struct packed {
 //           immediate, operator, and following stages info.
 typedef struct packed {
     logic valid;
-    logic [2:0][64:0] oprand; // EX stage info
-    logic [31:0] operator;
+    logic [64:0] a, b; // EX stage info
+    logic [52:0] exop;
+    logic [2:0] frm, bmask;
+    logic fdouble, bneg, j;
+    logic [63:0] jbase, joffset;
     logic mr, mw; // MA stage info
     logic [2:0] bits;
-    logic [4:0] rmwa;
-    logic [4:0] rda; // WB stage info
+    logic [6:0] rmwa;
+    logic [6:0] rda; // WB stage info
 } id_ex_t;
 typedef struct packed {
     logic valid;
+    logic [63:0] res;
     logic mr, mw;
     logic [2:0] bits;
-    logic [4:0] rma;
+    logic [4:0] rmwa;
+    logic [6:0] rda;
 } ex_ma_t;
 typedef struct packed { logic valid; logic [4:0] rda; logic [63:0] rd; } ma_ex_t;
 
@@ -234,16 +274,11 @@ module id_stage(input logic clk, input logic rst,
     input  if1_id_t in_if1, output logic get_if1,
     output id_ex_t  out_ex, input  logic ena_ex
 );
-    //     op[`LOAD]  | op[`LOAD_FP]   | op[`MISC_MEM] | op[`OP_IMM]  // I
-    //                | op[`OP_IMM_32] | op[`JALR]     | op[`SYSTEM],
-    //     op[`AUIPC] | op[`LUI],                                     // U
-    //     op[`STORE] | op[`STORE_FP],                                // S
-    //     op[`AMO]   | op[`OP]        | op[`OP_32]    | op[`OP_FP],  // R
-    //     op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
-    //     op[`BRANCH],                                               // B
-    //     op[`JAL]                                                   // J
     logic [31:0] ir, op;
     logic [63:0] imm;
+    id_ex_t [2:0] out_ex_q;
+    logic [2:0][52:0] exop;
+    logic [2:0] ena_q;
     always_comb ir = in_if1.ir;
     always_comb for (int i = 0; i < 32; i++)
         op[i] = ir[6:2] == i[4:0];
@@ -257,84 +292,199 @@ module id_stage(input logic clk, input logic rst,
             op[`STORE] | op[`STORE_FP]}} | // S type
         {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} & {64{op[`BRANCH]}} | // B type
         {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} & {64{op[`JAL]}}; // J type
-    always_comb get_if1 = ena_ex | ~in_if1.valid;
+    always_comb begin
+        exop[0][`EX_ADD] =
+            op[`LOAD]  | op[`LOAD_FP] | op[`JALR]     | op[`AUIPC] |
+            op[`LUI]   | op[`STORE]   | op[`STORE_FP] | op[`JAL]   |
+            op[`OP_IMM] & ir[14:12] == 3'b000 |
+            op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
+        exop[0][`EX_SUB] =
+            op[`BRANCH] |
+            op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
+        exop[0][`EX_SLL] =
+            op[`OP_IMM] & ir[14:12] == 3'b001 & ir[31:26] == 6'd0 |
+            op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
+        exop[0][`EX_SLT] =
+            op[`OP_IMM] & ir[14:12] == 3'b010 |
+            op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'd0;
+        exop[0][`EX_SLTU] =
+            op[`OP_IMM] & ir[14:12] == 3'b011 |
+            op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'd0;
+        exop[0][`EX_XOR] =
+            op[`OP_IMM] & ir[14:12] == 3'b100 |
+            op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'd0;
+        exop[0][`EX_SRL] =
+            op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'd0 |
+            op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
+        exop[0][`EX_SRA] =
+            op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'b010000 |
+            op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
+        exop[0][`EX_OR] =
+            op[`OP_IMM] & ir[14:12] == 3'b110 |
+            op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'd0;
+        exop[0][`EX_AND] =
+            op[`OP_IMM] & ir[14:12] == 3'b111 |
+            op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'd0;
+        exop[0][`EX_MUL] = op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b1;
+        exop[0][`EX_MULH] = op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'b1;
+        exop[0][`EX_MULHSU] = op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'b1;
+        exop[0][`EX_MULHU] = op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'b1;
+        exop[0][`EX_DIV] = op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'b1;
+        exop[0][`EX_DIVU] = op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b1;
+        exop[0][`EX_REM] = op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'b1;
+        exop[0][`EX_REMU] = op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'b1;
+        exop[0][`EX_ADDW] =
+            op[`OP_IMM_32] & ir[14:12] == 3'b000 |
+            op[`OP_32] & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
+        exop[0][`EX_SUBW] = op[`OP_32] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
+        exop[0][`EX_SLLW] =
+            op[`OP_IMM_32] & ir[14:12] == 3'b001 & ir[31:25] == 7'd0 |
+            op[`OP_32] & ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
+        exop[0][`EX_SRLW] =
+            op[`OP_IMM_32] & ir[14:12] == 3'b101 & ir[31:25] == 7'd0 |
+            op[`OP_32] & ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
+        exop[0][`EX_SRAW] =
+            op[`OP_IMM_32] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000 |
+            op[`OP_32] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
+        exop[0][`EX_MULW] = op[`OP_32] & ir[14:12] == 3'b000 & ir[31:25] == 7'b1;
+        exop[0][`EX_DIVW] = op[`OP_32] & ir[14:12] == 3'b100 & ir[31:25] == 7'b1;
+        exop[0][`EX_DIVUW] = op[`OP_32] & ir[14:12] == 3'b101 & ir[31:25] == 7'b1;
+        exop[0][`EX_REMW] = op[`OP_32] & ir[14:12] == 3'b110 & ir[31:25] == 7'b1;
+        exop[0][`EX_REMUW] = op[`OP_32] & ir[14:12] == 3'b111 & ir[31:25] == 7'b1;
+        exop[0][`EX_FADD] = op[`OP_FP] & ir[31:26] == 6'b000000;
+        exop[0][`EX_FSUB] = op[`OP_FP] & ir[31:26] == 6'b000010;
+        exop[0][`EX_FMUL] = op[`OP_FP] & ir[31:26] == 6'b000100 |
+            op[`MADD] & ir[26:25] == 2'd0 |
+            op[`MSUB] & ir[26:25] == 2'd0;
+        exop[0][`EX_FNMUL] =
+            op[`NMADD] & ir[26:25] == 2'd0 |
+            op[`NMSUB] & ir[26:25] == 2'd0;
+        exop[0][`EX_FDIV] = op[`OP_FP] & ir[31:26] == 6'b000110;
+        exop[0][`EX_FSQRT] = op[`OP_FP] & ir[31:26] == 6'b010110 & ir[24:20] == 5'd0;
+        exop[0][`EX_FSGNJ] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b000;
+        exop[0][`EX_FSGNJN] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b001;
+        exop[0][`EX_FSGNJX] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b010;
+        exop[0][`EX_FMIN] = op[`OP_FP] & ir[31:26] == 6'b001010 & ir[14:12] == 3'b000;
+        exop[0][`EX_FMAX] = op[`OP_FP] & ir[31:26] == 6'b001010 & ir[14:12] == 3'b001;
+        exop[0][`EX_FEQ] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b010;
+        exop[0][`EX_FLT] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b001;
+        exop[0][`EX_FLE] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b000;
+        exop[0][`EX_FMVFI] = op[`OP_FP] & ir[31:26] == 6'b111000 &
+            ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
+        exop[0][`EX_FCLASS] = op[`OP_FP] & ir[31:26] == 6'b111000 &
+            ir[14:12] == 3'b001 & ir[24:20] == 5'd0;
+        exop[0][`EX_FMVIF] = op[`OP_FP] & ir[31:26] == 6'b111100 &
+            ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
+        exop[0][`EX_FCVTIF] = op[`OP_FP] & ir[31:26] == 6'b110000;
+        exop[0][`EX_FCVTFI] = op[`OP_FP] & ir[31:26] == 6'b110100;
+        exop[0][`EX_FCVTSD] = op[`OP_FP] & ir[31:25] == 7'b0100000 & ir[24:20] == 5'd1;
+        exop[0][`EX_FCVTDS] = op[`OP_FP] & ir[31:25] == 7'b0100001 & ir[24:20] == 5'd0;
+    end
+    always_comb exop[1] =
+        (1 << `EX_ADD)  & {53{op[`AMO] & ir[31:27] == 5'b00001}} |
+        (1 << `EX_ADD)  & {53{op[`AMO] & ir[31:27] == 5'b00000}} |
+        (1 << `EX_XOR)  & {53{op[`AMO] & ir[31:27] == 5'b00100}} |
+        (1 << `EX_AND)  & {53{op[`AMO] & ir[31:27] == 5'b01100}} |
+        (1 << `EX_OR)   & {53{op[`AMO] & ir[31:27] == 5'b01000}} |
+        (1 << `EX_MIN)  & {53{op[`AMO] & ir[31:27] == 5'b10000}} |
+        (1 << `EX_MAX)  & {53{op[`AMO] & ir[31:27] == 5'b10100}} |
+        (1 << `EX_MINU) & {53{op[`AMO] & ir[31:27] == 5'b11000}} |
+        (1 << `EX_MAXU) & {53{op[`AMO] & ir[31:27] == 5'b11100}} |
+        (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
+        (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
+    always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
+    always_comb get_if1 = ena_ex & ~ena_q[1] | ~in_if1.valid;
+    always_comb out_ex = out_ex_q[0];
     always_ff @(posedge clk)
-        if (rst) begin
-            out_ex.valid <= 0;
-        end else if (ena_ex) begin
-            out_ex.valid <= in_if1.valid;
-            // AMO can be separated to several instructions and pushed into a queue
-            out_ex.oprand[0] <=
+        if (rst)
+            out_ex_q <= 0;
+        else if (get_if1 & in_if1.valid) begin
+            out_ex_q[0].valid <= 1'b1;
+            out_ex_q[0].a <=
                 {1'd1, 59'd0, ir[19:15]} & {65{
-                    op[`LOAD]  | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
-                    op[`STORE] | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
-                    op[`OP_FP] | op[`MADD]     | op[`MSUB]   | op[`NMSUB]     |
-                    op[`NMADD] | op[`BRANCH]}} |
-                {1'd0, in_if1.pc} & {65{
-                    op[`JALR] | op[`JAL] | op[`AUIPC]}};
-            out_ex.oprand[1] <=
+                    op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
+                    op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
+                    op[`BRANCH] | op[`AMO]}} |
+                {1'd1, 59'd1, ir[19:15]} & {{65{
+                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                    op[`OP_FP]}}} |
+                {1'd0, in_if1.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
+            if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
+                out_ex_q[0].b <= {60'd0, ir[24:20]};
+            else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
+                exop[0][`EX_FMVIF] | exop[0][`EX_FMVFI])
+                out_ex_q[0].b <= 65'd0;
+            else out_ex_q[0].b <=
                 {1'd1, 59'd0, ir[24:20]} & {65{
-                    op[`OP]   | op[`OP_32] | op[`OP_FP] | op[`MADD]  |
-                    op[`MSUB] | op[`NMSUB] | op[`NMADD] | op[`BRANCH]}} |
+                    op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
+                {1'd1, 59'd1, ir[24:20]} & {{65{
+                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                    op[`OP_FP]}}} |
                 {1'd0, imm} & {65{
                     op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
                     op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
-                (in_if1.compressed ? 65'd2 : 65'd4) & {65{
-                    op[`JAL] | op[`JALR]}};
-            out_ex.oprand[2] <=
-                {1'd1, 59'd0, ir[31:27]} & {65{
+                (in_if1.compressed ? 65'd2 : 65'd4) & {65{op[`JAL] | op[`JALR]}};
+            out_ex_q[0].exop <= exop[0];
+            out_ex_q[0].bmask <= {3{op[`BRANCH]}} &
+                {ir[14:13] == 2'b00, ir[14:13] == 2'b10, ir[14:13] == 2'b11};
+            out_ex_q[0].bneg <= ir[12];
+            out_ex_q[0].j <= op[`JAL] | op[`JALR];
+            out_ex_q[0].jbase <=
+                in_if1.pc & {64{op[`JAL] | op[`BRANCH]}} |
+                {59'd0, ir[19:15]} & {64{op[`JALR]}};
+            out_ex_q[0].joffset <= imm;
+            out_ex_q[0].frm <= ir[14:12];
+            out_ex_q[0].fdouble <= ir[25];
+            out_ex_q[0].mr <= op[`LOAD] | op[`LOAD_FP] | op[`AMO];
+            out_ex_q[0].mw <= op[`STORE] | op[`STORE_FP];
+            out_ex_q[0].bits <= ir[14:12];
+            out_ex_q[0].rmwa <=
+                {2'b0, ir[24:20]} & {7{op[`STORE]}} |
+                {2'b1, ir[24:20]} & {7{op[`STORE_FP]}};
+            out_ex_q[0].rda <=
+                {2'd0, ir[11:7]} & {7{
+                    op[`LOAD] | op[`OP_IMM] | op[`AUIPC] | op[`OP_IMM_32] |
+                    op[`OP]   | op[`LUI]    | op[`OP_32] | op[`JALR]      |
+                    op[`JAL]  | op[`AMO]}} |
+                {2'd1, ir[11:7]} & {7{op[`LOAD_FP] | op[`OP_FP]}} |
+                {2'd3, 5'd0} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+
+            out_ex_q[1].valid <=
+                op[`AMO] | op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD];
+            out_ex_q[1].a <=
+                {1'd1, 59'd0, ir[11:7]} & {65{op[`AMO]}} |
+                {1'd1, 59'd3, 5'd0} & {65{
                     op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
-    //                | op[`OP_IMM_32],
-    //     | op[`OP_32]    | op[`OP_FP],  // R
-    //     op[`MADD]  | op[`MSUB]      | op[`NMSUB]    | op[`NMADD],  // R4
-            out_ex.operator[`EX_ADD] <=
-                op[`LOAD]  | op[`LOAD_FP] | op[`JALR]     | op[`AUIPC] |
-                op[`LUI]   | op[`STORE]   | op[`STORE_FP] | op[`JAL]   |
-                op[`OP_IMM] & ir[14:12] == 3'b000 |
-                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_SUB] <=
-                op[`BRANCH] |
-                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
-            out_ex.operator[`EX_SLL] <=
-                op[`OP_IMM] & ir[14:12] == 3'b001 & ir[31:26] == 6'd0 |
-                op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_SLT] <=
-                op[`OP_IMM] & ir[14:12] == 3'b010 |
-                op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_SLTU] <=
-                op[`OP_IMM] & ir[14:12] == 3'b011 |
-                op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_XOR] <=
-                op[`OP_IMM] & ir[14:12] == 3'b100 |
-                op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_SRL] <=
-                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'd0 |
-                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_SRA] <=
-                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'b010000 |
-                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
-            out_ex.operator[`EX_OR] <=
-                op[`OP_IMM] & ir[14:12] == 3'b110 |
-                op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_AND] <=
-                op[`OP_IMM] & ir[14:12] == 3'b111 |
-                op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'd0;
-            out_ex.operator[`EX_MUL] <=
-                op[`OP] & ir[14:12] == 3'b000 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_MULH] <=
-                op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_MULHSU] <=
-                op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_MULHU] <=
-                op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_DIV] <=
-                op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_DIVU] <=
-                op[`OP] & ir[14:12] == 3'b101 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_REM] <=
-                op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'b0000001;
-            out_ex.operator[`EX_REMU] <=
-                op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'b0000001;
+            out_ex_q[1].b <=
+                {1'd1, 59'd0, ir[24:20]} & {65{op[`AMO]}} |
+                {1'd1, 59'd1, ir[31:27]} & {65{
+                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+            out_ex_q[1].exop <= exop[1];
+            out_ex_q[1].bmask <= 0;
+            out_ex_q[1].j <= 0;
+            out_ex_q[1].frm <= ir[14:12];
+            out_ex_q[1].fdouble <= ir[25];
+            out_ex_q[1].mr <= 0;
+            out_ex_q[1].mw <= 0;
+            out_ex_q[1].rda <=
+                {2'd3, 5'd0} & {7{op[`AMO]}} |
+                {2'd1, ir[11:7]} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+
+            out_ex_q[2].valid <= op[`AMO];
+            out_ex_q[2].a <= {1'd1, 59'd0, ir[19:15]} & {65{op[`AMO]}};
+            out_ex_q[2].b <= {1'd0, imm} & {65{op[`AMO]}};
+            out_ex_q[2].exop <= exop[2];
+            out_ex_q[2].bmask <= 0;
+            out_ex_q[2].j <= 0;
+            out_ex_q[2].mr <= 0;
+            out_ex_q[2].mw <= op[`AMO];
+            out_ex_q[2].bits <= ir[14:12];
+            out_ex_q[2].rmwa <= {2'd3, 5'd0} & {7{op[`AMO]}};
+            out_ex_q[2].rda <= 0;
+        end
+        else if (ena_ex) begin
+            ena_q <= ena_q >> 1;
+            out_ex_q <= {340'd0, out_ex_q[2], out_ex_q[1]};
         end
 endmodule
 
@@ -342,8 +492,18 @@ module ex_stage(input logic clk, input logic rst,
     input  id_ex_t in_id,  output logic get_id,
     output ex_ma_t out_ma, input  logic ena_ma
 );
-    always_comb out_ma.valid = 1'b1;
-    always_comb get_id = 1'b1;
+    logic [52:0] op;
+    always_comb op = in_id.exop;
+    always_comb get_id = ena_ma | ~in_id.valid;
+    always_ff @(posedge clk)
+        if (rst) out_ma.valid <= 1'b0;
+        else if (ena_ma) begin
+            out_ma.valid <= in_id.valid & (
+                op[`EX_ADD]  | op[`EX_SUB]  | op[`EX_SLL] | op[`EX_SLT] |
+                op[`EX_SLTU] | op[`EX_XOR]  | op[`EX_SRL] | op[`EX_SRA] |
+                op[`EX_OR]   | op[`EX_AND]  | op[`EX_MIN] | op[`EX_MAX] |
+                op[`EX_MINU] | op[`EX_MAXU] | 1'b1);
+        end
 endmodule
 
 module ma_stage(input logic clk, input logic rst,
