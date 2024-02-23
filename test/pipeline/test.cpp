@@ -268,9 +268,9 @@ int main(int argc, char **argv)
             dut->dcache_r_data = DLE(memory, dr_delay.front().addr);
         // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
         uint64_t bitwidth = 8 * (1 << (dr_delay.front().bits & 3));
-        dut->dcache_r_data &= (1 << bitwidth) - 1;
+        dut->dcache_r_data &= (1llu << bitwidth) - 1;
         if (((1 << bitwidth - 1) & dut->dcache_r_data) && (dr_delay.front().bits >> 2))
-            dut->dcache_r_data |= ~((1 << bitwidth) - 1); // msb = 1 and sign extended
+            dut->dcache_r_data |= ~((1llu << bitwidth) - 1); // msb = 1 and sign extended
         dut->dcache_w_done = dw_delay.front().rqst;
         for (int j = 0; dw_delay.front().rqst && j < (1 << (dw_delay.front().bits & 3)); j++)
             memory[dw_delay.front().addr + j] = DTOB(dw_delay.front().data, j);

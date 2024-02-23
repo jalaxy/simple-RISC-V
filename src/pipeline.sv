@@ -102,7 +102,7 @@ typedef struct packed {
 } id_ex_t;
 typedef struct packed {
     logic valid;
-    logic [63:0] res;
+    logic [64:0] res;
     logic mr, mw;
     logic [2:0] bits;
     logic [6:0] rmwa;
@@ -139,7 +139,7 @@ module pipeline(
     xx_pc_t data_id_pc;     logic get_id_pc;
     xx_pc_t data_ex_pc;     logic get_ex_pc;
     logic [3:0][6:0] raddr; logic [3:0][64:0] rvalue;
-    logic [1:0][6:0] waddr; logic [1:0][63:0] wvalue;
+    logic [1:0][6:0] waddr; logic [1:0][64:0] wvalue;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
         .in_if0(data_if0_pc), .get_if0(get_if0_pc),
@@ -169,7 +169,12 @@ module pipeline(
     ma_stage ma_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_ma), .get_ex(get_ex_ma),
         .raddr(raddr[2]), .rvalue(rvalue[2]),
-        .waddr(waddr[1]), .wvalue(wvalue[1]));
+        .waddr(waddr[1]), .wvalue(wvalue[1]),
+        .dcache_r_rqst(dcache_r_rqst), .dcache_r_addr(dcache_r_addr),
+        .dcache_r_bits(dcache_r_bits), .dcache_r_done(dcache_r_done),
+        .dcache_r_data(dcache_r_data), .dcache_w_rqst(dcache_w_rqst),
+        .dcache_w_addr(dcache_w_addr), .dcache_w_bits(dcache_w_bits),
+        .dcache_w_data(dcache_w_data), .dcache_w_done(dcache_w_done));
     regfile regfile_inst(.clk(clk), .rst(rst),
         .raddr(raddr), .rvalue(rvalue),
         .waddr(waddr), .wvalue(wvalue));
@@ -512,12 +517,13 @@ module ex_stage(input logic clk, input logic rst,
     output ex_ma_t out_ma, input  logic ena_ma,
     output xx_pc_t out_pc, input  logic ena_pc,
     output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
-    output logic [6:0] waddr, output logic [63:0] wvalue
+    output logic [6:0] waddr, output logic [64:0] wvalue
 );
     always_comb raddr[0] = in_id.valid & in_id.a[64] ? in_id.a[6:0] : 7'd0;
     always_comb raddr[1] = in_id.valid & in_id.b[64] ? in_id.b[6:0] : 7'd0;
-    always_comb waddr = out_ma.valid & ~(out_ma.mr | out_ma.mw) ? out_ma.rda : 7'd0;
-    always_comb wvalue = out_ma.valid & ~(out_ma.mr | out_ma.mw) ? out_ma.res : 64'd0;
+    always_comb waddr = out_ma.valid ? out_ma.rda : 7'd0;
+    always_comb wvalue = out_ma.valid ?
+        {out_ma.mr | out_ma.mw | out_ma.res[64], out_ma.res[63:0]} : 65'd0;
     logic [52:0] op;
     logic [63:0] a, b;
     logic [64:0] sub;
@@ -531,26 +537,22 @@ module ex_stage(input logic clk, input logic rst,
     always_ff @(posedge clk)
         if (rst) out_ma.valid <= 1'b0;
         else if (ena_ma) begin
-            out_ma.valid <= in_id.valid & (
-                op[`EX_ADD]  | op[`EX_SUB]  | op[`EX_SLL] | op[`EX_SLT] |
-                op[`EX_SLTU] | op[`EX_XOR]  | op[`EX_SRL] | op[`EX_SRA] |
-                op[`EX_OR]   | op[`EX_AND]  | op[`EX_MIN] | op[`EX_MAX] |
-                op[`EX_MINU] | op[`EX_MAXU]);
+            out_ma.valid <= in_id.valid;
             out_ma.res <=
-                {64{op[`EX_ADD]}}  & (a + b) |
-                {64{op[`EX_SUB]}}  & sub[63:0] |
-                {64{op[`EX_SLL]}}  & (a << b[5:0]) |
-                {64{op[`EX_SLT]}}  & {63'd0, sub[63]} |
-                {64{op[`EX_SLTU]}} & {63'd0, sub[64]} |
-                {64{op[`EX_XOR]}}  & (a ^ b) | 
-                {64{op[`EX_SRL]}}  & (a >> b[5:0]) |
-                {64{op[`EX_SRA]}}  & ($signed($signed(a) >>> b[5:0])) |
-                {64{op[`EX_OR]}}   & (a | b) |
-                {64{op[`EX_AND]}}  & (a & b) |
-                {64{op[`EX_MIN]}}  & (sub[63] ? a : b) |
-                {64{op[`EX_MAX]}}  & (sub[63] ? b : a) |
-                {64{op[`EX_MINU]}} & (sub[64] ? a : b) |
-                {64{op[`EX_MAXU]}} & (sub[64] ? b : a);
+                {65{op[`EX_ADD]}}  & {1'b0, a + b} |
+                {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
+                {65{op[`EX_SLL]}}  & {1'b0, a << b[5:0]} |
+                {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
+                {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
+                {65{op[`EX_XOR]}}  & {1'b0, a ^ b} | 
+                {65{op[`EX_SRL]}}  & {1'b0, a >> b[5:0]} |
+                {65{op[`EX_SRA]}}  & {1'b0, $signed($signed(a) >>> b[5:0])} |
+                {65{op[`EX_OR]}}   & {1'b0, a | b} |
+                {65{op[`EX_AND]}}  & {1'b0, a & b} |
+                {65{op[`EX_MIN]}}  & {1'b0, sub[63] ? a : b} |
+                {65{op[`EX_MAX]}}  & {1'b0, sub[63] ? b : a} |
+                {65{op[`EX_MINU]}} & {1'b0, sub[64] ? a : b} |
+                {65{op[`EX_MAXU]}} & {1'b0, sub[64] ? b : a};
             out_ma.mr <= in_id.mr;
             out_ma.mw <= in_id.mw;
             out_ma.bits <= in_id.bits;
@@ -570,31 +572,55 @@ endmodule
 module ma_stage(input logic clk, input logic rst,
     input  ex_ma_t in_ex,  output logic get_ex,
     output logic [6:0] raddr, input logic [64:0] rvalue,
-    output logic [6:0] waddr, output logic [63:0] wvalue
+    output logic [6:0] waddr, output logic [64:0] wvalue,
+    output logic        dcache_r_rqst,
+    output logic [63:0] dcache_r_addr,
+    output logic  [2:0] dcache_r_bits,
+    input  logic        dcache_r_done,
+    input  logic [63:0] dcache_r_data,
+    output logic        dcache_w_rqst,
+    output logic [63:0] dcache_w_addr,
+    output logic  [2:0] dcache_w_bits,
+    output logic [63:0] dcache_w_data,
+    input  logic        dcache_w_done
 );
+    logic [64:0] res;
+    logic mr;
     always_comb get_ex = 1;
+    always_comb raddr = in_ex.valid & in_ex.mw ? in_ex.rmwa : 7'd0;
+    always_comb dcache_r_rqst = in_ex.valid & in_ex.mr;
+    always_comb dcache_r_addr = in_ex.res[63:0];
+    always_comb dcache_r_bits = in_ex.bits;
+    always_comb dcache_w_rqst = in_ex.valid & in_ex.mw;
+    always_comb dcache_w_addr = in_ex.res[63:0];
+    always_comb dcache_w_bits = in_ex.bits;
+    always_comb dcache_w_data = rvalue[63:0];
+    always_comb if (mr) wvalue = {1'b0, dcache_r_data};
+        else wvalue = res;
+    always_ff @(posedge clk) res <= in_ex.res;
+    always_ff @(posedge clk) mr <= in_ex.mr;
     always_ff @(posedge clk)
         if (rst | ~in_ex.valid) waddr <= 7'd0;
-        else begin
-            waddr <= in_ex.rda;
-            wvalue <= in_ex.res[63:0];
-        end
+        else if (in_ex.mw) waddr <= 7'd0;
+        else if (in_ex.mr) waddr <= in_ex.rda;
+        else waddr <= in_ex.rda;
 endmodule
 
 module regfile(input logic clk, input logic rst,
     input logic [3:0][6:0] raddr, output logic [3:0][64:0] rvalue,
-    input logic [1:0][6:0] waddr, input  logic [1:0][63:0] wvalue
+    input logic [1:0][6:0] waddr, input  logic [1:0][64:0] wvalue
 );
     logic [64:0] invalid;
     logic [64:0][63:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
     always_comb for (int i = 0; i < 4; i++)
         if      (raddr[i] == 0)        rvalue[i] = 65'd0;
-        else if (raddr[i] == waddr[0]) rvalue[i] = {1'b1, wvalue[0]};
-        else if (raddr[i] == waddr[1]) rvalue[i] = {1'b1, wvalue[1]};
+        else if (raddr[i] == waddr[0]) rvalue[i] = wvalue[0];
+        else if (raddr[i] == waddr[1]) rvalue[i] = wvalue[1];
         else                           rvalue[i] = {invalid[raddr[i]], regs[raddr[i]]};
     always_comb for (int i = 0; i < 65; i++)
         invalid[i] = i[6:0] == waddr[0] | i[6:0] == waddr[1];
-    always_ff @(posedge clk) if (waddr[0] != 0) regs[waddr[0]] <= wvalue[0];
+    always_ff @(posedge clk) if (waddr[1] != 0 & ~wvalue[1][64])
+        regs[waddr[1]] <= wvalue[1][63:0];
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
