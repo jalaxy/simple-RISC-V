@@ -1,4 +1,6 @@
 `define RST_PC 64'h400000 // reset pc
+`define PTSZ 8
+`define PTLEN 339
 `define LOAD      5'b00000 // opcode map
 `define LOAD_FP   5'b00001
 `define MISC_MEM  5'b00011
@@ -73,9 +75,10 @@
 `define EX_FCVTFI 6'd50
 `define EX_FCVTSD 6'd51
 `define EX_FCVTDS 6'd52
-`define ID_LSU 5'd0 // Async component ID
-`define ID_MUL 5'd1
-`define ID_DIV 5'd2
+`define ID_PT  5'd0 // Async component ID
+`define ID_LSU 5'd1
+`define ID_MUL 5'd2
+`define ID_DIV 5'd3
 `define MUL_MUL    3'd0
 `define MUL_MULH   3'd1
 `define MUL_MULHSU 3'd2
@@ -98,24 +101,24 @@ typedef struct packed {
 } if1_id_t;
 typedef struct packed {
     logic valid;
-    logic [64:0] a, b; // EX stage info
     logic [52:0] exop;
     logic [2:0] frm, bmask;
     logic fdouble, bneg;
     logic [63:0] bbase, boffset;
-    logic mr, mw; // MA stage info
+    logic mr, mw;
     logic [2:0] bits;
     logic [6:0] rmwa;
-    logic [6:0] rda; // WB stage info
+    logic [64:0] a, b; // [136:72] [71:7]
+    logic [6:0] rda;
 } id_ex_t;
 typedef struct packed {
     logic valid;
-    logic [6:0] rda;
-    logic [64:0] rd;
     logic mw;
     logic [63:0] mwaddr;
     logic [2:0] mwbits;
     logic [6:0] rmwa;
+    logic [64:0] rd;
+    logic [6:0] rda;
 } ex_wb_t;
 
 module pipeline(
@@ -147,10 +150,10 @@ module pipeline(
     ex_wb_t data_ex_wb;     logic get_ex_wb;
     xx_pc_t data_id_pc;     logic get_id_pc;
     xx_pc_t data_ex_pc;     logic get_ex_pc;
-    id_ex_t data_ex_pd;     logic get_ex_pd;
-    ex_wb_t data_wb_pd;     logic get_wb_pd;
-    id_ex_t data_pd_ex;     logic get_pd_ex;
-    ex_wb_t data_pd_wb;     logic get_pd_wb;
+    id_ex_t data_ex_pd;     logic [`PTSZ-1:0] mask_ex;
+    ex_wb_t data_wb_pd;     logic [`PTSZ-1:0] mask_wb;
+    id_ex_t data_pd_ex;
+    ex_wb_t data_pd_wb;
     logic [2:0][6:0] raddr; logic [2:0][64:0] rvalue;
     logic mul_rqst, mul_done; logic [4:0] mul_op;
     logic div_rqst, div_done; logic [4:0] div_op;
@@ -178,10 +181,10 @@ module pipeline(
         .out_pc(data_id_pc), .ena_pc(get_id_pc));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst | data_ex_pc.valid),
         .in_id(data_id_ex), .get_id(get_id_ex),
-        .in_pd(data_pd_ex), .get_pd(get_pd_ex),
+        .in_pd(data_pd_ex),
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
         .out_pc(data_ex_pc), .ena_pc(get_ex_pc),
-        .out_pd(data_ex_pd), .ena_pd(get_ex_pd),
+        .out_pd(data_ex_pd), .mask_pd(mask_ex),
         .raddr(raddr[1:0]), .rvalue(rvalue[1:0]),
         .mul_rqst(mul_rqst), .mul_op(mul_op),
         .mul_a(mul_a), .mul_b(mul_b),
@@ -189,18 +192,18 @@ module pipeline(
         .dcache_r_bits(dcache_r_bits));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
-        .in_pd(data_pd_wb), .get_pd(get_pd_wb),
-        .out_pd(data_wb_pd), .ena_pd(get_wb_pd),
+        .in_pd(data_pd_wb),
+        .out_pd(data_wb_pd), .mask_pd(mask_wb),
         .raddr(raddr), .rvalue(rvalue),
         .dcache_w_rqst(dcache_w_rqst), .dcache_w_addr(dcache_w_addr),
         .dcache_w_bits(dcache_w_bits), .dcache_w_data(dcache_w_data));
-    pending_queue pending_queue_inst(.clk(clk), .rst(rst),
-        .in_ex(data_ex_pd), .get_ex(get_ex_pd),
-        .in_wb(data_wb_pd), .get_wb(get_wb_pd),
-        .out_ex(data_pd_ex), .ena_ex(get_pd_ex),
-        .out_wb(data_pd_wb), .ena_wb(get_pd_wb),
-        .async_done({div_done, mul_done, dcache_r_done}),
-        .async_val({div_r, mul_r, dcache_r_data}));
+    pending_table pending_table_inst(.clk(clk), .rst(rst),
+        .in_ex(data_ex_pd), .mask_ex(mask_ex),
+        .in_wb(data_wb_pd), .mask_wb(mask_wb),
+        .out_ex(data_pd_ex), .out_wb(data_pd_wb),
+        .async_done({div_done, mul_done, dcache_r_done, 1'b0}),
+        .async_val({div_r, mul_r, dcache_r_data, 64'd0}),
+        .res_ex(ex_stage_inst.res));
     mul mul_inst(.clk(clk), .rst(rst), .op(mul_op),
         .rqst(mul_rqst), .a(mul_a), .b(mul_b), .done(mul_done), .r(mul_r));
 endmodule
@@ -537,10 +540,10 @@ endmodule
 
 module ex_stage(input logic clk, input logic rst,
     input id_ex_t in_id, output logic get_id,
-    input id_ex_t in_pd, output logic get_pd,
-    output ex_wb_t out_wb, input  logic ena_wb,
-    output xx_pc_t out_pc, input  logic ena_pc,
-    output id_ex_t out_pd, input  logic ena_pd,
+    input id_ex_t in_pd,
+    output ex_wb_t out_wb, input logic ena_wb,
+    output xx_pc_t out_pc, input logic ena_pc,
+    output id_ex_t out_pd, input logic [`PTSZ-1:0] mask_pd,
     output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
     output logic mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
@@ -548,92 +551,101 @@ module ex_stage(input logic clk, input logic rst,
     output logic [63:0] dcache_r_addr,
     output logic  [2:0] dcache_r_bits
 );
-    always_comb raddr[0] = in_id.valid & in_id.a[64] ? in_id.a[6:0] : 7'd0;
-    always_comb raddr[1] = in_id.valid & in_id.b[64] ? in_id.b[6:0] : 7'd0;
+    id_ex_t in;
+    always_comb in = in_pd.valid ? in_pd : in_id;
+    always_comb raddr[0] = in.valid & in.a[64] ? in.a[6:0] : 7'd0;
+    always_comb raddr[1] = in.valid & in.b[64] ? in.b[6:0] : 7'd0;
     logic [52:0] op;
-    logic valid;
     logic [63:0] a, b;
-    logic [64:0] sub;
+    logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
     logic mul, div;
     logic [2:0] bflag;
-    always_comb op = in_id.exop;
-    always_comb valid = in_id.valid & ~rvalue[0][64] & ~rvalue[1][64];
-    always_comb a = in_id.a[64] ? rvalue[0][63:0] : in_id.a[63:0];
-    always_comb b = in_id.b[64] ? rvalue[1][63:0] : in_id.b[63:0];
+    always_comb op = in.exop;
+    always_comb a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
+    always_comb b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
     always_comb sub = {1'b0, a} - {1'b0, b};
     always_comb add = a + b;
     always_comb sll = a << b[5:0];
     always_comb srl = a >> b[5:0];
     always_comb sra = $signed($signed(a) >>> b[5:0]);
     always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
-    always_comb get_id = ~valid | ena_wb & ~in_pd.valid;
-    always_comb get_pd = 1'b1;
+    always_comb begin
+        out_pd = in;
+        out_pd.valid = in.valid & (rvalue[0][64] | rvalue[1][64]);
+        out_pd.a = in.a[64] ? rvalue[0] : in.a;
+        out_pd.b = in.b[64] ? rvalue[1] : in.b;
+    end
+    always_comb get_id = ~in_id.valid |
+        ~in_pd.valid & (out_pd.valid & |mask_pd | ena_wb);
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
                       op[`EX_MULW];
-    always_comb mul_rqst = ~rst & get_id & valid & mul;
+    always_comb mul_rqst = ~rst & in.valid & mul;
     always_comb mul_op = {op[`EX_MUL], op[`EX_MULH], op[`EX_MULHSU], op[`EX_MULHU],
                           op[`EX_MULW]};
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
     always_ff @(posedge clk)
-        if (~rst & get_id & valid & in_id.mr) begin
+        if (~rst & get_id & in.valid & in.mr) begin
             dcache_r_rqst <= 1'b1;
             dcache_r_addr <= add;
             dcache_r_bits <= in_id.bits;
         end else dcache_r_rqst <= 1'b0;
+    always_comb if (out_pd.valid)
+            res = {1'b1, {(59-`PTSZ){1'd0}}, mask_pd, `ID_PT};
+        else if (in.mr)
+            res = {1'b1, 59'd0, `ID_LSU};
+        else res =
+            {65{op[`EX_ADD]}}  & {1'b0, add} |
+            {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
+            {65{op[`EX_SLL]}}  & {1'b0, sll} |
+            {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
+            {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
+            {65{op[`EX_XOR]}}  & {1'b0, a ^ b} | 
+            {65{op[`EX_SRL]}}  & {1'b0, srl} |
+            {65{op[`EX_SRA]}}  & {1'b0, sra} |
+            {65{op[`EX_OR]}}   & {1'b0, a | b} |
+            {65{op[`EX_AND]}}  & {1'b0, a & b} |
+            {65{op[`EX_MIN]}}  & {1'b0, sub[63] ? a : b} |
+            {65{op[`EX_MAX]}}  & {1'b0, sub[63] ? b : a} |
+            {65{op[`EX_MINU]}} & {1'b0, sub[64] ? a : b} |
+            {65{op[`EX_MAXU]}} & {1'b0, sub[64] ? b : a} |
+            {65{op[`EX_ADDW]}} & {1'b0, {32{add[31]}}, add[31:0]} |
+            {65{op[`EX_SUBW]}} & {1'b0, {32{sub[31]}}, sub[31:0]} |
+            {65{op[`EX_SLLW]}} & {1'b0, {32{sll[31]}}, sll[31:0]} |
+            {65{op[`EX_SRLW]}} & {1'b0, {32{srl[31]}}, srl[31:0]} |
+            {65{op[`EX_SRAW]}} & {1'b0, {32{sra[31]}}, sra[31:0]} |
+            {65{mul}}          & {1'b1, 59'd0, `ID_MUL} | 
+            {65{div}}          & {1'b1, 59'd0, `ID_DIV};
     always_ff @(posedge clk)
         if (rst) out_wb.valid <= 1'b0;
         else if (ena_wb)
-            if (valid) begin
+            if (in.valid) begin
                 out_wb.valid <= 1'b1;
-                out_wb.rda <= in_id.rda;
-                if (in_id.mr)
-                    out_wb.rd <= {1'b1, 59'd0, `ID_LSU};
-                else out_wb.rd <=
-                    {65{op[`EX_ADD]}}  & {1'b0, add} |
-                    {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
-                    {65{op[`EX_SLL]}}  & {1'b0, sll} |
-                    {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
-                    {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
-                    {65{op[`EX_XOR]}}  & {1'b0, a ^ b} | 
-                    {65{op[`EX_SRL]}}  & {1'b0, srl} |
-                    {65{op[`EX_SRA]}}  & {1'b0, sra} |
-                    {65{op[`EX_OR]}}   & {1'b0, a | b} |
-                    {65{op[`EX_AND]}}  & {1'b0, a & b} |
-                    {65{op[`EX_MIN]}}  & {1'b0, sub[63] ? a : b} |
-                    {65{op[`EX_MAX]}}  & {1'b0, sub[63] ? b : a} |
-                    {65{op[`EX_MINU]}} & {1'b0, sub[64] ? a : b} |
-                    {65{op[`EX_MAXU]}} & {1'b0, sub[64] ? b : a} |
-                    {65{op[`EX_ADDW]}} & {1'b0, {32{add[31]}}, add[31:0]} |
-                    {65{op[`EX_SUBW]}} & {1'b0, {32{sub[31]}}, sub[31:0]} |
-                    {65{op[`EX_SLLW]}} & {1'b0, {32{sll[31]}}, sll[31:0]} |
-                    {65{op[`EX_SRLW]}} & {1'b0, {32{srl[31]}}, srl[31:0]} |
-                    {65{op[`EX_SRAW]}} & {1'b0, {32{sra[31]}}, sra[31:0]} |
-                    {65{mul}}          & {1'b1, 59'd0, `ID_MUL} | 
-                    {65{div}}          & {1'b1, 59'd0, `ID_DIV};
-                if (in_id.mw) begin
+                out_wb.rda <= in.rda;
+                out_wb.rd <= res;
+                if (in.mw) begin
                     out_wb.mw <= 1'b1;
                     out_wb.mwaddr <= add;
-                    out_wb.mwbits <= in_id.bits;
-                    out_wb.rmwa <= in_id.rmwa;
+                    out_wb.mwbits <= in.bits;
+                    out_wb.rmwa <= in.rmwa;
                 end else out_wb.mw <= 1'b0;
             end else out_wb.valid <= 1'b0;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
         else if (ena_pc)
-            if (valid & in_id.bneg != |(in_id.bmask & bflag)) begin
+            if (in.valid & in.bneg != |(in.bmask & bflag)) begin
                 out_pc.valid <= 1'b1;
-                out_pc.base <= {1'b0, in_id.bbase};
-                out_pc.offset <= in_id.boffset;
+                out_pc.base <= {1'b0, in.bbase};
+                out_pc.offset <= in.boffset;
             end else out_pc.valid <= 1'b0;
 endmodule
 
 module wb_stage(input logic clk, input logic rst,
     input ex_wb_t in_ex, output logic get_ex,
-    input ex_wb_t in_pd, output logic get_pd,
-    output ex_wb_t out_pd, input logic ena_pd,
+    input ex_wb_t in_pd,
+    output ex_wb_t out_pd, input logic [`PTSZ-1:0] mask_pd,
     input logic [2:0][6:0] raddr, output logic [2:0][64:0] rvalue,
     output logic        dcache_w_rqst,
     output logic [63:0] dcache_w_addr,
@@ -641,14 +653,14 @@ module wb_stage(input logic clk, input logic rst,
     output logic [63:0] dcache_w_data
 );
     logic [64:0][64:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
-    always_comb get_pd = 1'b1;
-    always_comb get_ex = ~in_ex.valid | ~(~ena_pd & out_pd.valid) & ~in_pd.valid;
+    always_comb get_ex = ~in_ex.valid | ~out_pd.valid | |mask_pd;
     always_comb for (int i = 0; i < 4; i++)
         if (raddr[i] == 0) rvalue[i] = 65'd0;
         else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
         else if (in_pd.valid & raddr[i] == in_pd.rda) rvalue[i] = in_pd.rd;
         else rvalue[i] = regs[raddr[i]];
-    always_comb out_pd.valid = in_ex.valid & in_ex.rda != 0 & in_ex.rd[64];
+    always_comb out_pd.valid = in_ex.valid &
+        in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[4:0] != `ID_PT;
     always_comb out_pd.rd = in_ex.rd;
     always_comb out_pd.rda = in_ex.rda;
     always_ff @(posedge clk) begin
@@ -662,92 +674,77 @@ module wb_stage(input logic clk, input logic rst,
     always_comb dcache_w_data = regs[in_ex.rmwa][63:0];
 endmodule
 
-module pending_queue(input logic clk, input logic rst,
-    input id_ex_t in_ex, output logic get_ex,
-    input ex_wb_t in_wb, output logic get_wb,
-    output id_ex_t out_ex, input logic ena_ex, // always enabled
-    output ex_wb_t out_wb, input logic ena_wb,
-    input logic [2:0] async_done, input logic [2:0][63:0] async_val
+module pending_table(input logic clk, input logic rst,
+    input id_ex_t in_ex, output logic [`PTSZ-1:0] mask_ex,
+    input ex_wb_t in_wb, output logic [`PTSZ-1:0] mask_wb,
+    output id_ex_t out_ex, output ex_wb_t out_wb,
+    input logic [3:0] async_done, input logic [3:0][63:0] async_val,
+    input logic [64:0] res_ex
 );
-
-// TODO: The queue structure is unnecessary as the structure is actually a DAG.
-
-    parameter sz = 8, len = 339;
-    logic [sz-1:0] ena_q, ena_t;
-    logic [sz-1:0][sz-1:0] data_q;
-    logic [sz-1:0][len:0] data_t; // stage(1), data(len)
-    logic [sz-1:0] ready_q, ready_t;
-    logic [sz-1:0] in1_q, in2_q, out1_q, in1_t, in2_t, out1_t;
-    logic [sz:0] gt0_q/*verilator split_var*/,
-                 gt0_t/*verilator split_var*/, gt1_t/*verilator split_var*/;
-    logic [sz-1:0][sz-1:0] data_out1_q/*verilator split_var*/;
-    logic [sz-1:0][len:0] data_out1_t/*verilator split_var*/;
-    logic [sz:0] tail_q;
-    always_comb get_ex = ~in_ex.valid | |in2_t | |in1_t & ~in_wb.valid;
-    always_comb get_wb = ~in_wb.valid | |in1_t;
-    always_comb for (int i = 0; i <= sz; i++)
-        if (i == 0) tail_q[i] = ~ena_q[0];
-        else if (i == sz) tail_q[i] = ena_q[sz - 1];
-        else tail_q[i] = ena_q[i - 1] & ~ena_q[i];
-    for (genvar i = 0; i < sz; i++) begin
+    logic [`PTSZ-1:0] occ, stage, ready, in1, in2, out1;
+    logic [`PTSZ-1:0][`PTLEN-1:0] data;
+    logic [`PTSZ-1:0][`PTLEN:0] accum_out1/*verilator split_var*/;
+    logic [`PTSZ:0] gt0_in/*verilator split_var*/, gt1_in/*verilator split_var*/,
+                 gt0_out/*verilator split_var*/;
+    always_comb mask_ex = in2 & {(`PTSZ){in_wb.valid}} |
+                          in1 & {(`PTSZ){~in_wb.valid}};
+    always_comb mask_wb = in1;
+    for (genvar i = 0; i < `PTSZ; i++) begin
         id_ex_t data_ex;
         ex_wb_t data_wb;
-        always_comb data_ex = data_t[i][338:0];
-        always_comb data_wb = data_t[i][147:0];
-        always_comb if (data_t[i][len])
-            ready_t[i] = ena_t[i] & ~data_wb.rd[64] | async_done[data_wb.rd[1:0]]; else
-            ready_t[i] = ena_t[i] & (~data_ex.a[64] | async_done[data_ex.a[1:0]]) &
-                                    (~data_ex.b[64] | async_done[data_ex.b[1:0]]);
+        always_comb data_ex = data[i][338:0];
+        always_comb data_wb = data[i][147:0];
+        always_comb if (stage[i])
+            ready[i] = occ[i] & (~data_wb.rd[64] | async_done[data_wb.rd[1:0]]); else
+            ready[i] = occ[i] & ~data_ex.a[64] & ~data_ex.b[64];
     end
     always_comb begin
-        out_wb = data_out1_t[sz-1][147:0];
-        if (out_wb.rd[64]) out_wb.rd = {1'b0, async_val[out_wb.rd[1:0]]};
+        out_wb = accum_out1[`PTSZ-1][`PTLEN] ? accum_out1[`PTSZ-1][147:0] : 0;
+        out_ex = accum_out1[`PTSZ-1][`PTLEN] ? 0 : accum_out1[`PTSZ-1][338:0];
+        if (out_wb.valid & out_wb.rd[64]) out_wb.rd = {1'b0, async_val[out_wb.rd[1:0]]};
     end
-
-    always_comb for (int i = 0; i < sz; i++)
-        ready_q[i] = |(ready_t & data_q[i]);
-    always_comb gt0_q[0] = 1'b0;
-    always_comb gt0_t[0] = 1'b0;
-    always_comb gt1_t[0] = 1'b0;
-    for (genvar i = 1; i <= sz; i++) begin
-        always_comb gt0_q[i] = gt0_q[i - 1] | ready_q[i - 1];
-        always_comb gt0_t[i] = gt0_t[i - 1] | ~ena_t[i - 1] | out1_t[i - 1];
-        always_comb gt1_t[i] = gt1_t[i - 1] | gt0_t[i - 1] & ~ena_t[i - 1];
-        always_comb in1_q[i - 1] = ~gt0_q[i - 1] & tail_q[i - 1] | gt0_q[i] & tail_q[i];
-        always_comb in2_q[i - 1] = i != 1 & in1_q[i - 1];
-        always_comb out1_q[i - 1] = ~gt0_q[i - 1] & gt0_q[i];
-        always_comb in1_t[i - 1] = ~gt0_t[i - 1] & gt0_t[i];
-        always_comb in2_t[i - 1] = ~gt1_t[i - 1] & gt1_t[i]; end
-    always_comb data_out1_q[0] = data_q[0] & {sz{out1_q[0]}};
-    for (genvar i = 1; i < sz; i++)
-        always_comb data_out1_q[i] = data_out1_q[i - 1] | data_q[i] & {sz{out1_q[i]}};
-    always_comb out1_t = data_out1_q[sz - 1];
-    always_comb data_out1_t[0] = data_t[0] & {(len+1){out1_t[0]}};
-    for (genvar i = 1; i < sz; i++)
-        always_comb data_out1_t[i] = data_out1_t[i - 1] | data_t[i] & {(len+1){out1_t[i]}};
-    for (genvar i = 0; i < sz; i++) always_ff @(posedge clk)
-        if (rst) ena_q[i] <= 1'b0;
-        else if ((in_ex.valid & get_ex | in_wb.valid & get_wb) & in1_q[i]) begin
-            ena_q[i] <= 1'b1;
-            data_q[i] <= in1_t;
-        end else if ((in_ex.valid & get_ex & in_wb.valid & get_wb) & in2_q[i]) begin
-            ena_q[i] <= 1'b1;
-            data_q[i] <= in2_t;
-        end else if (gt0_q[i + 1]) begin
-            ena_q[i] <= i == sz - 1 ? 0 : ena_q[i + 1];
-            data_q[i] <= i == sz - 1 ? 0 : data_q[i + 1];
-        end
+    always_comb gt0_in[0] = 1'b0;
+    always_comb gt1_in[0] = 1'b0;
+    always_comb gt0_out[0] = 1'b0;
+    for (genvar i = 1; i <= `PTSZ; i++) begin
+        always_comb gt0_in[i] = gt0_in[i - 1] | ~occ[i - 1] | out1[i - 1];
+        always_comb gt1_in[i] = gt1_in[i - 1] | gt0_in[i - 1] & ~occ[i - 1];
+        always_comb gt0_out[i] = gt0_out[i - 1] | ready[i - 1];
+        always_comb in1[i - 1] = ~gt0_in[i - 1] & gt0_in[i];
+        always_comb in2[i - 1] = ~gt1_in[i - 1] & gt1_in[i];
+        always_comb out1[i - 1] = ~gt0_out[i - 1] & gt0_out[i]; end
+    always_comb accum_out1[0] = {stage[0], data[0]} & {(`PTLEN+1){out1[0]}};
+    for (genvar i = 1; i < `PTSZ; i++) always_comb accum_out1[i] = accum_out1[i - 1] |
+        {stage[i], data[i]} & {(`PTLEN+1){out1[i]}};
     always_ff @(posedge clk)
-        if (rst) ena_t <= 0;
-        else for (int i = 0; i < sz; i++)
-            if (in_wb.valid & in1_t[i]) begin
-                ena_t[i] <= 1'b1;
-                data_t[i] <= {1'b1, 191'd0, in_wb};
+        if (rst) occ <= 0;
+        else for (int i = 0; i < `PTSZ; i++)
+            if (in_wb.valid & in1[i]) begin
+                occ[i] <= 1'b1;
+                stage[i] <= 1'b1;
+                data[i] <= {191'd0, in_wb[147:7],
+                    in_ex.valid & in_wb[6:0] == in_ex[6:0] ? 7'd0 : in_wb[6:0]};
             end else if (in_ex.valid & (
-                ~in_wb.valid & in1_t[i] | in_wb.valid & in2_t[i])) begin
-                ena_t[i] <= 1'b1;
-                data_t[i] <= {1'b0, in_ex};
-            end else if (out1_t[i]) ena_t[i] <= 1'b0;
+                ~in_wb.valid & in1[i] | in_wb.valid & in2[i])) begin
+                occ[i] <= 1'b1;
+                stage[i] <= 1'b0;
+                data[i] <= in_ex;
+            end else if (out1[i]) occ[i] <= 1'b0;
+            else begin
+                if (data[i][71] & async_done[data[i][8:7]])
+                    data[i][71:7] <= {1'b0, async_val[data[i][8:7]]};
+                else if (data[i][71] & data[i][11:7] == `ID_PT &
+                    data[i][`PTSZ+11:12] == out1)
+                    data[i][71:7] <= res_ex;
+                if (~stage[i] & data[i][136] & async_done[data[i][73:72]])
+                    data[i][136:72] <= {1'b0, async_val[data[i][73:72]]};
+                else if (~stage[i] & data[i][136] & data[i][76:72] == `ID_PT &
+                    data[i][`PTSZ+76:77] == out1)
+                    data[i][136:72] <= res_ex;
+                if (in_ex.valid & in_ex.rda == data[i][6:0] |
+                    in_wb.valid & in_wb.rda == data[i][6:0])
+                    data[i][6:0] <= 0;
+            end
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
