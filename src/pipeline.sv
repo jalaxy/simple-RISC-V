@@ -667,10 +667,10 @@ module wb_stage(input logic clk, input logic rst,
         in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[4:0] != `ID_PT;
     always_comb out_pd.rd = in_ex.rd;
     always_comb out_pd.rda = in_ex.rda;
-    always_ff @(posedge clk) begin
+    always_ff @(posedge clk) begin // operating for each i may be better
         if (in_ex.valid & in_ex.rda != 0)
             regs[in_ex.rda] <= in_ex.rd;
-        if (in_pd.valid & in_pd.rda != 0)
+        if (in_pd.valid & in_pd.rda != 0 & ~(in_ex.valid & in_ex.rda == in_pd.rda))
             regs[in_pd.rda] <= in_pd.rd; end
     always_comb dcache_w_rqst = get_ex & in_ex.valid & in_ex.mw;
     always_comb dcache_w_addr = in_ex.mwaddr;
