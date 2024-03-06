@@ -203,7 +203,8 @@ module pipeline(
         .out_ex(data_pd_ex), .out_wb(data_pd_wb),
         .async_done({div_done, mul_done, dcache_r_done, 1'b0}),
         .async_val({div_r, mul_r, dcache_r_data, 64'd0}),
-        .res_ex(ex_stage_inst.res));
+        .res_ex(ex_stage_inst.res),
+        .rda_id(data_id_ex.rda), .rda_ex(data_ex_wb.rda));
     mul mul_inst(.clk(clk), .rst(rst), .op(mul_op),
         .rqst(mul_rqst), .a(mul_a), .b(mul_b), .done(mul_done), .r(mul_r));
 endmodule
@@ -654,7 +655,7 @@ module wb_stage(input logic clk, input logic rst,
 );
     logic [64:0][64:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
     always_comb get_ex = ~in_ex.valid | ~out_pd.valid | |mask_pd;
-    always_comb for (int i = 0; i < 4; i++)
+    always_comb for (int i = 0; i < 3; i++)
         if (raddr[i] == 0) rvalue[i] = 65'd0;
         else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
         else if (in_pd.valid & raddr[i] == in_pd.rda) rvalue[i] = in_pd.rd;
@@ -679,13 +680,14 @@ module pending_table(input logic clk, input logic rst,
     input ex_wb_t in_wb, output logic [`PTSZ-1:0] mask_wb,
     output id_ex_t out_ex, output ex_wb_t out_wb,
     input logic [3:0] async_done, input logic [3:0][63:0] async_val,
-    input logic [64:0] res_ex
+    input logic [64:0] res_ex,
+    input logic [6:0] rda_id, input logic [6:0] rda_ex
 );
     logic [`PTSZ-1:0] occ, stage, ready, in1, in2, out1;
     logic [`PTSZ-1:0][`PTLEN-1:0] data;
     logic [`PTSZ-1:0][`PTLEN:0] accum_out1/*verilator split_var*/;
     logic [`PTSZ:0] gt0_in/*verilator split_var*/, gt1_in/*verilator split_var*/,
-                 gt0_out/*verilator split_var*/;
+                    gt0_out/*verilator split_var*/;
     always_comb mask_ex = in2 & {(`PTSZ){in_wb.valid}} |
                           in1 & {(`PTSZ){~in_wb.valid}};
     always_comb mask_wb = in1;
@@ -741,8 +743,8 @@ module pending_table(input logic clk, input logic rst,
                 else if (~stage[i] & data[i][136] & data[i][76:72] == `ID_PT &
                     data[i][`PTSZ+76:77] == out1)
                     data[i][136:72] <= res_ex;
-                if (in_ex.valid & in_ex.rda == data[i][6:0] |
-                    in_wb.valid & in_wb.rda == data[i][6:0])
+                if (data[i][6:0] == rda_ex & stage[i] |
+                    data[i][6:0] == rda_id & ~stage[i])
                     data[i][6:0] <= 0;
             end
 endmodule
