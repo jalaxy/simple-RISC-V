@@ -562,7 +562,8 @@ module ex_stage(input logic clk, input logic rst,
     logic [63:0] add, sll, srl, sra;
     logic mul, div;
     logic [2:0] bflag;
-    logic [`PTSZ-1:0] mul_id;
+    logic [`PTSZ-1:0] lsu_id, mul_id;
+    logic load_rqst, get_valid;
     always_comb op = in.exop;
     always_comb a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
     always_comb b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
@@ -580,16 +581,18 @@ module ex_stage(input logic clk, input logic rst,
     end
     always_comb get_id = ~in_id.valid |
         ~in_pd.valid & (out_pd.valid & |mask_pd | ena_wb);
+    always_comb get_valid = get_id & in_id.valid | in_pd.valid;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
                       op[`EX_MULW];
-    always_comb mul_rqst = ~rst & in.valid & ~out_pd.valid & mul;
+    always_comb mul_rqst = ~rst & get_valid & ~out_pd.valid & mul;
     always_comb mul_op = {op[`EX_MUL], op[`EX_MULH], op[`EX_MULHSU], op[`EX_MULHU],
                           op[`EX_MULW]};
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
+    always_comb load_rqst = ~rst & get_valid & ~out_pd.valid & in.mr;
     always_ff @(posedge clk)
-        if (~rst & get_id & in.valid & ~out_pd.valid & in.mr) begin
+        if (load_rqst) begin
             dcache_r_rqst <= 1'b1;
             dcache_r_addr <= add;
             dcache_r_bits <= in_id.bits;
@@ -597,7 +600,7 @@ module ex_stage(input logic clk, input logic rst,
     always_comb if (out_pd.valid)
             res = {1'b1, {(59-`PTSZ){1'd0}}, mask_pd, `ID_PT};
         else if (in.mr)
-            res = {1'b1, 59'd0, `ID_LSU};
+            res = {1'b1, {59-`PTSZ{1'd0}}, lsu_id, `ID_LSU};
         else res =
             {65{op[`EX_ADD]}}  & {1'b0, add} |
             {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
@@ -622,6 +625,8 @@ module ex_stage(input logic clk, input logic rst,
             {65{div}}          & {1'b1, 59'd0, `ID_DIV};
     always_ff @(posedge clk) if (rst) mul_id <= 1; // may need local reset signal
         else if (mul_rqst) mul_id <= {mul_id[`PTSZ-2:0], mul_id[`PTSZ-1]};
+    always_ff @(posedge clk) if (rst) lsu_id <= 1;
+        else if (load_rqst) lsu_id <= {lsu_id[`PTSZ-2:0], lsu_id[`PTSZ-1]};
     always_ff @(posedge clk)
         if (rst) out_wb.valid <= 1'b0;
         else if (ena_wb)
@@ -692,8 +697,7 @@ module pending_table(input logic clk, input logic rst,
     logic [`PTSZ:0] gt0_in/*verilator split_var*/, gt1_in/*verilator split_var*/,
                     gt0_out/*verilator split_var*/;
     logic [31:0][`PTSZ-1:0] async_id;
-    always_comb mask_ex = in2 & {(`PTSZ){in_wb.valid}} |
-                          in1 & {(`PTSZ){~in_wb.valid}};
+    always_comb mask_ex = in2 & {(`PTSZ){in_wb.valid}} | in1 & {(`PTSZ){~in_wb.valid}};
     always_comb mask_wb = in1;
     for (genvar i = 0; i < `PTSZ; i++) begin
         id_ex_t data_ex;
@@ -701,6 +705,7 @@ module pending_table(input logic clk, input logic rst,
         always_comb data_ex = data[i][338:0];
         always_comb data_wb = data[i][147:0];
         always_comb if (stage[i])
+            // can be optimized using mask to store async component type
             ready[i] = occ[i] & (~data_wb.rd[64] | async_done[data_wb.rd[4:0]] &
                 async_id[data_wb.rd[4:0]] == data_wb.rd[`PTSZ+4:5]); else
             ready[i] = occ[i] & ~data_ex.a[64] & ~data_ex.b[64];
