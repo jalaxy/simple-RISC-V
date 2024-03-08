@@ -662,25 +662,33 @@ module wb_stage(input logic clk, input logic rst,
     output logic [63:0] dcache_w_data
 );
     logic [64:0][64:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
-    always_comb get_ex = ~in_ex.valid | ~out_pd.valid | |mask_pd;
+    logic [64:0] wdata;
+    always_comb get_ex = ~in_ex.valid | ~(
+        out_pd.valid & ~|mask_pd | in_pd.valid & in_pd.mw & in_ex.valid & in_ex.mw);
     always_comb for (int i = 0; i < 3; i++)
         if (raddr[i] == 0) rvalue[i] = 65'd0;
         else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
         else if (in_pd.valid & raddr[i] == in_pd.rda) rvalue[i] = in_pd.rd;
         else rvalue[i] = regs[raddr[i]];
-    always_comb out_pd.valid = in_ex.valid &
-        in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[4:0] != `ID_PT;
-    always_comb out_pd.rd = in_ex.rd;
-    always_comb out_pd.rda = in_ex.rda;
+    always_comb begin
+        out_pd = in_ex;
+        out_pd.valid = in_ex.valid & (
+            in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[4:0] != `ID_PT |
+            in_ex.mw & wdata[64]);
+        if (in_ex.valid & in_ex.mw & wdata[64])
+            out_pd.rd = wdata;
+    end
     always_ff @(posedge clk) begin // operating for each i may be better
         if (in_ex.valid & in_ex.rda != 0)
             regs[in_ex.rda] <= in_ex.rd;
         if (in_pd.valid & in_pd.rda != 0 & ~(in_ex.valid & in_ex.rda == in_pd.rda))
             regs[in_pd.rda] <= in_pd.rd; end
-    always_comb dcache_w_rqst = get_ex & in_ex.valid & in_ex.mw;
-    always_comb dcache_w_addr = in_ex.mwaddr;
-    always_comb dcache_w_bits = in_ex.mwbits;
-    always_comb dcache_w_data = regs[in_ex.rmwa][63:0];
+    always_comb wdata = regs[in_ex.rmwa];
+    always_comb dcache_w_rqst = get_ex & in_ex.valid & in_ex.mw & ~wdata[64] |
+                                         in_pd.valid & in_pd.mw;
+    always_comb dcache_w_addr = in_pd.valid ? in_pd.mwaddr : in_ex.mwaddr;
+    always_comb dcache_w_bits = in_pd.valid ? in_pd.mwbits : in_ex.mwbits;
+    always_comb dcache_w_data = in_pd.valid ? in_pd.rd[63:0] : wdata[63:0];
 endmodule
 
 module pending_table(input logic clk, input logic rst,
