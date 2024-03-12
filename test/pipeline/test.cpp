@@ -40,7 +40,8 @@ typedef struct struct_icache_req
 
 typedef struct struct_dcache_r_req
 {
-    uint8_t rqst = 0, bits = 0;
+    uint64_t rqst = 0;
+    uint8_t bits = 0;
     uint64_t addr = 0;
 } dcache_r_req_t;
 
@@ -253,7 +254,7 @@ int main(int argc, char **argv)
             i_delay.push({1, dut->icache_addr});
         }
         if (dut->dcache_r_rqst)
-            dr_delay.push({1, dut->dcache_r_bits, dut->dcache_r_addr});
+            dr_delay.push({dut->dcache_r_rqst, dut->dcache_r_bits, dut->dcache_r_addr});
         if (dut->dcache_w_rqst)
             dw_delay.push({1, dut->dcache_w_bits, dut->dcache_w_addr, dut->dcache_w_data});
         dut->clk = 1, dut->eval(); // clock changes first
