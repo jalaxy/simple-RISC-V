@@ -152,7 +152,7 @@ module pipeline(
     ex_wb_t data_ex_wb;     logic get_ex_wb;
     xx_pc_t data_id_pc;     logic get_id_pc;
     xx_pc_t data_ex_pc;     logic get_ex_pc;
-    id_ex_t data_ex_pd;     logic [`PTSZ-1:0] mask_ex;
+    id_ex_t data_ex_pd;     logic [`PTSZ-1:0] mask_ex, mask_ex_out;
     ex_wb_t data_wb_pd;     logic [`PTSZ-1:0] mask_wb, mask_wb_next;
     id_ex_t data_pd_ex;
     ex_wb_t data_pd_wb;
@@ -191,7 +191,7 @@ module pipeline(
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
         .out_pc(data_ex_pc), .ena_pc(get_ex_pc),
         .out_pd(data_ex_pd), .mask_pd(mask_ex),
-        .mask_pd_next(mask_wb_next),
+        .mask_pd_out(mask_ex_out), .mask_pd_next(mask_wb_next),
         .raddr(raddr[1:0]), .rvalue(rvalue[1:0]),
         .mul_rqst(mul_rqst), .mul_op(mul_op),
         .mul_a(mul_a), .mul_b(mul_b),
@@ -206,11 +206,13 @@ module pipeline(
         .lsu_bits(lsu_w_bits), .lsu_data(lsu_w_data));
     pending_table pending_table_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_pd), .mask_ex(mask_ex),
-        .in_wb(data_wb_pd), .mask_wb(mask_wb), .mask_wb_next(mask_wb_next),
+        .in_wb(data_wb_pd), .mask_wb(mask_wb),
+        .mask_ex_out(mask_ex_out), .mask_wb_next(mask_wb_next),
         .out_ex(data_pd_ex), .out_wb(data_pd_wb),
-        .async_done({div_done, mul_done, lsu_r_done, pending_table_inst.out1_r}),
-        .async_val({div_r, mul_r, lsu_r_data, ex_stage_inst.res}),
-        .rda_id(data_id_ex.rda), .rda_ex(data_ex_wb.rda));
+        .async_done({div_done, mul_done, lsu_r_done, ex_stage_inst.mask}),
+        .async_val({div_r, mul_r, lsu_r_data, ex_stage_inst.out_wb.rd}),
+        .rda_id(data_id_ex.valid ? data_id_ex.rda : 0),
+        .rda_ex(data_ex_wb.valid ? data_ex_wb.rda : 0));
     lsu lsu_inst(.clk(clk), .rst(rst),
         .rrqst(lsu_r_rqst), .rbits(lsu_r_bits), .raddr(lsu_r_addr),
         .rdone(lsu_r_done), .rdata(lsu_r_data),
@@ -561,6 +563,7 @@ module ex_stage(input logic clk, input logic rst,
     output ex_wb_t out_wb, input logic ena_wb,
     output xx_pc_t out_pc, input logic ena_pc,
     output id_ex_t out_pd, input logic [`PTSZ-1:0] mask_pd,
+    input logic [`PTSZ-1:0] mask_pd_out,
     input logic [`PTSZ-1:0] mask_pd_next,
     output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
     output logic [`PTSZ-1:0] mul_rqst, output logic [4:0] mul_op,
@@ -578,7 +581,7 @@ module ex_stage(input logic clk, input logic rst,
     logic [63:0] add, sll, srl, sra;
     logic mul, div;
     logic [2:0] bflag;
-    logic [`PTSZ-1:0] lsu_id, mul_id;
+    logic [`PTSZ-1:0] lsu_id, mul_id, mask;
     logic get_valid, mul_valid, lsu_vaild;
     always_comb op = in.exop;
     always_comb a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
@@ -646,18 +649,19 @@ module ex_stage(input logic clk, input logic rst,
     always_ff @(posedge clk) if (rst) lsu_id <= 1;
         else if (lsu_vaild) lsu_id <= {lsu_id[`PTSZ-2:0], lsu_id[`PTSZ-1]};
     always_ff @(posedge clk)
-        if (rst) out_wb.valid <= 1'b0;
+        if (rst) {out_wb.valid, mask} <= 0;
         else if (get_valid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
+            mask <= in_pd.valid ? mask_pd_out : 0;
             if (in.mw) begin
                 out_wb.mw <= 1'b1;
                 out_wb.mwaddr <= add;
                 out_wb.mwbits <= in.bits;
                 out_wb.rmwa <= in.rmwa;
             end else out_wb.mw <= 1'b0;
-        end else out_wb.valid <= 1'b0;
+        end else {out_wb.valid, mask} <= 0;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
         else if (ena_pc)
@@ -702,13 +706,14 @@ endmodule
 module pending_table(input logic clk, input logic rst,
     input id_ex_t in_ex, output logic [`PTSZ-1:0] mask_ex,
     input ex_wb_t in_wb, output logic [`PTSZ-1:0] mask_wb,
+    output logic [`PTSZ-1:0] mask_ex_out,
     output logic [`PTSZ-1:0] mask_wb_next,
     output id_ex_t out_ex, output ex_wb_t out_wb,
     input logic [`ASYNCNUM-1:0][`PTSZ-1:0] async_done,
     input logic [`ASYNCNUM-1:0][64:0] async_val,
     input logic [6:0] rda_id, input logic [6:0] rda_ex
 );
-    logic [`PTSZ-1:0] occ, stage, in1, in2, out1, out2, out1_r;
+    logic [`PTSZ-1:0] occ, stage, in1, in2, out1, out2;
     logic [`PTSZ-1:0][`PTLEN-1:0] data;
     logic [`PTSZ+1:0][64:0] fwd_a, fwd_b;
     id_ex_t fwd_ex;
@@ -745,9 +750,9 @@ module pending_table(input logic clk, input logic rst,
             if (in1 != 0) in2 = in1; in1 = 1 << i; end
     end
     always_ff @(posedge clk) if (rst) out_ex.valid <= 0;
-        else begin {out_ex.valid, out1_r} <= 0;
+        else begin {out_ex.valid, mask_ex_out} <= 0;
             for (int i = 0; i < `PTSZ; i++) if (out1[i]) begin
-                out1_r <= out1;
+                mask_ex_out <= out1;
                 out_ex <= data[i][338:0];
                 out_ex.a <= fwd_a[i];
                 out_ex.b <= fwd_b[i];
