@@ -364,6 +364,7 @@ module id_stage(input logic clk, input logic rst,
         {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} & {64{op[`BRANCH]}} | // B type
         {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} & {64{op[`JAL]}}; // J type
     always_comb begin
+        exop[0] = 0;
         exop[0][`EX_ADD] =
             op[`JALR] | op[`AUIPC] | op[`LUI] | op[`JAL] |
             op[`OP_IMM] & ir[14:12] == 3'b000 |
@@ -622,7 +623,7 @@ module ex_stage(input logic clk, input logic rst,
         end else lsu_rqst <= 0;
     always_comb if (out_pd.valid)
             res = {1'b1, {64-`LATENUM-`PTSZ{1'd0}}, mask_out, `ID_PT};
-        else if (in.mr)
+        else if (in.valid & in.mr)
             res = {1'b1, {64-`LATENUM-`PTSZ{1'd0}}, lsu_id, `ID_LSU};
         else res =
             {65{op[`EX_ADD]}}  & {1'b0, add} |
@@ -745,8 +746,8 @@ module wb_stage(input logic clk, input logic rst,
         out_pd.valid = in_ex.valid & {mask_ex, cqrear} != 0 &
             in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] != `ID_PT;
     end
-    always_ff @(posedge clk) begin // operating for each i may be better
-        if (in_ex.valid & in_ex.rda != 0)
+    always_ff @(posedge clk) if (rst) regs <= 0; else begin
+        if (in_ex.valid & in_ex.rda != 0) // operating for each i may be better
             regs[in_ex.rda] <= in_ex.rd;
         if (in_pd.valid & in_pd.rda != 0 & ~(in_ex.valid & in_ex.rda == in_pd.rda))
             regs[in_pd.rda] <= in_pd.rd; end
