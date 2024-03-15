@@ -129,6 +129,7 @@ module pipeline(
 
     output logic        icache_rqst,
     output logic [63:0] icache_addr,
+    output logic        icache_flsh,
     input  logic        icache_done,
     input  logic [63:0] icache_data,
 
@@ -167,25 +168,29 @@ module pipeline(
     logic [64:0] mul_r, div_r;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
+        .flush(data_id_pc.valid | data_ex_pc.valid),
         .in_if0(data_if0_pc), .get_if0(get_if0_pc),
         .in_id(data_id_pc), .get_id(get_id_pc),
         .in_ex(data_ex_pc), .get_ex(get_ex_pc),
         .out_if0(data_pc_if0), .ena_if0(get_pc_if0),
         .raddr(raddr[2]), .rvalue(rvalue[2]));
-    if0_stage if0_stage_inst(.clk(clk), .rst(rst | data_id_pc.valid | data_ex_pc.valid),
+    if0_stage if0_stage_inst(.clk(clk), .rst(rst),
+        .flush(data_id_pc.valid | data_ex_pc.valid),
         .in_pc(data_pc_if0), .get_pc(get_pc_if0),
         .out_pc(data_if0_pc), .ena_pc(get_if0_pc),
         .out_if1(data_if0_if1), .ena_if1(get_if0_if1),
         .icache_rqst(icache_rqst), .icache_addr(icache_addr),
+        .icache_flsh(icache_flsh),
         .icache_done(icache_done), .icache_data(icache_data));
-    if1_stage if1_stage_inst(.clk(clk), .rst(rst | data_id_pc.valid | data_ex_pc.valid),
+    if1_stage if1_stage_inst(.clk(clk), .rst(rst),
+        .flush(data_id_pc.valid | data_ex_pc.valid),
         .in_if0(data_if0_if1), .get_if0(get_if0_if1),
         .out_id(data_if1_id), .ena_id(get_if1_id));
-    id_stage id_stage_inst(.clk(clk), .rst(rst | data_id_pc.valid | data_ex_pc.valid),
+    id_stage id_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if1(data_if1_id), .get_if1(get_if1_id),
         .out_ex(data_id_ex), .ena_ex(get_id_ex),
         .out_pc(data_id_pc), .ena_pc(get_id_pc));
-    ex_stage ex_stage_inst(.clk(clk), .rst(rst | data_ex_pc.valid),
+    ex_stage ex_stage_inst(.clk(clk), .rst(rst),
         .in_id(data_id_ex), .get_id(get_id_ex),
         .in_pd(data_pd_ex), .mask_in(mask_pd_ex),
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb), .mask_wb(mask_ex_wb),
@@ -230,7 +235,7 @@ module pipeline(
         .rqst(mul_rqst), .a(mul_a), .b(mul_b), .done(mul_done), .r(mul_r));
 endmodule
 
-module pc_stage(input logic clk, input logic rst,
+module pc_stage(input logic clk, input logic rst, input logic flush,
     input  xx_pc_t in_if0,   output logic get_if0,
     input  xx_pc_t in_id,    output logic get_id,
     input  xx_pc_t in_ex,    output logic get_ex,
@@ -242,7 +247,7 @@ module pc_stage(input logic clk, input logic rst,
     logic [64:0] base;
     logic valid;
     always_comb out_if0.pc = pc;
-    always_comb out_if0.valid = valid;
+    always_comb out_if0.valid = ~flush & valid;
     always_comb if (in_ex.valid) {base, offset} = {in_ex.base, in_ex.offset};
         else if (in_id.valid) {base, offset} =
             {in_id.base[64] ? rvalue : in_id.base, in_id.offset};
@@ -260,12 +265,13 @@ module pc_stage(input logic clk, input logic rst,
     always_comb get_ex = ena_if0 | ~in_ex.valid;
 endmodule
 
-module if0_stage(input logic clk, input logic rst,
+module if0_stage(input logic clk, input logic rst, input logic flush,
     input  pc_if0_t  in_pc,   output logic get_pc,
     output xx_pc_t  out_pc,   input  logic ena_pc,
     output if0_if1_t out_if1, input  logic ena_if1,
     output logic        icache_rqst,
     output logic [63:0] icache_addr,
+    output logic        icache_flsh,
     input  logic        icache_done,
     input  logic [63:0] icache_data
 );
@@ -280,7 +286,8 @@ module if0_stage(input logic clk, input logic rst,
     always_ff @(posedge clk)
         hold_delta <= rst ? 1'b0 : (ena_pc ? 1'b0 : icache_done | hold_delta);
     always_comb icache_addr = in_pc.pc;
-    always_comb out_if1.valid = sent & icache_done | hold_data;
+    always_comb icache_flsh = flush;
+    always_comb out_if1.valid = ~flush & (sent & icache_done | hold_data);
     always_comb out_if1.pc = pc;
     always_comb out_if1.data = icache_data;
     always_comb out_if1.offset = {off4, off3, off2, off1, off0};
@@ -293,7 +300,7 @@ module if0_stage(input logic clk, input logic rst,
     always_comb len1 = icache_data[off1[5:0]+:2] == 2'b11 ? 8'd32 : 8'd16;
     always_comb len2 = icache_data[off2[5:0]+:2] == 2'b11 ? 8'd32 : 8'd16;
     always_comb len3 = icache_data[off3[5:0]+:2] == 2'b11 ? 8'd32 : 8'd16;
-    always_comb out_pc.valid = sent & icache_done | hold_delta;
+    always_comb out_pc.valid = (sent & icache_done | hold_delta) & ~flush;
     always_comb out_pc.base = {1'b0, pc};
     always_comb if (off4 <= 8'd64) out_pc.offset = {59'd0, off4[7:3]};
         else if (off3 <= 8'd64) out_pc.offset = {59'd0, off3[7:3]};
@@ -303,7 +310,7 @@ module if0_stage(input logic clk, input logic rst,
     always_ff @(posedge clk) pc <= rst ? 64'd0 : (icache_rqst ? in_pc.pc : pc);
 endmodule
 
-module if1_stage(input logic clk, input logic rst,
+module if1_stage(input logic clk, input logic rst, input logic flush,
     input  if0_if1_t in_if0, output logic get_if0,
     output if1_id_t  out_id, input  logic ena_id
 );
@@ -315,11 +322,11 @@ module if1_stage(input logic clk, input logic rst,
     always_comb out_id.pc = base + {59'd0, offset[0][7:3]};
     always_comb out_id.ir = ir[0];
     always_comb out_id.compressed = compressed[0];
-    always_comb out_id.valid = ena_q[0];
+    always_comb out_id.valid = ~flush & ena_q[0];
     always_comb for (int i = 0; i < 4; i++)
         ic[i] = in_if0.data[in_if0.offset[i][5:0]+31-:32];
     always_ff @(posedge clk)
-        if (rst) ena_q <= 0;
+        if (rst | flush) ena_q <= 0;
         else if (get_if0 & in_if0.valid) begin
             ena_q <= {in_if0.offset[4] <= 8'd64, in_if0.offset[3] <= 8'd64,
                       in_if0.offset[2] <= 8'd64, in_if0.offset[1] <= 8'd64};
@@ -340,7 +347,7 @@ module if1_stage(input logic clk, input logic rst,
     ci2i ci2i_inst4(.ci(ic[3]), .i(ix[3]));
 endmodule
 
-module id_stage(input logic clk, input logic rst,
+module id_stage(input logic clk, input logic rst, input logic flush,
     input  if1_id_t in_if1, output logic get_if1,
     output id_ex_t  out_ex, input  logic ena_ex,
     output xx_pc_t  out_pc, input  logic ena_pc
@@ -465,10 +472,10 @@ module id_stage(input logic clk, input logic rst,
         (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
     always_comb get_if1 = ena_ex & ~ena_q[1] | ~in_if1.valid;
-    always_comb out_ex = out_ex_q[0];
+    always_comb begin out_ex = out_ex_q[0]; out_ex.valid = out_ex.valid & ~flush; end
     always_ff @(posedge clk)
-        if (rst)
-            out_ex_q <= 0;
+        if (rst | flush)
+            {out_ex_q[0].valid, out_ex_q[1].valid, out_ex_q[2].valid} <= 0;
         else if (get_if1 & in_if1.valid) begin
             out_ex_q[0].valid <= 1'b1;
             out_ex_q[0].a <=
@@ -552,8 +559,8 @@ module id_stage(input logic clk, input logic rst,
             out_ex_q[1:0] <= {out_ex_q[2], out_ex_q[1]};
         end
     always_ff @(posedge clk)
-        if (rst) out_pc.valid <= 0;
-        else if (ena_pc)
+        if (rst | flush) out_pc.valid <= 0;
+        else if (ena_ex & ena_pc)
             if (in_if1.valid & (op[`JAL] | op[`JALR])) begin
                 out_pc.valid <= 1'b1;
                 out_pc.base <= op[`JAL] ? {1'b0, in_if1.pc} : {1'b1, 59'd0, ir[19:15]};
@@ -667,7 +674,7 @@ module ex_stage(input logic clk, input logic rst,
         end else if (ena_wb) {out_wb.valid, mask_wb} <= 0;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
-        else if (ena_pc)
+        else if (ena_wb & ena_pc)
             if (in.valid & in.bneg != |(in.bmask & bflag)) begin
                 out_pc.valid <= 1'b1;
                 out_pc.base <= {1'b0, in.bbase};
@@ -695,46 +702,49 @@ module wb_stage(input logic clk, input logic rst,
     logic [`CQSZ-1:0][64:0] cqval;
     logic [1:0][6:0] frontrda;
     always_comb get_ex = ~in_ex.valid |
-        ~({mask_ex, cqrear} == 0 | out_pd.valid & ~|mask_out);
-    always_comb cqpush = in_ex.valid & mask_ex == 0;
+        ~(mask_ex == 0 & ~cqpush | out_pd.valid & ~|mask_out);
+    always_comb cqpush = in_ex.valid & mask_ex == 0 & (cqrear != 0 | cqpop[0]);
     always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++) begin
         automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
-        if (cqfront[i]) {frontrda, cqpop} =
-            {cqrda[ni], cqrda[i], ~cqrear[ni] & ~cqval[ni][64], ~cqval[i][64]};
+        if (cqfront[i]) {frontrda, cqpop} = {
+            cqrda[ni], cqrda[i],
+            ~cqrear[ni] & ~cqval[ni][64] & ~cqval[i][64], ~cqval[i][64]};
         end end
     always_ff @(posedge clk)
         if (rst) {cqfront, cqrear} <= 1;
-        else for (int i = 0; i < `CQSZ; i++) begin
-            automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
-            if (cqfront[i] & cqpop[0]) begin
-                if (frontrda[0] != 0 & ~(cqpop[1] & frontrda[0] == frontrda[1]))
-                    valregs[frontrda[0]] <= cqval[i][63:0];
-                if (cqpop[1] & frontrda[1] != 0)
-                    valregs[frontrda[1]] <= cqval[ni][63:0];
-                if (cqrear == 0) cqrear <= cqfront;
-                if (~cqpush & (
-                    |({cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]} & cqrear) |
-                    |({cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]} & cqrear) & cqpop[1]))
-                    cqfront <= 0;
-                else if (cqpop[1]) cqfront <= {cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]};
-                else cqfront <= {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]};
+        else begin
+            if (cqfront == 0 |
+                cqpop[0] & |(cqrear & {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]}) |
+                cqpop[1] & |(cqrear & {cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]}))
+                cqfront <= cqpush ? cqrear : 0;
+            else if (cqpop[1]) cqfront <= {cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]};
+            else if (cqpop[0]) cqfront <= {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]};
+            if (cqrear == 0)
+                if (~cqpush) cqrear <= cqpop[0] ? cqfront : 0;
+                else cqrear <= cqpop[1] ? {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]} : 0;
+            else if (cqpush & |({cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]} & cqfront))
+                cqrear <= cqpop[0] ? cqfront : 0;
+            else if (cqpush) cqrear <= {cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]};
+            for (int i = 0; i < `CQSZ; i++) begin
+                automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
+                if (cqfront[i] & cqpop[0]) begin
+                    if (frontrda[0] != 0 & ~(cqpop[1] & frontrda[0] == frontrda[1]))
+                        valregs[frontrda[0]] <= cqval[i][63:0];
+                    if (cqpop[1] & frontrda[1] != 0)
+                        valregs[frontrda[1]] <= cqval[ni][63:0];
+                end
+                if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush) begin
+                    if (in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] == `ID_PT)
+                        cqinst[i] <= in_ex.rd[`PTSZ+`LATENUM-1:`LATENUM];
+                    else if (out_pd.valid) cqinst[i] <= mask_out;
+                    else cqinst[i] <= 0;
+                    {cqval[i], cqrda[i]} <= in_ex[71:0];
+                end
+                for (int j = 0; j < `LATENUM; j++)
+                    if (cqval[i][64] & cqval[i][j] &
+                        |(late_done[j] & cqval[i][`LATENUM+`PTSZ-1:`LATENUM]))
+                        cqval[i] <= late_val[j];
             end
-            if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush) begin
-                if (in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] == `ID_PT)
-                    cqinst[i] <= in_ex.rd[`PTSZ+`LATENUM-1:`LATENUM];
-                else if (out_pd.valid) cqinst[i] <= mask_out;
-                else cqinst[i] <= 0;
-                {cqval[i], cqrda[i]} <= in_ex[71:0];
-                if (cqfront == 0) cqfront <= cqrear;
-                if (cqrear == 0) cqrear <= cqpop[1] ? cqfront : 0;
-                else if (~cqpop[0] & |({cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]} & cqfront))
-                    cqrear <= 0;
-                else cqrear <= {cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]};
-            end
-            for (int j = 0; j < `LATENUM; j++)
-                if (cqval[i][64] & cqval[i][j] &
-                    |(late_done[j] & cqval[i][`LATENUM+`PTSZ-1:`LATENUM]))
-                    cqval[i] <= late_val[j];
         end
     always_comb for (int i = 0; i < 3; i++)
         if (raddr[i] == 0) rvalue[i] = 65'd0;
@@ -743,7 +753,7 @@ module wb_stage(input logic clk, input logic rst,
         else rvalue[i] = regs[raddr[i]];
     always_comb begin
         out_pd = in_ex;
-        out_pd.valid = in_ex.valid & {mask_ex, cqrear} != 0 &
+        out_pd.valid = in_ex.valid & ~(mask_ex == 0 & ~cqpush) &
             in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] != `ID_PT;
     end
     always_ff @(posedge clk) if (rst) regs <= 0; else begin
@@ -811,12 +821,14 @@ module pending_table(input logic clk, input logic rst,
                 out_ex <= data[i][338:0];
                 out_ex.a <= fwd_a[i];
                 out_ex.b <= fwd_b[i];
+                if (data[i][6:0] == rda_id) out_ex.rda <= 0;
             end end
     always_ff @(posedge clk) if (rst) out_wb.valid <= 0;
         else begin out_wb.valid <= 0;
             for (int i = 0; i < `PTSZ; i++) if (out2[i]) begin
                 out_wb <= data[i][147:0];
                 out_wb.rd <= fwd_b[i];
+                if (data[i][6:0] == rda_ex) out_wb.rda <= 0;
             end end
     always_ff @(posedge clk)
         if (rst) occ <= 0;
