@@ -563,7 +563,7 @@ endmodule
 module ex_stage(input logic clk, input logic rst,
     input id_ex_t in_id, output logic get_id,
     input id_ex_t in_pd, output logic [`PTSZ-1:0] mask_in,
-    output ex_wb_t out_wb, input logic ena_wb, output [`PTSZ-1:0] mask_wb,
+    output ex_wb_t out_wb, input logic ena_wb, output logic [`PTSZ-1:0] mask_wb,
     output xx_pc_t out_pc, input logic ena_pc,
     output id_ex_t out_pd, input logic [`PTSZ-1:0] mask_out,
     input logic [`PTSZ-1:0] mask_out_next,
@@ -675,7 +675,7 @@ module ex_stage(input logic clk, input logic rst,
 endmodule
 
 module wb_stage(input logic clk, input logic rst,
-    input ex_wb_t in_ex, output logic get_ex, input [`PTSZ-1:0] mask_ex,
+    input ex_wb_t in_ex, output logic get_ex, input logic [`PTSZ-1:0] mask_ex,
     input ex_wb_t in_pd,
     output ex_wb_t out_pd, input logic [`PTSZ-1:0] mask_out,
     input logic [2:0][6:0] raddr, output logic [2:0][64:0] rvalue,
@@ -687,34 +687,46 @@ module wb_stage(input logic clk, input logic rst,
     logic [64:0][64:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
     logic [64:0][63:0] valregs; // registers holding valid values, committed inorder
     logic [`CQSZ-1:0] cqfront, cqrear; // commit queue
-    logic cqpush, cqpop;
+    logic cqpush;
+    logic [1:0] cqpop;
     logic [`CQSZ-1:0][`PTSZ-1:0] cqinst;
     logic [`CQSZ-1:0][6:0] cqrda;
     logic [`CQSZ-1:0][64:0] cqval;
-    logic [6:0] frontrda;
+    logic [1:0][6:0] frontrda;
     always_comb get_ex = ~in_ex.valid |
         ~({mask_ex, cqrear} == 0 | out_pd.valid & ~|mask_out);
-    always_comb cqpush = in_ex.valid;
-    always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++)
-        if (cqfront[i]) {frontrda, cqpop} = {cqrda[i], ~cqval[i][64]}; end
+    always_comb cqpush = in_ex.valid & mask_ex == 0;
+    always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++) begin
+        automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
+        if (cqfront[i]) {frontrda, cqpop} =
+            {cqrda[ni], cqrda[i], ~cqrear[ni] & ~cqval[ni][64], ~cqval[i][64]};
+        end end
     always_ff @(posedge clk)
         if (rst) {cqfront, cqrear} <= 1;
         else for (int i = 0; i < `CQSZ; i++) begin
-            if (cqfront[i] & cqpop) begin
-                if (frontrda != 0) valregs[frontrda] <= cqval[i][63:0];
+            automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
+            if (cqfront[i] & cqpop[0]) begin
+                if (frontrda[0] != 0 & ~(cqpop[1] & frontrda[0] == frontrda[1]))
+                    valregs[frontrda[0]] <= cqval[i][63:0];
+                if (cqpop[1] & frontrda[1] != 0)
+                    valregs[frontrda[1]] <= cqval[ni][63:0];
                 if (cqrear == 0) cqrear <= cqfront;
-                if (~cqpush & |({cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]} & cqrear))
+                if (~cqpush & (
+                    |({cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]} & cqrear) |
+                    |({cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]} & cqrear) & cqpop[1]))
                     cqfront <= 0;
+                else if (cqpop[1]) cqfront <= {cqfront[`CQSZ-3:0], cqfront[`CQSZ-1-:2]};
                 else cqfront <= {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]};
             end
-            if (cqrear[i] & cqpush) begin
+            if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush) begin
                 if (in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] == `ID_PT)
                     cqinst[i] <= in_ex.rd[`PTSZ+`LATENUM-1:`LATENUM];
                 else if (out_pd.valid) cqinst[i] <= mask_out;
                 else cqinst[i] <= 0;
                 {cqval[i], cqrda[i]} <= in_ex[71:0];
                 if (cqfront == 0) cqfront <= cqrear;
-                if (~cqpop & |({cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]} & cqfront))
+                if (cqrear == 0) cqrear <= cqpop[1] ? cqfront : 0;
+                else if (~cqpop[0] & |({cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]} & cqfront))
                     cqrear <= 0;
                 else cqrear <= {cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]};
             end
