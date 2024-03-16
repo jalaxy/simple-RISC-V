@@ -675,7 +675,8 @@ module ex_stage(input logic clk, input logic rst,
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
         else if (ena_wb & ena_pc)
-            if (in.valid & in.bneg != |(in.bmask & bflag)) begin
+            if (in.valid & ~out_pd.valid & |in.bmask &
+                in.bneg != |(in.bmask & bflag)) begin
                 out_pc.valid <= 1'b1;
                 out_pc.base <= {1'b0, in.bbase};
                 out_pc.offset <= in.boffset;
