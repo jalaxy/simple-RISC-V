@@ -150,9 +150,9 @@ module pipeline(
     id_ex_t data_pt_ex;
     logic [2:0][6:0] raddr; logic [2:0][64:0] rvalue;
     logic lsu_w_rqst; logic [2:0] lsu_w_bits;
-    logic [`PTSZ-1:0] lsu_r_rqst, lsu_r_done; logic [2:0] lsu_r_bits;
-    logic [`PTSZ-1:0] mul_rqst, mul_done; logic [4:0] mul_op;
-    logic [`PTSZ-1:0] div_rqst, div_done; logic [4:0] div_op;
+    logic [`PTSZ-1:0] lsu_r_rqst, lsu_r_done; logic [2:0] lsu_r_bits; logic lsu_r_exc;
+    logic [`PTSZ-1:0] mul_rqst, mul_done; logic [4:0] mul_op; logic mul_exc;
+    logic [`PTSZ-1:0] div_rqst, div_done; logic [4:0] div_op; logic div_exc;
     logic [63:0] lsu_r_addr, lsu_w_addr;
     logic [64:0] lsu_r_data, lsu_w_data;
     logic [63:0] mul_a, mul_b, div_a, div_b;
@@ -171,7 +171,7 @@ module pipeline(
         .icache_done(icache_done), .icache_data(icache_data));
     id_stage id_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_id), .get_if(get_if_id),
-        .out_ex(data_id_ex), .ena_ex(get_id_ex));
+        .out_ex(data_id_ex), .ena_ex(get_id_ex & ~|wb_stage_inst.cqexc));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst),
         .in_id(data_id_ex), .get_id(get_id_ex),
         .in_pt(data_pt_ex), .mask_in(mask_pt_ex),
@@ -189,17 +189,19 @@ module pipeline(
         .lsu_rqst(lsu_w_rqst), .lsu_addr(lsu_w_addr),
         .lsu_bits(lsu_w_bits), .lsu_data(lsu_w_data),
         .late_done({div_done, mul_done, lsu_r_done, ex_stage_inst.late_id}),
-        .late_val({div_r, mul_r, lsu_r_data, ex_stage_inst.late_val}));
+        .late_val({div_r, mul_r, lsu_r_data, ex_stage_inst.late_val}),
+        .late_exc({div_exc, mul_exc, lsu_r_exc, ex_stage_inst.out_pc.valid}));
     pending_table pending_table_inst(.clk(clk), .rst(rst),
+        .flush(wb_stage_inst.recover),
         .in_ex(data_ex_pt), .mask_in(mask_ex_pt),
         .out_ex(data_pt_ex), .mask_out(mask_pt_ex),
         .late_done({div_done, mul_done, lsu_r_done, ex_stage_inst.late_id}),
         .late_val({div_r, mul_r, lsu_r_data, ex_stage_inst.late_val}),
         .rda_id(data_id_ex.valid ? data_id_ex.rda : 0),
         .rda_ex(data_ex_wb.valid ? data_ex_wb.rda : 0));
-    lsu lsu_inst(.clk(clk), .rst(rst),
+    lsu lsu_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover),
         .rrqst(lsu_r_rqst), .rbits(lsu_r_bits), .raddr(lsu_r_addr),
-        .rdone(lsu_r_done), .rdata(lsu_r_data),
+        .rdone(lsu_r_done), .rdata(lsu_r_data), .rexcp(lsu_r_exc),
         .wrqst(lsu_w_rqst), .wbits(lsu_w_bits), .waddr(lsu_w_addr), .wdata(lsu_w_data),
         .dcache_r_rqst(dcache_r_rqst), .dcache_r_addr(dcache_r_addr),
         .dcache_r_bits(dcache_r_bits), .dcache_r_done(dcache_r_done),
@@ -207,8 +209,8 @@ module pipeline(
         .dcache_w_addr(dcache_w_addr), .dcache_w_bits(dcache_w_bits),
         .dcache_w_data(dcache_w_data), .dcache_w_done(dcache_w_done)
     );
-    mul mul_inst(.clk(clk), .rst(rst), .op(mul_op),
-        .rqst(mul_rqst), .a(mul_a), .b(mul_b), .done(mul_done), .r(mul_r));
+    mul mul_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover), .op(mul_op),
+        .rqst(mul_rqst), .a(mul_a), .b(mul_b), .done(mul_done), .r(mul_r), .e(mul_exc));
 endmodule
 
 module pc_stage(input logic clk, input logic rst, input logic flush,
@@ -609,27 +611,31 @@ module wb_stage(input logic clk, input logic rst,
     output logic lsu_rqst, output logic [63:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_data,
     input logic [`LATENUM-1:0][`PTSZ-1:0] late_done,
-    input logic [`LATENUM-1:0][64:0] late_val
+    input logic [`LATENUM-1:0][64:0] late_val,
+    input logic [`LATENUM-1:0] late_exc
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
     logic [64:0][64:0] regs, regs_fwd;
     logic [64:0][63:0] valregs; // registers holding valid values, committed inorder
-    logic [`CQSZ-1:0] cqfront, cqrear; // commit queue
+    logic [`CQSZ-1:0] cqfront, cqrear, cqexc; // commit queue
     logic cqpush;
     logic [1:0] cqpop;
     logic [`CQSZ-1:0][6:0] cqrda;
     logic [`CQSZ-1:0][64:0] cqval;
     logic [1:0][6:0] frontrda;
+    logic recover;
     always_comb get_ex = ~in_ex.valid | cqpush;
     always_comb cqpush = in_ex.valid & (cqrear != 0 | cqpop[0]);
+    always_comb recover = |(cqfront & cqexc);
     always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++) begin
         automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
         if (cqfront[i]) {frontrda, cqpop} = {
             cqrda[ni], cqrda[i],
-            ~cqrear[ni] & ~cqval[ni][64] & ~cqval[i][64], ~cqval[i][64]};
+            ~cqrear[ni] & ~cqval[ni][64] & ~cqexc[ni] & ~cqval[i][64] & ~cqexc[i],
+            ~cqval[i][64] & ~cqexc[i]};
         end end
     always_ff @(posedge clk)
-        if (rst) {cqfront, cqrear} <= 1;
+        if (rst | recover) {cqexc, cqfront, cqrear} <= 1;
         else begin
             if (cqfront == 0 |
                 cqpop[0] & |(cqrear & {cqfront[`CQSZ-2:0], cqfront[`CQSZ-1]}) |
@@ -646,7 +652,7 @@ module wb_stage(input logic clk, input logic rst,
             for (int i = 0; i < `CQSZ; i++) begin
                 automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
                 if (cqfront[i] & cqpop[0]) begin
-                    if (frontrda[0] != 0 & ~(cqpop[1] & frontrda[0] == frontrda[1]))
+                    if (frontrda[0] != 0)
                         valregs[frontrda[0]] <= cqval[i][63:0];
                     if (cqpop[1] & frontrda[1] != 0)
                         valregs[frontrda[1]] <= cqval[ni][63:0];
@@ -656,7 +662,7 @@ module wb_stage(input logic clk, input logic rst,
                 for (int j = 0; j < `LATENUM; j++)
                     if (cqval[i][64] & cqval[i][j] &
                         |(late_done[j] & cqval[i][`LATENUM+`PTSZ-1:`LATENUM]))
-                        cqval[i] <= late_val[j];
+                        {cqexc[i], cqval[i]} <= {late_exc[j], late_val[j]};
             end
         end
     always_comb for (int i = 0; i < 3; i++)
@@ -670,6 +676,7 @@ module wb_stage(input logic clk, input logic rst,
                 regs_fwd[i] = late_val[j];
         if (in_ex.valid & i[6:0] == in_ex.rda) regs_fwd[i] = in_ex.rd;
         if (rst) regs_fwd[i][64] = 0;
+        if (recover) regs_fwd[i] = {1'b0, valregs[i]};
     end
     always_ff @(posedge clk) for (int i = 0; i < 65; i++) regs[i] <= regs_fwd[i];
     always_comb lsu_rqst = get_ex & in_ex.valid & in_ex.mw;
@@ -678,7 +685,7 @@ module wb_stage(input logic clk, input logic rst,
     always_comb lsu_data = regs[in_ex.rmwa];
 endmodule
 
-module pending_table(input logic clk, input logic rst,
+module pending_table(input logic clk, input logic rst, input logic flush,
     input id_ex_t in_ex, output logic [`PTSZ-1:0] mask_in,
     output id_ex_t out_ex, output logic [`PTSZ-1:0] mask_out,
     input logic [`LATENUM-1:0][`PTSZ-1:0] late_done,
@@ -711,7 +718,7 @@ module pending_table(input logic clk, input logic rst,
         in_ex_fwd = in_ex;
         {in_ex_fwd.a, in_ex_fwd.b} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
     end
-    always_ff @(posedge clk) if (rst) {out_ex.valid, mask_out} <= 0;
+    always_ff @(posedge clk) if (rst | flush) {out_ex.valid, mask_out} <= 0;
         else begin {out_ex.valid, mask_out} <= 0;
             for (int i = 0; i < `PTSZ; i++) if (out[i]) begin
                 mask_out <= out;
@@ -721,7 +728,7 @@ module pending_table(input logic clk, input logic rst,
                 if (data[i].rda == rda_id) out_ex.rda <= 0;
             end end
     always_ff @(posedge clk)
-        if (rst) occ <= 0;
+        if (rst | flush) occ <= 0;
         else for (int i = 0; i < `PTSZ; i++)
             if (in_ex_fwd.valid & in[i]) {occ[i], data[i]} <= {1'b1, in_ex_fwd};
             else if (out[i]) occ[i] <= 1'b0;
@@ -852,10 +859,11 @@ module ci2i(input logic [31:0] ci, output logic [31:0] i);
         endcase
 endmodule
 
-module lsu(input clk, input rst,
+module lsu(input logic clk, input logic rst, input logic flush,
     input logic [`PTSZ-1:0] rrqst, input logic [2:0] rbits,
     input logic [63:0] raddr,
     output logic [`PTSZ-1:0] rdone, output logic [64:0] rdata,
+    output logic rexcp,
     input logic wrqst, input logic [2:0] wbits,
     input logic [63:0] waddr, input logic [64:0] wdata,
     output logic [`PTSZ-1:0] dcache_r_rqst,
@@ -876,16 +884,17 @@ module lsu(input clk, input rst,
     always_comb dcache_r_bits = rbits;
     always_comb rdone = dcache_r_done;
     always_comb rdata = {1'b0, dcache_r_data};
+    always_comb rexcp = 0;
     always_comb dcache_w_rqst = wrqst;
     always_comb dcache_w_addr = waddr;
     always_comb dcache_w_bits = wbits;
     always_comb dcache_w_data = wdata[63:0];
 endmodule
 
-module mul(input clk, input rst,
+module mul(input logic clk, input logic rst, input logic flush,
     input logic [`PTSZ-1:0] rqst, input logic [4:0] op,
     input logic [63:0] a, input logic [63:0] b,
-    output logic [`PTSZ-1:0] done, output logic [64:0] r
+    output logic [`PTSZ-1:0] done, output logic [64:0] r, output logic e
 );
 `define latency 10
     logic [`latency-1:0][63:0] r_q;
@@ -893,11 +902,12 @@ module mul(input clk, input rst,
     logic [127:0] res;
     always_comb res = {64'd0, a} * {64'd0, b};
     always_ff @(posedge clk)
-        if (rst) valid <= {`PTSZ{`latency'd0}};
+        if (rst | flush) valid <= {`PTSZ{`latency'd0}};
         else begin
             valid <= {rqst, valid[`latency-1:1]};
             r_q <= {res[63:0], r_q[`latency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
+    always_comb e = 0;
     always_comb done = valid[0];
 endmodule
