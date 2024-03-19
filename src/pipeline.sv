@@ -1,6 +1,5 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8    // pending table size
-`define PTLEN 471 // pending table length
 `define CQSZ 16 // commit queue size
 `define LATENUM 4 // number of late components
 `define LOAD      5'b00000 // opcode map
@@ -106,7 +105,7 @@ typedef struct packed {
     logic mr, mw;
     logic [2:0] bits;
     logic [6:0] rmwa;
-    logic [64:0] a, b; // [136:72] [71:7]
+    logic [64:0] a, b;
     logic [6:0] rda;
 } id_ex_t;
 typedef struct packed {
@@ -147,10 +146,8 @@ module pipeline(
     id_ex_t data_id_ex; logic get_id_ex;
     ex_wb_t data_ex_wb; logic get_ex_wb;
     ex_pc_t data_ex_pc; logic get_ex_pc;
-    id_ex_t data_ex_pd; logic [`PTSZ-1:0] mask_ex_pd, mask_pd_ex, mask_ex_wb;
-    ex_wb_t data_wb_pd; logic [`PTSZ-1:0] mask_wb_pd, mask_wb_pd_next;
-    id_ex_t data_pd_ex;
-    ex_wb_t data_pd_wb;
+    id_ex_t data_ex_pt; logic [`PTSZ-1:0] mask_ex_pt, mask_pt_ex;
+    id_ex_t data_pt_ex;
     logic [2:0][6:0] raddr; logic [2:0][64:0] rvalue;
     logic lsu_w_rqst; logic [2:0] lsu_w_bits;
     logic [`PTSZ-1:0] lsu_r_rqst, lsu_r_done; logic [2:0] lsu_r_bits;
@@ -177,33 +174,27 @@ module pipeline(
         .out_ex(data_id_ex), .ena_ex(get_id_ex));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst),
         .in_id(data_id_ex), .get_id(get_id_ex),
-        .in_pd(data_pd_ex), .mask_in(mask_pd_ex),
-        .out_wb(data_ex_wb), .ena_wb(get_ex_wb), .mask_wb(mask_ex_wb),
+        .in_pt(data_pt_ex), .mask_in(mask_pt_ex),
+        .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
         .out_pc(data_ex_pc), .ena_pc(get_ex_pc),
-        .out_pd(data_ex_pd), .mask_out(mask_ex_pd),
-        .mask_out_next(mask_wb_pd_next),
+        .out_pt(data_ex_pt), .mask_out(mask_ex_pt),
         .raddr(raddr), .rvalue(rvalue),
         .mul_rqst(mul_rqst), .mul_op(mul_op),
         .mul_a(mul_a), .mul_b(mul_b),
         .lsu_rqst(lsu_r_rqst), .lsu_addr(lsu_r_addr),
         .lsu_bits(lsu_r_bits));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
-        .in_ex(data_ex_wb), .get_ex(get_ex_wb), .mask_ex(mask_ex_wb),
-        .in_pd(data_pd_wb),
-        .out_pd(data_wb_pd), .mask_out(mask_wb_pd),
+        .in_ex(data_ex_wb), .get_ex(get_ex_wb),
         .raddr(raddr), .rvalue(rvalue),
         .lsu_rqst(lsu_w_rqst), .lsu_addr(lsu_w_addr),
         .lsu_bits(lsu_w_bits), .lsu_data(lsu_w_data),
-        .late_done({div_done, mul_done, lsu_r_done, mask_ex_wb}),
-        .late_val({div_r, mul_r, lsu_r_data, data_ex_wb.rd}));
+        .late_done({div_done, mul_done, lsu_r_done, ex_stage_inst.late_id}),
+        .late_val({div_r, mul_r, lsu_r_data, ex_stage_inst.late_val}));
     pending_table pending_table_inst(.clk(clk), .rst(rst),
-        .in_ex(data_ex_pd), .mask_ex_in(mask_ex_pd),
-        .in_wb(data_wb_pd), .mask_wb_in(mask_wb_pd),
-        .out_ex(data_pd_ex), .mask_ex_out(mask_pd_ex),
-        .out_wb(data_pd_wb),
-        .mask_wb_in_next(mask_wb_pd_next),
-        .late_done({div_done, mul_done, lsu_r_done, mask_ex_wb}),
-        .late_val({div_r, mul_r, lsu_r_data, data_ex_wb.rd}),
+        .in_ex(data_ex_pt), .mask_in(mask_ex_pt),
+        .out_ex(data_pt_ex), .mask_out(mask_pt_ex),
+        .late_done({div_done, mul_done, lsu_r_done, ex_stage_inst.late_id}),
+        .late_val({div_r, mul_r, lsu_r_data, ex_stage_inst.late_val}),
         .rda_id(data_id_ex.valid ? data_id_ex.rda : 0),
         .rda_ex(data_ex_wb.valid ? data_ex_wb.rda : 0));
     lsu lsu_inst(.clk(clk), .rst(rst),
@@ -492,11 +483,10 @@ endmodule
 
 module ex_stage(input logic clk, input logic rst,
     input id_ex_t in_id, output logic get_id,
-    input id_ex_t in_pd, output logic [`PTSZ-1:0] mask_in,
-    output ex_wb_t out_wb, input logic ena_wb, output logic [`PTSZ-1:0] mask_wb,
-    output ex_pc_t out_pc, input logic ena_pc,
-    output id_ex_t out_pd, input logic [`PTSZ-1:0] mask_out,
-    input logic [`PTSZ-1:0] mask_out_next,
+    input id_ex_t in_pt, output logic [`PTSZ-1:0] mask_in,
+    output ex_wb_t out_wb, input logic ena_wb,
+    output ex_pc_t out_pc, input logic ena_pc, // always enabled
+    output id_ex_t out_pt, input logic [`PTSZ-1:0] mask_out,
     output logic [2:0][6:0] raddr, input logic [2:0][64:0] rvalue,
     output logic [`PTSZ-1:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
@@ -504,7 +494,7 @@ module ex_stage(input logic clk, input logic rst,
     output logic [63:0] lsu_addr, output logic [2:0] lsu_bits
 );
     id_ex_t in;
-    always_comb in = in_pd.valid ? in_pd : in_id;
+    always_comb in = in_pt.valid ? in_pt : in_id;
     always_comb raddr[0] = in.valid & in.a[64] ? in.a[6:0] : 7'd0;
     always_comb raddr[1] = in.valid & in.b[64] ? in.b[6:0] : 7'd0;
     always_comb raddr[2] = in.valid & in.base[64] ? in.base[6:0] : 7'd0;
@@ -517,7 +507,9 @@ module ex_stage(input logic clk, input logic rst,
     logic mul, div;
     logic [2:0] bflag;
     logic [`PTSZ-1:0] lsu_id, mul_id;
-    logic get_valid, mul_valid, lsu_vaild;
+    logic ready, mul_valid, lsu_vaild;
+    logic [`PTSZ-1:0] late_id;
+    logic [64:0] late_val;
     always_comb op = in.exop;
     always_comb a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
     always_comb b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
@@ -528,32 +520,31 @@ module ex_stage(input logic clk, input logic rst,
     always_comb sra = $signed($signed(a) >>> b[5:0]);
     always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
     always_comb begin
-        out_pd = in;
-        out_pd.valid = in.valid & (rvalue[0][64] | rvalue[1][64] | rvalue[2][64]);
-        out_pd.a = in.a[64] ? rvalue[0] : in.a;
-        out_pd.b = in.b[64] ? rvalue[1] : in.b;
+        out_pt = in;
+        out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64] | rvalue[2][64]);
+        out_pt.a = in.a[64] ? rvalue[0] : in.a;
+        out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
-    always_comb get_id = ~in_id.valid | ~in_pd.valid & (
-        out_pd.valid & |mask_out |
-        ~out_pd.valid & ena_wb & (~res[64] | |mask_out_next));
-    always_comb get_valid = get_id & in_id.valid | in_pd.valid;
+    always_comb get_id = ~in_id.valid |
+        ~in_pt.valid & (out_pt.valid & |mask_out | ~out_pt.valid & ena_wb);
+    always_comb ready = (get_id & in_id.valid | in_pt.valid) & ~out_pt.valid;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
                       op[`EX_MULW];
-    always_comb mul_valid = ~rst & get_valid & ~out_pd.valid & mul;
+    always_comb mul_valid = ~rst & ready & mul;
     always_comb mul_rqst = {`PTSZ{mul_valid}} & mul_id;
     always_comb mul_op = {op[`EX_MUL], op[`EX_MULH], op[`EX_MULHSU], op[`EX_MULHU],
                           op[`EX_MULW]};
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
-    always_comb lsu_vaild = ~rst & get_valid & ~out_pd.valid & in.mr;
+    always_comb lsu_vaild = ~rst & ready & in.mr;
     always_ff @(posedge clk)
         if (lsu_vaild) begin
             lsu_rqst <= lsu_id;
             lsu_addr <= add;
             lsu_bits <= in.bits;
         end else lsu_rqst <= 0;
-    always_comb if (out_pd.valid)
+    always_comb if (out_pt.valid)
             res = {1'b1, {64-`LATENUM-`PTSZ{1'd0}}, mask_out, `ID_PT};
         else if (in.valid & in.mr)
             res = {1'b1, {64-`LATENUM-`PTSZ{1'd0}}, lsu_id, `ID_LSU};
@@ -583,27 +574,28 @@ module ex_stage(input logic clk, input logic rst,
         else if (mul_valid) mul_id <= {mul_id[`PTSZ-2:0], mul_id[`PTSZ-1]};
     always_ff @(posedge clk) if (rst) lsu_id <= 1;
         else if (lsu_vaild) lsu_id <= {lsu_id[`PTSZ-2:0], lsu_id[`PTSZ-1]};
+    always_ff @(posedge clk) if (rst) late_id <= 0;
+        else if (in_pt.valid) {late_id, late_val} <= {mask_in, res}; else late_id <= 0;
     always_ff @(posedge clk)
-        if (rst) {out_wb.valid, mask_wb} <= 0;
-        else if (get_valid) begin
+        if (rst) out_wb.valid <= 0;
+        else if (get_id & in_id.valid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
-            mask_wb <= in_pd.valid ? mask_in : 0;
             if (in.mw) begin
                 out_wb.mw <= 1'b1;
                 out_wb.mwaddr <= add;
                 out_wb.mwbits <= in.bits;
                 out_wb.rmwa <= in.rmwa;
             end else out_wb.mw <= 1'b0;
-        end else if (ena_wb) {out_wb.valid, mask_wb} <= 0;
+        end else if (ena_wb) out_wb.valid <= 0;
     always_comb jpc =
         (in.base[64] ? rvalue[2][63:0] : in.base[63:0]) + in.offset;
     always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
         else if (ena_wb & ena_pc)
-            if (in.valid & ~out_pd.valid &
+            if (in.valid & ~out_pt.valid &
                 (jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch)) begin
                 out_pc.valid <= 1'b1;
                 out_pc.pc <= in.pc;
@@ -612,27 +604,24 @@ module ex_stage(input logic clk, input logic rst,
 endmodule
 
 module wb_stage(input logic clk, input logic rst,
-    input ex_wb_t in_ex, output logic get_ex, input logic [`PTSZ-1:0] mask_ex,
-    input ex_wb_t in_pd,
-    output ex_wb_t out_pd, input logic [`PTSZ-1:0] mask_out,
+    input ex_wb_t in_ex, output logic get_ex,
     input logic [2:0][6:0] raddr, output logic [2:0][64:0] rvalue,
     output logic lsu_rqst, output logic [63:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_data,
     input logic [`LATENUM-1:0][`PTSZ-1:0] late_done,
     input logic [`LATENUM-1:0][64:0] late_val
 );
-    logic [64:0][64:0] regs; // 00_xxxxx: integer, 01_xxxxx: float, 10_00000: tmp
+    // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
+    logic [64:0][64:0] regs, regs_fwd;
     logic [64:0][63:0] valregs; // registers holding valid values, committed inorder
     logic [`CQSZ-1:0] cqfront, cqrear; // commit queue
     logic cqpush;
     logic [1:0] cqpop;
-    logic [`CQSZ-1:0][`PTSZ-1:0] cqinst;
     logic [`CQSZ-1:0][6:0] cqrda;
     logic [`CQSZ-1:0][64:0] cqval;
     logic [1:0][6:0] frontrda;
-    always_comb get_ex = ~in_ex.valid |
-        ~(mask_ex == 0 & ~cqpush | out_pd.valid & ~|mask_out);
-    always_comb cqpush = in_ex.valid & mask_ex == 0 & (cqrear != 0 | cqpop[0]);
+    always_comb get_ex = ~in_ex.valid | cqpush;
+    always_comb cqpush = in_ex.valid & (cqrear != 0 | cqpop[0]);
     always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++) begin
         automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
         if (cqfront[i]) {frontrda, cqpop} = {
@@ -662,13 +651,8 @@ module wb_stage(input logic clk, input logic rst,
                     if (cqpop[1] & frontrda[1] != 0)
                         valregs[frontrda[1]] <= cqval[ni][63:0];
                 end
-                if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush) begin
-                    if (in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] == `ID_PT)
-                        cqinst[i] <= in_ex.rd[`PTSZ+`LATENUM-1:`LATENUM];
-                    else if (out_pd.valid) cqinst[i] <= mask_out;
-                    else cqinst[i] <= 0;
+                if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush)
                     {cqval[i], cqrda[i]} <= in_ex[71:0];
-                end
                 for (int j = 0; j < `LATENUM; j++)
                     if (cqval[i][64] & cqval[i][j] &
                         |(late_done[j] & cqval[i][`LATENUM+`PTSZ-1:`LATENUM]))
@@ -676,20 +660,18 @@ module wb_stage(input logic clk, input logic rst,
             end
         end
     always_comb for (int i = 0; i < 3; i++)
-        if (raddr[i] == 0) rvalue[i] = 65'd0;
-        else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
-        else if (in_pd.valid & raddr[i] == in_pd.rda) rvalue[i] = in_pd.rd;
-        else rvalue[i] = regs[raddr[i]];
-    always_comb begin
-        out_pd = in_ex;
-        out_pd.valid = in_ex.valid & ~(mask_ex == 0 & ~cqpush) &
-            in_ex.rda != 0 & in_ex.rd[64] & in_ex.rd[`LATENUM-1:0] != `ID_PT;
+        rvalue[i] = regs_fwd[raddr[i]];
+    always_comb regs_fwd[0] = 0;
+    always_comb for (int i = 1; i < 65; i++) begin
+        regs_fwd[i] = regs[i];
+        for (int j = 0; j < `LATENUM; j++)
+            if (regs[i][64] & regs[i][j] &
+                |(late_done[j] & regs[i][`LATENUM+`PTSZ-1:`LATENUM]))
+                regs_fwd[i] = late_val[j];
+        if (in_ex.valid & i[6:0] == in_ex.rda) regs_fwd[i] = in_ex.rd;
+        if (rst) regs_fwd[i][64] = 0;
     end
-    always_ff @(posedge clk) if (rst) regs <= 0; else begin
-        if (in_ex.valid & in_ex.rda != 0) // operating for each i may be better
-            regs[in_ex.rda] <= in_ex.rd;
-        if (in_pd.valid & in_pd.rda != 0 & ~(in_ex.valid & in_ex.rda == in_pd.rda))
-            regs[in_pd.rda] <= in_pd.rd; end
+    always_ff @(posedge clk) for (int i = 0; i < 65; i++) regs[i] <= regs_fwd[i];
     always_comb lsu_rqst = get_ex & in_ex.valid & in_ex.mw;
     always_comb lsu_addr = in_ex.mwaddr;
     always_comb lsu_bits = in_ex.mwbits;
@@ -697,29 +679,21 @@ module wb_stage(input logic clk, input logic rst,
 endmodule
 
 module pending_table(input logic clk, input logic rst,
-    input id_ex_t in_ex, output logic [`PTSZ-1:0] mask_ex_in,
-    input ex_wb_t in_wb, output logic [`PTSZ-1:0] mask_wb_in,
-    output id_ex_t out_ex, output logic [`PTSZ-1:0] mask_ex_out,
-    output ex_wb_t out_wb,
-    output logic [`PTSZ-1:0] mask_wb_in_next,
+    input id_ex_t in_ex, output logic [`PTSZ-1:0] mask_in,
+    output id_ex_t out_ex, output logic [`PTSZ-1:0] mask_out,
     input logic [`LATENUM-1:0][`PTSZ-1:0] late_done,
     input logic [`LATENUM-1:0][64:0] late_val,
     input logic [6:0] rda_id, input logic [6:0] rda_ex
 );
-    logic [`PTSZ-1:0] occ, stage, in1, in2, out1, out2;
-    logic [`PTSZ-1:0][`PTLEN-1:0] data;
-    logic [`PTSZ+1:0][64:0] fwd_a, fwd_b;
-    id_ex_t fwd_ex;
-    ex_wb_t fwd_wb;
-    always_comb mask_ex_in = in2 & {(`PTSZ){in_wb.valid}} |
-                             in1 & {(`PTSZ){~in_wb.valid}};
-    always_comb mask_wb_in = in1;
-    always_comb mask_wb_in_next = in_wb.valid ? in2 : in1; // in_ex must be invalid
-    always_comb for (int i = 0; i < `PTSZ + 2; i++)
-        if (occ[i] | i == `PTSZ | i == `PTSZ + 1) begin
-            if (i == `PTSZ + 1) {fwd_a[i], fwd_b[i]} = {in_wb[136:72], in_wb[71:7]};
-            else if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex[136:72], in_ex[71:7]};
-            else {fwd_a[i], fwd_b[i]} = {data[i][136:72], data[i][71:7]};
+    logic [`PTSZ-1:0] occ, in, out;
+    id_ex_t [`PTSZ-1:0] data;
+    logic [`PTSZ:0][64:0] fwd_a, fwd_b;
+    id_ex_t in_ex_fwd;
+    always_comb mask_in = in;
+    always_comb for (int i = 0; i <= `PTSZ; i++)
+        if (i == `PTSZ | occ[i]) begin
+            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex.a, in_ex.b};
+            else {fwd_a[i], fwd_b[i]} = {data[i].a, data[i].b};
             for (int j = 0; j < `LATENUM; j++)
                 if (fwd_a[i][64] & fwd_a[i][j] &
                     |(late_done[j] & fwd_a[i][`LATENUM+`PTSZ-1:`LATENUM]))
@@ -730,57 +704,28 @@ module pending_table(input logic clk, input logic rst,
                     fwd_b[i] = late_val[j];
         end else {fwd_a[i], fwd_b[i]} = {1'b1, 64'd0, 1'b1, 64'd0};
     always_comb begin
-        {fwd_ex, fwd_wb} = {in_ex, in_wb};
-        {fwd_ex[136:72], fwd_ex[71:7]} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
-        fwd_wb[71:7] = fwd_b[`PTSZ+1];
-    end
-    always_comb begin
-        {in1, in2, out1, out2} = 0; // out1 for EX and out2 for WB
+        {in, out} = 0;
         for (int i = `PTSZ-1; i >= 0; i--)
-            if (~stage[i] & ~fwd_a[i][64] & ~fwd_b[i][64]) out1 = 1 << i;
-        for (int i = `PTSZ-1; i >= 0; i--)
-            if (stage[i] & ~fwd_b[i][64]) out2 = 1 << i;
-        for (int i = `PTSZ-1; i >= 0; i--) if (~occ[i]) begin
-            if (in1 != 0) in2 = in1; in1 = 1 << i; end
+            if (~fwd_a[i][64] & ~fwd_b[i][64]) out = 1 << i;
+        for (int i = `PTSZ-1; i >= 0; i--) if (~occ[i]) in = 1 << i;
+        in_ex_fwd = in_ex;
+        {in_ex_fwd.a, in_ex_fwd.b} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
     end
-    always_ff @(posedge clk) if (rst) out_ex.valid <= 0;
-        else begin {out_ex.valid, mask_ex_out} <= 0;
-            for (int i = 0; i < `PTSZ; i++) if (out1[i]) begin
-                mask_ex_out <= out1;
+    always_ff @(posedge clk) if (rst) {out_ex.valid, mask_out} <= 0;
+        else begin {out_ex.valid, mask_out} <= 0;
+            for (int i = 0; i < `PTSZ; i++) if (out[i]) begin
+                mask_out <= out;
                 out_ex <= data[i];
                 out_ex.a <= fwd_a[i];
                 out_ex.b <= fwd_b[i];
-                if (data[i][6:0] == rda_id) out_ex.rda <= 0;
-            end end
-    always_ff @(posedge clk) if (rst) out_wb.valid <= 0;
-        else begin out_wb.valid <= 0;
-            for (int i = 0; i < `PTSZ; i++) if (out2[i]) begin
-                out_wb <= data[i][147:0];
-                out_wb.rd <= fwd_b[i];
-                if (data[i][6:0] == rda_ex) out_wb.rda <= 0;
+                if (data[i].rda == rda_id) out_ex.rda <= 0;
             end end
     always_ff @(posedge clk)
         if (rst) occ <= 0;
-        else for (int i = 0; i < `PTSZ; i++) begin
-            if (in_wb.valid & in1[i]) begin
-                occ[i] <= 1'b1;
-                stage[i] <= 1'b1;
-                data[i] <= {323'd0, fwd_wb[147:7],
-                    in_ex.valid & in_wb[6:0] == in_ex[6:0] ? 7'd0 : in_wb[6:0]};
-            end else if (fwd_ex.valid & (
-                ~in_wb.valid & in1[i] | in_wb.valid & in2[i])) begin
-                occ[i] <= 1'b1;
-                stage[i] <= 1'b0;
-                data[i] <= fwd_ex;
-            end else if (out1[i] | out2[i]) occ[i] <= 1'b0;
-            else begin
-                if (~stage[i]) data[i][136:72] <= fwd_a[i];
-                data[i][71:7] <= fwd_b[i];
-                if (data[i][6:0] == rda_ex & stage[i] |
-                    data[i][6:0] == rda_id & ~stage[i])
-                    data[i][6:0] <= 0;
-            end
-        end
+        else for (int i = 0; i < `PTSZ; i++)
+            if (in_ex_fwd.valid & in[i]) {occ[i], data[i]} <= {1'b1, in_ex_fwd};
+            else if (out[i]) occ[i] <= 1'b0;
+            else {data[i].a, data[i].b} <= {fwd_a[i], fwd_b[i]};
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
