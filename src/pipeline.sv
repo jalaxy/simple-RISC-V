@@ -623,17 +623,21 @@ module wb_stage(input logic clk, input logic rst,
     logic [`CQSZ-1:0][6:0] cqrda;
     logic [`CQSZ-1:0][64:0] cqval;
     logic [1:0][6:0] frontrda;
+    logic [1:0][63:0] frontval;
     logic recover;
     always_comb get_ex = ~in_ex.valid | cqpush;
     always_comb cqpush = in_ex.valid & (cqrear != 0 | cqpop[0]);
     always_comb recover = |(cqfront & cqexc);
-    always_comb begin {frontrda, cqpop} = 0; for (int i = 0; i < `CQSZ; i++) begin
-        automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
-        if (cqfront[i]) {frontrda, cqpop} = {
-            cqrda[ni], cqrda[i],
-            ~cqrear[ni] & ~cqval[ni][64] & ~cqexc[ni] & ~cqval[i][64] & ~cqexc[i],
-            ~cqval[i][64] & ~cqexc[i]};
-        end end
+    always_comb begin
+        {frontrda, frontval, cqpop} = 0;
+        for (int i = 0; i < `CQSZ; i++) begin
+            automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
+            if (cqfront[i]) {frontrda, frontval, cqpop} = {
+                cqrda[ni], cqrda[i], cqval[ni][63:0], cqval[i][63:0],
+                ~cqrear[ni] & ~cqval[ni][64] & ~cqexc[ni] & ~cqval[i][64] & ~cqexc[i],
+                ~cqval[i][64] & ~cqexc[i]};
+        end
+    end
     always_ff @(posedge clk)
         if (rst | recover) {cqexc, cqfront, cqrear} <= 1;
         else begin
@@ -651,12 +655,6 @@ module wb_stage(input logic clk, input logic rst,
             else if (cqpush) cqrear <= {cqrear[`CQSZ-2:0], cqrear[`CQSZ-1]};
             for (int i = 0; i < `CQSZ; i++) begin
                 automatic int ni = i + 1 == `CQSZ ? 0 : i + 1;
-                if (cqfront[i] & cqpop[0]) begin
-                    if (frontrda[0] != 0)
-                        valregs[frontrda[0]] <= cqval[i][63:0];
-                    if (cqpop[1] & frontrda[1] != 0)
-                        valregs[frontrda[1]] <= cqval[ni][63:0];
-                end
                 if ((cqrear[i] | cqrear == 0 & cqfront[i] & cqpop[0]) & cqpush)
                     {cqval[i], cqrda[i]} <= in_ex[71:0];
                 for (int j = 0; j < `LATENUM; j++)
@@ -665,6 +663,10 @@ module wb_stage(input logic clk, input logic rst,
                         {cqexc[i], cqval[i]} <= {late_exc[j], late_val[j]};
             end
         end
+    always_ff @(posedge clk) begin
+        if (cqpop[0] & frontrda[0] != 0) valregs[frontrda[0]] <= frontval[0];
+        if (cqpop[1] & frontrda[1] != 0) valregs[frontrda[1]] <= frontval[1];
+    end
     always_comb for (int i = 0; i < 3; i++)
         rvalue[i] = regs_fwd[raddr[i]];
     always_comb regs_fwd[0] = 0;
