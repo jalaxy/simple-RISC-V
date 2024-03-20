@@ -21,9 +21,9 @@
 
 typedef struct struct_cmd
 {
-    const char *filename = 0;
+    const char *filename = 0, *vcd = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, vcd = 1, verbose = 0;
+    uint8_t help = 0, filetype = 0, verbose = 0;
     int simtime = INT32_MAX;
 } cmd_t;
 
@@ -89,8 +89,8 @@ int main(int argc, char **argv)
                 cmd.filetype = 0;
             else if (strcmp(argv[i] + j, "elf") == 0)
                 cmd.filetype = 1;
-            else if (strcmp(argv[i] + j, "no-vcd") == 0)
-                cmd.vcd = 0;
+            else if (strcmp(argv[i] + j, "w") == 0)
+                cmd.vcd = argv[++i];
             else if (strcmp(argv[i] + j, "t") == 0)
             {
                 if (i + 1 < argc)
@@ -116,7 +116,7 @@ int main(int argc, char **argv)
         printf("Available options:\n");
         printf("    -dump: (default) input file as hex hump\n");
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
-        printf("    -no-vcd: no waveform output\n");
+        printf("    -w `waveform`: output waveform to `waveform`\n");
         printf("    -t `time`: maximum simulation time of `time`\n");
         printf("    -v: verbose mode\n");
         return 0;
@@ -228,7 +228,7 @@ int main(int argc, char **argv)
     {
         Verilated::traceEverOn(true); // trace waveform
         dut->trace(trace = new (std::nothrow) VerilatedVcdC, 5);
-        trace->open("waveform.vcd");
+        trace->open(cmd.vcd);
     }
     int st = 0; // simulation time
     // reset
