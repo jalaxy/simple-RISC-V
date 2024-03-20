@@ -615,8 +615,8 @@ module wb_stage(input logic clk, input logic rst,
     input logic [`LATENUM-1:0] late_exc
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
-    logic [64:0][64:0] regs, regs_fwd;
-    logic [64:0][63:0] valregs; // registers holding valid values, committed inorder
+    logic [64:0][`lgCQSZ:0] regscqid;
+    logic [64:0][63:0] regsval; // registers holding valid values, committed inorder
     logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1; // commit queue
     logic cqempty, cqfull, cqpush, cqpop1, cqpop2;
     logic [`CQSZ-1:0] cqexc;
@@ -647,34 +647,37 @@ module wb_stage(input logic clk, input logic rst,
             cqfront <= cqpop2 ? cqfrontp2 : (cqpop1 ? cqfrontp1 : cqfront);
             cqrear <= cqpush ? cqrearp1 : cqrear;
             if (cqpush) {cqval[cqrear], cqrda[cqrear]} <= {in_ex.rd, in_ex.rda};
-            for (int i = 0; i < `CQSZ; i++) 
-                for (int j = 0; j < `LATENUM; j++)
-                    if (cqval[i][64] & late_done[j] == cqval[i][`lgCQSZ:0])
-                        {cqexc[i], cqval[i]} <= {late_exc[j], late_val[j]};
+            for (int i = 0; i < `LATENUM; i++) if (late_done[i][`lgCQSZ]) begin
+                cqexc[late_done[i][`lgCQSZ-1:0]] <= late_exc[i];
+                cqval[late_done[i][`lgCQSZ-1:0]] <= late_val[i];
+            end
             assert((cqempty | cqfull) == (cqfront == cqrear));
             if (cqpush & in_ex.rd[64]) assert(in_ex.rd[3:0] == cqrear);
         end
-    always_ff @(posedge clk) begin
-        if (cqpop1) valregs[cqrda[cqfront]] <= cqval[cqfront][63:0];
-        if (cqpop2) valregs[cqrda[cqfrontp1]] <= cqval[cqfrontp1][63:0];
-    end
+    always_ff @(posedge clk) if (rst | recover) {regscqid, regsval[0]} <= 0;
+        else begin // commit
+            if (cqpop1 & |cqrda[cqfront])
+                regsval[cqrda[cqfront]] <= cqval[cqfront][63:0];
+            if (cqpop2 & cqrda[cqfrontp1] != 0)
+                regsval[cqrda[cqfrontp1]] <= cqval[cqfrontp1][63:0];
+            if (cqpop1 & regscqid[cqrda[cqfront]][`lgCQSZ-1:0] == cqfront)
+                regscqid[cqrda[cqfront]] <= 0;
+            if (cqpop2 & regscqid[cqrda[cqfrontp1]][`lgCQSZ-1:0] == cqfrontp1)
+                regscqid[cqrda[cqfrontp1]] <= 0;
+            if (cqpush & |in_ex.rda) regscqid[in_ex.rda] <= {1'b1, cqrear};
+        end
     always_comb for (int i = 0; i < 3; i++)
-        rvalue[i] = regs_fwd[raddr[i]];
-    always_comb regs_fwd[0] = 0;
-    always_comb for (int i = 1; i < 65; i++) begin
-        regs_fwd[i] = regs[i];
-        for (int j = 0; j < `LATENUM; j++)
-            if (regs[i][64] & late_done[j] == regs[i][`lgCQSZ:0])
-                regs_fwd[i] = late_val[j];
-        if (in_ex.valid & i[6:0] == in_ex.rda) regs_fwd[i] = in_ex.rd;
-        if (rst) regs_fwd[i][64] = 0;
-        if (recover) regs_fwd[i] = {1'b0, valregs[i]};
-    end
-    always_ff @(posedge clk) for (int i = 0; i < 65; i++) regs[i] <= regs_fwd[i];
+        if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
+        else if (regscqid[raddr[i]][`lgCQSZ]) begin
+            rvalue[i] = cqval[regscqid[raddr[i]][`lgCQSZ-1:0]];
+            for (int j = 0; j < `LATENUM; j++)
+                if (rvalue[i][64] & late_done[j] == rvalue[i][`lgCQSZ:0])
+                    rvalue[i] = late_val[j];
+        end else rvalue[i] = {1'b0, regsval[raddr[i]]};
     always_comb lsu_rqst = get_ex & in_ex.valid & in_ex.mw;
     always_comb lsu_addr = in_ex.mwaddr;
     always_comb lsu_bits = in_ex.mwbits;
-    always_comb lsu_data = regs[in_ex.rmwa];
+    // always_comb lsu_data = regs[in_ex.rmwa];
 endmodule
 
 module pending_table(input logic clk, input logic rst, input logic flush,
