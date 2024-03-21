@@ -615,14 +615,21 @@ module wb_stage(input logic clk, input logic rst,
     input logic [`LATENUM-1:0] late_exc
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
-    logic [64:0][`lgCQSZ:0] regscqid;
-    logic [64:0][63:0] regsval; // registers holding valid values, committed inorder
-    logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1; // commit queue
+    logic [`lgCQSZ:0] regscqid[64:0];
+    logic [2:0][63:0] regsval;
+    // commit queue
+    logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1;
     logic cqempty, cqfull, cqpush, cqpop1, cqpop2;
     logic [`CQSZ-1:0] cqexc;
-    logic [`CQSZ-1:0][6:0] cqrda;
-    logic [`CQSZ-1:0][64:0] cqval;
+    logic [6:0]  cqrda[`CQSZ-1:0];
+    logic [64:0] cqval[`CQSZ-1:0];
     logic recover;
+    regfile #(.dwidth(64), .rports(3), .wports(2), .awidth(7), .depth(65))
+        regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
+            .waddr({cqrda[cqfrontp1], cqrda[cqfront]}),
+            .wvalue({cqval[cqfrontp1][63:0], cqval[cqfront][63:0]}),
+            .wena({~recover & cqpop2 & |cqrda[cqfrontp1],
+                   ~recover & cqpop1 & |cqrda[cqfront]}));
     always_comb get_ex = ~in_ex.valid | cqpush;
     always_comb cqfrontp1 = cqfront + 1;
     always_comb cqfrontp2 = cqfront + 2;
@@ -654,12 +661,9 @@ module wb_stage(input logic clk, input logic rst,
             assert((cqempty | cqfull) == (cqfront == cqrear));
             if (cqpush & in_ex.rd[64]) assert(in_ex.rd[3:0] == cqrear);
         end
-    always_ff @(posedge clk) if (rst | recover) {regscqid, regsval[0]} <= 0;
+    always_ff @(posedge clk)
+        if (rst | recover) for (int i = 0; i < `CQSZ; i++) regscqid[i][`lgCQSZ] <= 0;
         else begin // commit
-            if (cqpop1 & |cqrda[cqfront])
-                regsval[cqrda[cqfront]] <= cqval[cqfront][63:0];
-            if (cqpop2 & cqrda[cqfrontp1] != 0)
-                regsval[cqrda[cqfrontp1]] <= cqval[cqfrontp1][63:0];
             if (cqpop1 & regscqid[cqrda[cqfront]][`lgCQSZ-1:0] == cqfront)
                 regscqid[cqrda[cqfront]] <= 0;
             if (cqpop2 & regscqid[cqrda[cqfrontp1]][`lgCQSZ-1:0] == cqfrontp1)
@@ -667,13 +671,14 @@ module wb_stage(input logic clk, input logic rst,
             if (cqpush & |in_ex.rda) regscqid[in_ex.rda] <= {1'b1, cqrear};
         end
     always_comb for (int i = 0; i < 3; i++)
-        if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
+        if (raddr[i] == 0) rvalue[i] = 0;
+        else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
         else if (regscqid[raddr[i]][`lgCQSZ]) begin
             rvalue[i] = cqval[regscqid[raddr[i]][`lgCQSZ-1:0]];
             for (int j = 0; j < `LATENUM; j++)
                 if (rvalue[i][64] & late_done[j] == rvalue[i][`lgCQSZ:0])
                     rvalue[i] = late_val[j];
-        end else rvalue[i] = {1'b0, regsval[raddr[i]]};
+        end else rvalue[i] = {1'b0, regsval[i]};
     always_comb lsu_rqst = get_ex & in_ex.valid & in_ex.mw;
     always_comb lsu_addr = in_ex.mwaddr;
     always_comb lsu_bits = in_ex.mwbits;
@@ -905,4 +910,36 @@ module mul(input logic clk, input logic rst, input logic flush,
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;
     always_comb done = valid[0];
+endmodule
+
+module regfile #(parameter dwidth = 64,
+    parameter rports = 2, parameter wports = 1,
+    parameter awidth = 6, parameter depth = 64) (
+    input  logic clk, input logic rst,
+    input  logic [rports-1:0][awidth-1:0] raddr,
+    output logic [rports-1:0][dwidth-1:0] rvalue,
+    input  logic [wports-1:0][awidth-1:0] waddr,
+    input  logic [wports-1:0][dwidth-1:0] wvalue,
+    input  logic [wports-1:0] wena
+);
+    int sel[depth-1:0];
+    always_ff @(posedge clk)
+        for (int i = 0; i < wports; i++) if (wena[i]) sel[waddr[i]] <= i;
+    for (genvar i = 0; i < wports; i++) begin : dupregs
+        logic [dwidth-1:0] regs[depth-1:0];
+        always_ff @(posedge clk)
+            if (wena[i]) regs[waddr[i]] <= wvalue[i];
+    end
+    for (genvar i = 0; i < rports; i++) begin
+        logic [dwidth-1:0] dupval[wports-1:0];
+        for (genvar j = 0; j < wports; j++)
+            always_comb dupval[j] = dupregs[j].regs[raddr[i]];
+        always_comb rvalue[i] = dupval[sel[raddr[i]]];
+    end
+    logic [dwidth-1:0] regs[wports-1:0][depth-1:0], realregs[depth-1:0];
+    for (genvar i = 0; i < wports; i++)
+        for (genvar j = 0; j < depth; j++)
+            always_comb regs[i][j] = dupregs[i].regs[j];
+    always_comb
+        for (int i = 0; i < depth; i++) realregs[i] = regs[sel[i]][i];
 endmodule
