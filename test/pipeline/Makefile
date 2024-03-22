@@ -12,7 +12,8 @@ VERILATOR_V=../../src/pipeline.sv
 VERILATOR_CPP=test.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
 VERILATOR_TOP=pipeline
-VERILATOR_FLAGS=-cc -exe -assert -trace -trace-structs -top-module $(VERILATOR_TOP)
+VERILATOR_FLAGS=-cc -exe -assert -top-module $(VERILATOR_TOP)\
+	-trace -trace-structs -trace-max-array 256
 
 all: obj_dir/V$(VERILATOR_TOP)
 

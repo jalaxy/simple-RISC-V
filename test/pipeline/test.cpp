@@ -128,6 +128,8 @@ int main(int argc, char **argv)
         for (int i = 0; i < cmd.args.size(); i++)
             printf(" %s", cmd.args[i]);
         printf("\n");
+        if (cmd.vcd)
+            printf("Recording waveform in file: %s\n", cmd.vcd);
     }
 
     // Load and set reset code in memory
