@@ -149,7 +149,7 @@ module pipeline(
     ex_pc_t data_ex_pc; logic get_ex_pc;
     id_ex_t data_ex_pt; logic get_ex_pt;
     id_ex_t data_pt_ex; logic get_pt_ex;
-    logic [2:0][6:0] raddr; logic [2:0][64:0] rvalue;
+    logic [1:0][6:0] raddr; logic [1:0][64:0] rvalue;
     logic [`lgCQSZ:0] cqid_new, cqid_old;
     logic lsu_w_rqst; logic [2:0] lsu_w_bits;
     logic [`lgCQSZ:0] late_done; logic [64:0] late_val; logic late_exc;
@@ -505,7 +505,7 @@ module ex_stage(input logic clk, input logic rst,
     output ex_wb_t out_wb, input logic ena_wb,
     output ex_pc_t out_pc, input logic ena_pc, // always enabled
     output id_ex_t out_pt, input logic ena_pt,
-    output logic [2:0][6:0] raddr, input logic [2:0][64:0] rvalue,
+    output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] cqid_id, input logic [`lgCQSZ:0] cqid_pt,
     input logic mul_free, output logic [`lgCQSZ:0] mul_rqst,
     output logic [4:0] mul_op,
@@ -517,9 +517,10 @@ module ex_stage(input logic clk, input logic rst,
 );
     id_ex_t in;
     always_comb in = in_pt.valid ? in_pt : in_id;
-    always_comb raddr[0] = in.valid & in.a[64] ? in.a[6:0] : 7'd0;
-    always_comb raddr[1] = in.valid & in.b[64] ? in.b[6:0] : 7'd0;
-    always_comb raddr[2] = in.valid & in.base[64] ? in.base[6:0] : 7'd0;
+    always_comb if (in.valid & in.a[64]) raddr[0] = in.a[6:0];
+        else if (~in_pt.valid & in.valid & in.base[64]) raddr[0] = in.base[6:0]; // JALR
+        else raddr[0] = 0;
+    always_comb if (in.valid & in.b[64]) raddr[1] = in.b[6:0]; else raddr[1] = 0;
     logic [52:0] op;
     logic [63:0] a, b;
     logic jump;
@@ -531,7 +532,8 @@ module ex_stage(input logic clk, input logic rst,
     logic ready, mul_valid, lsu_vaild;
     logic [`lgCQSZ:0] cqid;
     always_comb op = in.valid ? in.exop : 0;
-    always_comb a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
+    always_comb if (in_pt.valid & in_pt.j) a = in.pc; // JALR
+        else    a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
     always_comb b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
     always_comb sub = {1'b0, a} - {1'b0, b};
     always_comb add = a + b;
@@ -541,8 +543,8 @@ module ex_stage(input logic clk, input logic rst,
     always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
     always_comb begin
         out_pt = in;
-        out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64] | rvalue[2][64]);
-        out_pt.a = in.a[64] ? rvalue[0] : in.a;
+        out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64]);
+        out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
         out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
     always_comb get_pt = ~in_pt.valid | ~(mul & ~mul_free) & ~(in.mr & ~lsu_free);
@@ -607,8 +609,9 @@ module ex_stage(input logic clk, input logic rst,
                 out_wb.rmwa <= in.rmwa;
             end else out_wb.mw <= 1'b0;
         end else if (ena_wb) out_wb.valid <= 0;
-    always_comb jpc =
-        (in.base[64] ? rvalue[2][63:0] : in.base[63:0]) + in.offset;
+    always_comb if (in_pt.valid & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
+        else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
+        else jpc = in.base[63:0] + in.offset;
     always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
@@ -622,7 +625,7 @@ endmodule
 
 module wb_stage(input logic clk, input logic rst,
     input ex_wb_t in_ex, output logic get_ex,
-    input logic [2:0][6:0] raddr, output logic [2:0][64:0] rvalue,
+    input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
     output logic [`lgCQSZ:0] cqid,
     output logic lsu_rqst, output logic [63:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_data,
@@ -630,7 +633,7 @@ module wb_stage(input logic clk, input logic rst,
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
     logic [`lgCQSZ:0] regscqid[64:0];
-    logic [2:0][63:0] regsval;
+    logic [1:0][63:0] regsval;
     // commit queue
     logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1;
     logic cqempty, cqfull, cqpush, cqpop1, cqpop2;
@@ -640,11 +643,10 @@ module wb_stage(input logic clk, input logic rst,
     logic [2:0][`lgCQSZ-1:0] cqraddr;
     logic [2:0][64:0] cqrvalue;
     logic recover;
-    regfile #(.dwidth(64), .rports(3), .wports(2), .awidth(7), .depth(65))
+    regfile #(.dwidth(64), .rports(2), .wports(2), .awidth(7), .depth(65))
         regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
             .waddr({cqrdap1, cqrda}), .wvalue({cqfrontp1val[63:0], cqfrontval[63:0]}),
-            .wena({~recover & cqpop2 & |cqrdap1,
-                   ~recover & cqpop1 & |cqrda}));
+            .wena({cqpop2 & |cqrdap1, cqpop1 & |cqrda}));
     regfile #(.dwidth(7), .rports(2), .wports(1), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqrda_inst(.clk(clk), .rst(rst),
             .raddr({cqfrontp1, cqfront}), .rvalue({cqrdap1, cqrda}),
@@ -663,9 +665,9 @@ module wb_stage(input logic clk, input logic rst,
         else if (cqpush & ~cqpop1 & cqfront == cqrearp1) cqid = 0;
         else cqid = {1'b1, cqpush ? cqrearp1 : cqrear};
     always_comb cqpush = in_ex.valid & (~cqfull | cqpop1);
-    always_comb cqpop1 = ~cqfrontval[64] & ~cqexc[cqfront] & ~cqempty;
+    always_comb cqpop1 = ~cqfrontval[64] & ~cqempty;
     always_comb cqpop2 = ~cqfrontp1val[64] & ~cqexc[cqfrontp1] &
-        cqfrontp1 != cqrear & cqpop1; // more than one value
+        cqfrontp1 != cqrear & ~cqexc[cqfront] & cqpop1; // more than one value
     always_comb recover = ~cqempty & cqexc[cqfront];
     always_ff @(posedge clk)
         if (rst | recover) {cqexc, cqfront, cqrear, cqfull, cqempty} <= 1;
@@ -692,9 +694,9 @@ module wb_stage(input logic clk, input logic rst,
                 regscqid[cqrdap1] <= 0;
             if (cqpush & |in_ex.rda) regscqid[in_ex.rda] <= {1'b1, cqrear};
         end
-    always_comb for (int i = 0; i < 3; i++)
+    always_comb for (int i = 0; i < 2; i++)
         cqraddr[i] = regscqid[raddr[i]][`lgCQSZ-1:0];
-    always_comb for (int i = 0; i < 3; i++)
+    always_comb for (int i = 0; i < 2; i++)
         if (raddr[i] == 0) rvalue[i] = 0;
         else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
         else if (regscqid[raddr[i]][`lgCQSZ]) begin
