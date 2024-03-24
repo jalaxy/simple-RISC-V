@@ -264,14 +264,14 @@ int main(int argc, char **argv)
         dut->dcache_rdat &= (1llu << bitwidth) - 1;
         if (((1 << bitwidth - 1) & dut->dcache_rdat) && (d_delay.front().bits >> 2))
             dut->dcache_rdat |= ~((1llu << bitwidth) - 1); // msb = 1 and sign extended
-        dut->dcache_done = d_delay.front().wena ? d_delay.front().rqst : 0;
-        for (int j = 0; dut->dcache_done && j < (1 << (d_delay.front().bits & 3)); j++)
-            memory[d_delay.front().addr + j] = DTOB(d_delay.front().wdata, j);
+        if (d_delay.front().rqst && d_delay.front().wena)
+            for (int j = 0; j < (1 << (d_delay.front().bits & 3)); j++)
+                memory[d_delay.front().addr + j] = DTOB(d_delay.front().wdata, j);
         i_delay.pop(), d_delay.pop();
         dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
     }
     cmd.verbose ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
-
+dumpmem(memory, 0x10010000, 32);
     // Clean
     delete (trace ? trace->close(), trace : NULL);
     delete dut;
