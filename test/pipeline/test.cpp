@@ -261,9 +261,10 @@ int main(int argc, char **argv)
             dut->dcache_rdat = DLE(memory, d_delay.front().addr);
         // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
         uint64_t bitwidth = 8 * (1 << (d_delay.front().bits & 3));
-        dut->dcache_rdat &= (1llu << bitwidth) - 1;
-        if (((1 << bitwidth - 1) & dut->dcache_rdat) && (d_delay.front().bits >> 2))
-            dut->dcache_rdat |= ~((1llu << bitwidth) - 1); // msb = 1 and sign extended
+        uint64_t mask = bitwidth < 64 ? (1llu << bitwidth) - 1 : ~0llu;
+        dut->dcache_rdat &= mask;
+        if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
+            dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
         if (d_delay.front().rqst && d_delay.front().wena)
             for (int j = 0; j < (1 << (d_delay.front().bits & 3)); j++)
                 memory[d_delay.front().addr + j] = DTOB(d_delay.front().wdata, j);
@@ -271,7 +272,7 @@ int main(int argc, char **argv)
         dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
     }
     cmd.verbose ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
-dumpmem(memory, 0x10010000, 32);
+
     // Clean
     delete (trace ? trace->close(), trace : NULL);
     delete dut;
