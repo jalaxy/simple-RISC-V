@@ -116,9 +116,6 @@ typedef struct packed {
 typedef struct packed {
     logic valid;
     logic mw;
-    logic [63:0] mwaddr;
-    logic [2:0] mwbits;
-    logic [6:0] rmwa;
     logic [64:0] rd;
     logic [6:0] rda;
 } ex_wb_t;
@@ -159,7 +156,7 @@ module pipeline(
     logic [64:0] lsu_addr; logic [64:0] lsu_rdat, lsu_wdat;
     logic [`lgCQSZ:0] mul_rqst, mul_done; logic mul_exc, mul_ena, mul_free;
     logic [4:0] mul_op; logic [63:0] mul_a, mul_b; logic [64:0] mul_r;
-    logic [`lgCQSZ:0] div_rqst, div_done; logic div_exc, div_get, div_free;
+    logic [`lgCQSZ:0] div_rqst, div_done; logic div_exc, div_ena, div_free;
     logic [4:0] div_op; logic [63:0] div_a, div_b; logic [64:0] div_r;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
@@ -188,7 +185,7 @@ module pipeline(
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
         .lsu_free(lsu_free), .lsu_rqst(lsu_rqst), .lsu_wena(lsu_wena),
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
-        .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc),
+        .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
         .addr_done(addr_done), .addr_val(addr_val));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
@@ -217,12 +214,13 @@ module pipeline(
         .ena(mul_ena), .get(mul_free),
         .rqst(mul_rqst), .op(mul_op), .a(mul_a), .b(mul_b),
         .done(mul_done), .r(mul_r), .e(mul_exc));
-    arbiter arbiter_inst(
-        .done_in({div_done, mul_done, lsu_done, pt_done}),
-        .val_in({div_r, mul_r, lsu_rdat, pt_data}),
-        .exc_in({div_exc, mul_exc, lsu_exc, pt_exc}),
-        .done_out(late_done), .val_out(late_val), .exc_out(late_exc),
-        .get({div_get, mul_ena, lsu_ena, pt_ena}));
+    arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
+                          // or use dynamic priority?
+        .done_in({pt_done, div_done, mul_done, lsu_done}),
+        .val_in({pt_data, div_r, mul_r, lsu_rdat}),
+        .exc_in({pt_exc, div_exc, mul_exc, lsu_exc}),
+        .get({pt_ena, div_ena, mul_ena, lsu_ena}),
+        .done_out(late_done), .val_out(late_val), .exc_out(late_exc));
 endmodule
 
 module pc_stage(input logic clk, input logic rst, input logic flush,
@@ -509,29 +507,32 @@ module ex_stage(input logic clk, input logic rst,
     input logic lsu_free, output logic [`lgCQSZ:0] lsu_rqst,
     output logic lsu_wena, output logic [64:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
-    output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data, output logic pt_exc,
+    output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data,
+    output logic pt_exc, input logic ena_arb,
     output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val
 );
     id_ex_t in;
-    always_comb in = in_pt.valid ? in_pt : in_id;
+    logic frompt;
+    always_comb frompt = in_pt.valid & (ena_arb | in_pt.mr | in_pt.mw);
+    always_comb in = frompt ? in_pt : in_id;
     always_comb if (in.valid & in.a[64]) raddr[0] = in.a[6:0];
-        else if (~in_pt.valid & in.valid & in.base[64]) raddr[0] = in.base[6:0]; // JALR
+        else if (~frompt & in.valid & in.base[64]) raddr[0] = in.base[6:0]; // JALR
         else raddr[0] = 0;
     always_comb if (in.valid & in.b[64]) raddr[1] = in.b[6:0];
         else if (in.valid & in.mw) raddr[1] = in.rmwa;
         else raddr[1] = 0;
     logic [52:0] op;
     logic [63:0] a, b;
-    logic jump;
+    logic jump, excp;
     logic [63:0] jpc;
     logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
-    logic mul, div;
+    logic lsu, mul, div;
     logic [2:0] bflag;
     logic ready, mul_valid, lsu_vaild;
     logic [`lgCQSZ:0] cqid;
     always_comb op = in.valid ? in.exop : 0;
-    always_comb if (in_pt.valid & in_pt.j) a = in.pc; // JALR in PT
+    always_comb if (frompt & in_pt.j) a = in.pc; // JALR in PT
         else    a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
     always_comb b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
     always_comb sub = {1'b0, a} - {1'b0, b};
@@ -542,17 +543,17 @@ module ex_stage(input logic clk, input logic rst,
     always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
     always_comb begin
         out_pt = in;
-        if (in.mw | in.mr) out_pt.valid = in.valid & rvalue[0][64];
+        if (lsu) out_pt.valid = in.valid & rvalue[0][64];
         else out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64]);
         out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
         out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
-    always_comb get_pt = ~in_pt.valid | ~(mul & ~mul_free) & ~(in.mr & ~lsu_free);
-    always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] &
-        ~in_pt.valid & (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
-        ~(mul & ~mul_free) & ~(in.mr & ~lsu_free);
-    always_comb ready = (get_id & in_id.valid | in_pt.valid) & ~out_pt.valid;
-    always_comb cqid = in_pt.valid ? cqid_pt : cqid_id;
+    always_comb get_pt = ~in_pt.valid | frompt & ~(mul & ~mul_free);
+    always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] & ~frompt &
+        (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
+        ~(mul & ~mul_free) & ~(lsu & ~lsu_free);
+    always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
+    always_comb cqid = frompt ? cqid_pt : cqid_id;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
                       op[`EX_MULW];
     always_comb mul_valid = ~rst & ready & mul;
@@ -562,7 +563,8 @@ module ex_stage(input logic clk, input logic rst,
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
-    always_comb lsu_vaild = ~rst & (get_id & in_id.valid) & (in.mr | in.mw);
+    always_comb lsu = in.mr | in.mw;
+    always_comb lsu_vaild = ~rst & (get_id & in_id.valid) & lsu;
     always_ff @(posedge clk)
         if (lsu_vaild) begin
             lsu_rqst <= cqid;
@@ -573,7 +575,7 @@ module ex_stage(input logic clk, input logic rst,
             lsu_wdat <= rvalue[1];
         end else lsu_rqst <= 0;
     always_comb if (out_pt.valid) res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
-        else if (in.valid & in.mr) res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
+        else if (in.valid & lsu) res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
         else res =
             {65{op[`EX_ADD]}}  & {1'b0, add} |
             {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
@@ -596,36 +598,33 @@ module ex_stage(input logic clk, input logic rst,
             {65{op[`EX_SRAW]}} & {1'b0, {32{sra[31]}}, sra[31:0]} |
             {65{mul}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
             {65{div}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
-    always_ff @(posedge clk) if (~rst & in_pt.valid & ~in_pt.mr & ~in_pt.mw)
-            {pt_done, pt_data} <= {cqid_pt, res}; else pt_done <= 0;
-    always_ff @(posedge clk) if (~rst & in_pt.valid & (in_pt.mr | in_pt.mw))
-            {addr_done, addr_val} <= {cqid_pt, add[63:0]}; else addr_done <= 0;
-    always_comb pt_exc = out_pc.valid;
+    always_ff @(posedge clk) if (rst) pt_done <= 0;
+        else if (frompt & ~lsu)
+            {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & excp};
+        else if (ena_arb) pt_done <= 0;
+    always_ff @(posedge clk) if (rst) addr_done <= 0;
+        else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};
+        else addr_done <= 0;
     always_ff @(posedge clk)
         if (rst) out_wb.valid <= 0;
         else if (get_id & in_id.valid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
-            if (in.mw) begin
-                out_wb.mw <= 1'b1;
-                out_wb.mwaddr <= add;
-                out_wb.mwbits <= in.bits;
-                out_wb.rmwa <= in.rmwa;
-            end else out_wb.mw <= 1'b0;
+            out_wb.mw <= in.mw;
         end else if (ena_wb) out_wb.valid <= 0;
-    always_comb if (in_pt.valid & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
+    always_comb if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
         else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
         else jpc = in.base[63:0] + in.offset;
     always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
+    always_comb excp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
-        else if (ena_pc)
-            if (ready & (jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch)) begin
-                out_pc.valid <= 1'b1;
-                out_pc.pc <= in.pc;
-                out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
-            end else out_pc.valid <= 1'b0;
+        else if (ready & excp) begin
+            out_pc.valid <= 1'b1;
+            out_pc.pc <= in.pc;
+            out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
+        end else out_pc.valid <= 1'b0;
 endmodule
 
 module wb_stage(input logic clk, input logic rst,
@@ -757,7 +756,7 @@ module pending_table(input logic clk, input logic rst, input logic flush,
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) id[i] <= 0;
         else if (in_ex_fwd.valid & in_ena) id[in] <= cqid_in;
-        else if (out_ena) id[out] <= 0;
+        else if (out_ena & ena_ex) id[out] <= 0;
     always_ff @(posedge clk) for (int i = 0; i < `PTSZ; i++)
         if (in_ex_fwd.valid & in_ena & i[`lgPTSZ-1:0] == in)
             {a[i], b[i]} <= {in_ex_fwd.a, in_ex_fwd.b};
@@ -889,7 +888,7 @@ module ci2i(input logic [31:0] ci, output logic [31:0] i);
 endmodule
 
 module lsu(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
+    input logic ena, output logic get, // always enabled
     input logic cmt, input logic cmtp1,
     input logic [`lgCQSZ:0] rqst, input logic wena,
     input logic [64:0] addr, input logic [2:0] bits,
@@ -920,7 +919,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
         if (lsqwena[front])
             pop = (cmt | lsqcmt[front]) & ~lsqaddr[front][64] & ~lsqdata[front][64];
         else pop = ~lsqaddr[front][64]; else pop = 0;
-    always_comb get = push | through |
+    always_comb get = ~rqst[`lgCQSZ] | push | through | ~wena &
         ~(fwd[`lgCQSZ] & fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ]);
     always_comb begin
         {lsqequal, fwd, fwdbits, fwddata} = 0;
@@ -934,7 +933,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
                         {1'b0, rqst, lsqbits[i], lsqdata[i]};
                 else if (lsqaddr[i][64] | lsqequal[i]) {fwd, through} = 0;
     end
-    always_ff @(posedge clk) if (rst) fwd_r <= 0;
+    always_ff @(posedge clk) if (rst | flush) fwd_r <= 0;
         else if (fwd[`lgCQSZ] & ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ])) begin
             fwd_r <= fwd;
             case (fwdbits[1:0])
@@ -943,9 +942,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
                 2: fwddata_r <= {1'b0, {32{fwddata[31] & fwdbits[2]}}, fwddata[31:0]};
                 3: fwddata_r <= fwddata;
             endcase
-        end
-        else if (fwd_r[`lgCQSZ] & ~dcache_done[`lgCQSZ]) fwd_r <= 0;
-    always_ff @(posedge clk) if (rst) {front, rear, full, empty} <= 1;
+        end else if (fwd_r[`lgCQSZ] & ~dcache_done[`lgCQSZ]) fwd_r <= 0;
+    always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
         else begin
             if (pop & ~push & front + 1 == rear) empty <= 1;
             if (push & ~pop & rear + 1 == front) full <= 1;
