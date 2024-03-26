@@ -727,7 +727,7 @@ module pending_table(input logic clk, input logic rst, input logic flush,
     logic [64:0] a[`PTSZ-1:0], b[`PTSZ-1:0], fwd_a[`PTSZ:0], fwd_b[`PTSZ:0];
     id_ex_t in_ex_fwd, data_out;
     regfile #(.dwidth(`PTLEN), .rports(1), .wports(1), .awidth(`lgPTSZ), .depth(`PTSZ))
-        cqrda_inst(.clk(clk), .rst(rst), .raddr(out), .rvalue(data_out),
+        data_inst(.clk(clk), .rst(rst), .raddr(out), .rvalue(data_out),
             .waddr(in), .wvalue(in_ex_fwd), .wena(~flush & in_ex_fwd.valid & in_ena));
     always_comb get_ex = in_ena;
     always_comb begin

@@ -9,7 +9,7 @@ clean:
 
 # Verilator variables
 VERILATOR_V=../../src/pipeline.sv
-VERILATOR_CPP=test.cpp
+VERILATOR_CPP=main.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
 VERILATOR_TOP=pipeline
 VERILATOR_FLAGS=-cc -exe -assert -top-module $(VERILATOR_TOP)\
