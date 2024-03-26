@@ -551,7 +551,7 @@ module ex_stage(input logic clk, input logic rst,
     always_comb get_pt = ~in_pt.valid | frompt & ~(mul & ~mul_free);
     always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] & ~frompt &
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
-        ~(mul & ~mul_free) & ~(lsu & ~lsu_free);
+        ~(mul & ~mul_free) & ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
     always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
     always_comb cqid = frompt ? cqid_pt : cqid_id;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
@@ -565,7 +565,7 @@ module ex_stage(input logic clk, input logic rst,
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
     always_comb lsu = in.mr | in.mw;
     always_comb lsu_vaild = ~rst & (get_id & in_id.valid) & lsu;
-    always_ff @(posedge clk)
+    always_ff @(posedge clk) if (lsu_free | ~lsu_rqst[`lgCQSZ])
         if (lsu_vaild) begin
             lsu_rqst <= cqid;
             lsu_wena <= in.mw;
@@ -945,10 +945,11 @@ module lsu(input logic clk, input logic rst, input logic flush,
         end else if (fwd_r[`lgCQSZ] & ~dcache_done[`lgCQSZ]) fwd_r <= 0;
     always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
         else begin
-            if (pop & ~push & front + 1 == rear) empty <= 1;
-            if (push & ~pop & rear + 1 == front) full <= 1;
+            if (pop & ~push & front + `lgLSQSZ'b1 == rear) empty <= 1;
+            if (push & ~pop & rear + `lgLSQSZ'b1 == front) full <= 1;
             if (push) empty <= 0;
             if (pop & ~push) full <= 0;
+            if (pop) begin lsqrqst[front] <= 0; front <= front + 1; end
             if (push) begin
                 rear <= rear + 1; lsqcmt[rear] <= cmt & empty;
                 lsqrqst[rear] <= rqst; lsqwena[rear] <= wena; lsqold[rear] <= 0;
@@ -958,9 +959,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
                 if (lsqdata[rear][64] & late_done == lsqdata[rear][`lgCQSZ:0])
                     lsqdata[rear] <= late_val;
             end
-            if (pop) begin lsqrqst[front] <= 0; front <= front + 1; end
             if (cmt) lsqcmt[front] <= 1;
-            if (cmtp1) lsqcmt[front+1] <=1;
+            if (cmtp1) lsqcmt[front + 1] <= 1;
             for (int i = 0; i < `LSQSZ; i++) begin
                 if (lsqequal[i] & wena) lsqold[i] <= 1;
                 if (lsqaddr[i][64] & addr_done == lsqaddr[i][`lgCQSZ:0])
