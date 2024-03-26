@@ -5,7 +5,8 @@
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include <elf.h>
-#include "Vpipeline.h"
+#include "Vstats.h"
+#include "simulator.h"
 
 #define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                                         \
     ((((uint64_t)(uint8_t)(b0)) << (uint64_t)0x00) | (((uint64_t)(uint8_t)(b1)) << (uint64_t)0x08) | \
@@ -13,8 +14,6 @@
      (((uint64_t)(uint8_t)(b4)) << (uint64_t)0x20) | (((uint64_t)(uint8_t)(b5)) << (uint64_t)0x28) | \
      (((uint64_t)(uint8_t)(b6)) << (uint64_t)0x30) | (((uint64_t)(uint8_t)(b7)) << (uint64_t)0x38))
 #define DTOB(x, i) ((uint8_t)((x) >> (8 * (uint64_t)(i))))
-#define BTOW(b0, b1, b2, b3) ((uint32_t)BTOD(b0, b1, b2, b3, 0, 0, 0, 0))
-#define WLE(pb, addr) (BTOW((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3]))
 #define DLE(pb, addr) (BTOD((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3], \
                             (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
 #define NOP ((uint64_t)0x13)
@@ -217,7 +216,8 @@ int main(int argc, char **argv)
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
 
     // Simulation
-    Vpipeline *dut = new (std::nothrow) Vpipeline;
+    simulator sim(0x400000, memory);
+    Vstats *dut = new (std::nothrow) Vstats;
     VerilatedVcdC *trace = NULL;
     if (cmd.vcd)
     {
@@ -270,6 +270,8 @@ int main(int argc, char **argv)
                 memory[d_delay.front().addr + j] = DTOB(d_delay.front().wdata, j);
         i_delay.pop(), d_delay.pop();
         dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
+        // simulator checker
+        sim.step();
     }
     cmd.verbose ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
 

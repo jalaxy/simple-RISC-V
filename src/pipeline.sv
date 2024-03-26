@@ -1026,12 +1026,6 @@ module regfile #(parameter dwidth = 64,
             always_comb dupval[j] = dupregs[j].regs[raddr[i]];
         always_comb rvalue[i] = dupval[sel[raddr[i]]];
     end
-    logic [dwidth-1:0] regs[wports-1:0][depth-1:0], realregs[depth-1:0];
-    for (genvar i = 0; i < wports; i++)
-        for (genvar j = 0; j < depth; j++)
-            always_comb regs[i][j] = dupregs[i].regs[j];
-    always_comb
-        for (int i = 0; i < depth; i++) realregs[i] = regs[sel[i]][i];
 endmodule
 
 module arbiter(

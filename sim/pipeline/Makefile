@@ -8,17 +8,18 @@ clean:
 # Execute in docker.io/jxy324/verilator:v0
 
 # Verilator variables
-VERILATOR_V=../../src/pipeline.sv
-VERILATOR_CPP=main.cpp
+VERILATOR_V=../../src/pipeline.sv stats.sv
+VERILATOR_H = simulator.h
+VERILATOR_CPP=main.cpp simulator.cpp
 VERILATOR_SRC=$(VERILATOR_V) $(VERILATOR_CPP)
-VERILATOR_TOP=pipeline
+VERILATOR_TOP=stats
 VERILATOR_FLAGS=-cc -exe -assert -top-module $(VERILATOR_TOP)\
 	-trace -trace-structs -trace-max-array 256
 
 all: obj_dir/V$(VERILATOR_TOP)
 
 # Verilator bin target
-obj_dir/V$(VERILATOR_TOP): obj_dir $(VERILATOR_CPP)
+obj_dir/V$(VERILATOR_TOP): obj_dir $(VERILATOR_CPP) $(VERILATOR_H)
 	make -C obj_dir -f V$(VERILATOR_TOP).mk
 
 # Verilator obj_dir target
