@@ -22,7 +22,7 @@ typedef struct struct_cmd
 {
     const char *filename = 0, *vcd = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, verbose = 0;
+    uint8_t help = 0, filetype = 0, debug = 0, step = 0;
     int simtime = INT32_MAX;
 } cmd_t;
 
@@ -42,6 +42,12 @@ typedef struct struct_dcache_req
     uint8_t rqst = 0, bits = 0, wena = 0;
     uint64_t addr = 0, wdata = 0;
 } dcache_req_t;
+
+typedef struct struct_store
+{
+    uint64_t addr, data;
+    uint8_t width;
+} store_t;
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
@@ -91,8 +97,10 @@ int main(int argc, char **argv)
                     cmd.simtime = 1024;
                 i++;
             }
-            else if (strcmp(argv[i] + j, "v") == 0)
-                cmd.verbose = 1;
+            else if (strcmp(argv[i] + j, "d") == 0)
+                cmd.debug = 1;
+            else if (strcmp(argv[i] + j, "s") == 0)
+                cmd.step = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
         }
@@ -110,10 +118,11 @@ int main(int argc, char **argv)
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
         printf("    -w `waveform`: output waveform to `waveform`\n");
         printf("    -t `time`: maximum simulation time of `time`\n");
-        printf("    -v: verbose mode\n");
+        printf("    -d: debug mode\n");
+        printf("    -d -s: debug mode with step\n");
         return 0;
     }
-    if (cmd.verbose)
+    if (cmd.debug)
     {
         printf("Running simulation in %s mode with:\n    %s",
                cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
@@ -216,7 +225,7 @@ int main(int argc, char **argv)
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
 
     // Simulation
-    simulator sim(0x400000, memory);
+    simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
     Vstats *dut = new (std::nothrow) Vstats;
     VerilatedVcdC *trace = NULL;
     if (cmd.vcd)
@@ -235,6 +244,7 @@ int main(int argc, char **argv)
     // clock and memory loop
     std::queue<icache_req_t> i_delay;
     std::queue<dcache_req_t> d_delay;
+    std::queue<store_t> stores;
     for (int i = 0; i < cmd.simtime; i++)
     {
         // negedge clock
@@ -266,17 +276,51 @@ int main(int argc, char **argv)
         if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
             dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
         if (d_delay.front().rqst && d_delay.front().wena)
-            for (int j = 0; j < (1 << (d_delay.front().bits & 3)); j++)
-                memory[d_delay.front().addr + j] = DTOB(d_delay.front().wdata, j);
+        {
+            uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
+            uint8_t width = 1 << (d_delay.front().bits & 3);
+            for (int j = 0; j < width; j++)
+                memory[addr + j] = DTOB(data, j);
+            stores.push({addr, data, width});
+        }
         i_delay.pop(), d_delay.pop();
         dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
         // simulator checker
-        sim.step();
+        if (!cmd.debug)
+            continue;
+        for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
+            if (dut->cmtpc[j])
+            {
+                sim->step();
+                store_t curstore;
+                if (sim->get_mwwidth() && !stores.empty())
+                    curstore = stores.front(), stores.pop();
+                else
+                    curstore = {0, 0, 0};
+                int check = sim->check(dut->cmtpc[j], dut->cmtaddr[j], dut->cmtdata[j],
+                                       curstore.addr, curstore.data, curstore.width);
+                if (!check || !cmd.step)
+                    continue;
+                printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", i);
+                printf("DUT:\n    pc: 0x%016lx\n", dut->cmtpc[j]);
+                printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], dut->cmtdata[j]);
+                if (sim->get_mwwidth())
+                    printf("    mem%d@0x%lx: 0x%016lx\n",
+                           curstore.width, curstore.addr, curstore.data);
+                printf("SIM:\n    pc: 0x%016lx\n", sim->get_pc());
+                printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], sim->get_arreg()[dut->cmtaddr[j]]);
+                if (sim->get_mwwidth())
+                    printf("    mem%d@0x%lx: 0x%016lx\n",
+                           sim->get_mwwidth(), sim->get_mwaddr(), sim->get_mwdata());
+                printf("Press Enter to continue...\n");
+                getchar();
+            }
     }
-    cmd.verbose ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
+    cmd.debug ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);
+    delete (cmd.debug ? sim : NULL);
     delete dut;
     return 0;
 }

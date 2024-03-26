@@ -116,6 +116,7 @@ typedef struct packed {
 typedef struct packed {
     logic valid;
     logic mw;
+    logic [63:0] pc;
     logic [64:0] rd;
     logic [6:0] rda;
 } ex_wb_t;
@@ -612,6 +613,7 @@ module ex_stage(input logic clk, input logic rst,
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
             out_wb.mw <= in.mw;
+            out_wb.pc <= in.pc;
         end else if (ena_wb) out_wb.valid <= 0;
     always_comb if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
         else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
@@ -640,6 +642,7 @@ module wb_stage(input logic clk, input logic rst,
     logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1;
     logic cqempty, cqfull, cqpush, cqpop1, cqpop2;
     logic [`CQSZ-1:0] cqexc, cqmw;
+    logic [63:0] cqpc, cqpcp1;
     logic [6:0] cqrda, cqrdap1;
     logic [64:0] cqfrontval, cqfrontp1val;
     logic [1:0][`lgCQSZ-1:0] cqraddr;
@@ -649,6 +652,10 @@ module wb_stage(input logic clk, input logic rst,
         regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
             .waddr({cqrdap1, cqrda}), .wvalue({cqfrontp1val[63:0], cqfrontval[63:0]}),
             .wena({cqpop2 & |cqrdap1, cqpop1 & |cqrda}));
+    regfile #(.dwidth(64), .rports(2), .wports(1), .awidth(`lgCQSZ), .depth(`CQSZ))
+        cqpc_inst(.clk(clk), .rst(rst),
+            .raddr({cqfrontp1, cqfront}), .rvalue({cqpcp1, cqpc}),
+            .waddr(cqrear), .wvalue(in_ex.pc), .wena(cqpush));
     regfile #(.dwidth(7), .rports(2), .wports(1), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqrda_inst(.clk(clk), .rst(rst),
             .raddr({cqfrontp1, cqfront}), .rvalue({cqrdap1, cqrda}),
