@@ -87,11 +87,13 @@ void simulator::step()
     }
 
     // decode and execution
+    asmcode[0] = 0;
     mwwidth = 0;
     uint8_t funct3 = BITS(ir, 12, 14), jump = 0;
-    uint64_t &rd = arregs[BITS(ir, 7, 11)];
-    uint64_t rs1 = arregs[BITS(ir, 15, 19)], rs2 = arregs[BITS(ir, 20, 24)];
-    uint64_t rs3 = arregs[BITS(ir, 27, 31)];
+    uint8_t rda = BITS(ir, 7, 11), rs1a = BITS(ir, 15, 19),
+            rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
+    uint64_t &rd = arregs[rda], rs1 = arregs[rs1a],
+             rs2 = arregs[rs2a], rs3 = arregs[rs3a];
     int64_t imm;
     switch (BITS(ir, 2, 6)) // opcode
     {
@@ -110,6 +112,9 @@ void simulator::step()
             rd = (int64_t)(int32_t)rd;
         else if (funct3 == 0b110) // LWU
             rd = (uint32_t)rd;
+        static const char *lnames[] = {"lb", "lh", "lw", "ld", "lbu", "lhu", "lwu", ""};
+        if (funct3 != 7)
+            sprintf(asmcode, "%s x%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
     case 0b00001: // LOAD-FP
         break;
@@ -138,7 +143,8 @@ void simulator::step()
                 rd = rs1 >> imm;
         break;
     case 0b00101: // AUIPC
-        rd = pc + (BITS(ir, 12, 31) << 12);
+        rd = pc + SEXT(BITS(ir, 12, 31) << 12, 32);
+        sprintf(asmcode, "auipc x%d, 0x%lx", rda, BITS(ir, 12, 31));
         break;
     case 0b00110: // OP-IMM-32
         imm = SEXT(BITS(ir, 20, 31), 12);
@@ -153,13 +159,17 @@ void simulator::step()
                 rd = (int64_t)(int32_t)((uint32_t)rs1 >> imm);
         break;
     case 0b01000: // STORE
-        mwaddr = rs1 + SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
+        imm = SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
+        mwaddr = rs1 + imm;
         mwdata = rs2;
         mwwidth = 1 << BITS(ir, 12, 13);
         if (mwwidth < 8)
             mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
         for (int i = 0; i < mwwidth; i++)
             memory[mwaddr + i] = DTOB(mwdata, i);
+        static const char *snames[] = {"sb", "sh", "sw", "sd"};
+        if (funct3 < 4)
+            sprintf(asmcode, "%s x%d, %ld(x%d)", snames[funct3], rs2a, imm, rs1a);
         break;
     case 0b01001: // STORE-FP
         break;
@@ -192,7 +202,8 @@ void simulator::step()
             rd = rs1 & rs2;
         break;
     case 0b01101: // LUI
-        rd = BITS(ir, 12, 31) << 12;
+        rd = SEXT(BITS(ir, 12, 31) << 12, 32);
+        sprintf(asmcode, "lui x%d, 0x%lx", rda, BITS(ir, 12, 31));
         break;
     case 0b01110: // OP-32
         if (funct3 == 0b000)
@@ -222,19 +233,23 @@ void simulator::step()
         imm = (BIT(ir, 31) << 12) | (BIT(ir, 7) << 11) |
               (BITS(ir, 25, 30) << 5) | (BITS(ir, 8, 11) << 1);
         imm = SEXT(imm, 13);
+        static const char *bnames[] = {"beq", "bne", "", "", "blt", "bge", "bltu", "bgeu"};
         if (funct3 == 0b000 && rs1 == rs2 ||                   // BEQ
             funct3 == 0b001 && rs1 != rs2 ||                   // BNE
             funct3 == 0b100 && (int64_t)rs1 < (int64_t)rs2 ||  // BLT
             funct3 == 0b101 && (int64_t)rs1 >= (int64_t)rs2 || // BGE
             funct3 == 0b110 && rs1 < rs2 ||                    // BLTU
-            funct3 == 0b111 && rs2 >= rs2)                     // BGEU
+            funct3 == 0b111 && rs1 >= rs2)                     // BGEU
             jump = 1, npc = pc + imm;
+        if (funct3 != 2 && funct3 != 3)
+            sprintf(asmcode, "%s x%d, x%d, %ld(pc)", bnames[funct3], rs1a, rs2a, imm);
         break;
     case 0b11001: // JALR
         imm = SEXT(BITS(ir, 20, 31), 12);
         rd = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
         npc = rs1 + imm;
         jump = 1;
+        sprintf(asmcode, "jalr x%d, %ld(x%d)", rda, imm, rs1a);
         break;
     case 0b11011: // JAL
         imm = (BIT(ir, 31) << 20) | (BITS(ir, 12, 19) << 12) |
@@ -243,6 +258,7 @@ void simulator::step()
         rd = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
         npc = pc + imm;
         jump = 1;
+        sprintf(asmcode, "jal x%d, %ld(pc)", rda, imm);
         break;
     case 0b11100: // SYSTEM
         break;
@@ -306,3 +322,8 @@ uint64_t simulator::get_mwdata() { return mwdata; }
  * @brief get memory write width
  */
 uint8_t simulator::get_mwwidth() { return mwwidth; }
+
+/**
+ * @brief get assembly code
+ */
+char *simulator::get_asmcode() { return asmcode; }

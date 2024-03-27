@@ -310,7 +310,7 @@ int main(int argc, char **argv)
                     printf("    mem%d@0x%lx: 0x%0*lx\n",
                            curstore.width, curstore.addr,
                            curstore.width * 2, curstore.data);
-                printf("SIM:\n    pc: 0x%016lx\n", sim->get_pc());
+                printf("SIM:\n    pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
                 printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], sim->get_arreg()[dut->cmtaddr[j]]);
                 if (sim->get_mwwidth())
                     printf("    mem%d@0x%lx: 0x%0*lx\n",
