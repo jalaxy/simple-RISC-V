@@ -299,19 +299,23 @@ int main(int argc, char **argv)
                     curstore = {0, 0, 0};
                 int check = sim->check(dut->cmtpc[j], dut->cmtaddr[j], dut->cmtdata[j],
                                        curstore.addr, curstore.data, curstore.width);
-                if (!check || !cmd.step)
+                if (check && !cmd.step)
                     continue;
                 printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", i);
                 printf("DUT:\n    pc: 0x%016lx\n", dut->cmtpc[j]);
                 printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], dut->cmtdata[j]);
+                if (curstore.width < 8)
+                    curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
                 if (sim->get_mwwidth())
-                    printf("    mem%d@0x%lx: 0x%016lx\n",
-                           curstore.width, curstore.addr, curstore.data);
+                    printf("    mem%d@0x%lx: 0x%0*lx\n",
+                           curstore.width, curstore.addr,
+                           curstore.width * 2, curstore.data);
                 printf("SIM:\n    pc: 0x%016lx\n", sim->get_pc());
                 printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], sim->get_arreg()[dut->cmtaddr[j]]);
                 if (sim->get_mwwidth())
-                    printf("    mem%d@0x%lx: 0x%016lx\n",
-                           sim->get_mwwidth(), sim->get_mwaddr(), sim->get_mwdata());
+                    printf("    mem%d@0x%lx: 0x%0*lx\n",
+                           sim->get_mwwidth(), sim->get_mwaddr(),
+                           sim->get_mwwidth() * 2, sim->get_mwdata());
                 printf("Press Enter to continue...\n");
                 getchar();
             }

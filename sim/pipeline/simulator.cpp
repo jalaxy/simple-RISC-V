@@ -265,6 +265,8 @@ void simulator::step()
 int simulator::check(uint64_t pc, uint64_t rda, uint64_t rd,
                      uint64_t mwaddr, uint64_t mwdata, uint8_t mwwidth)
 {
+    if (mwwidth < 8)
+        mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
     return this->pc == pc && (rda == 0 || this->arregs[rda] == rd) &&
            (!this->mwwidth || this->mwaddr == mwaddr && this->mwdata == mwdata &&
                                   this->mwwidth == mwwidth);
