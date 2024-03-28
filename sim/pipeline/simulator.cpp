@@ -135,12 +135,19 @@ void simulator::step()
         else if (funct3 == 0b111) // ANDI
             rd = rs1 & imm;
         else if (funct3 == 0b001) // SLLI
-            rd = rs1 << imm;
+            rd = rs1 << (imm &= 0x3f);
         else if (funct3 == 0b101)
             if (BIT(ir, 30)) // SRAI
-                rd = (int64_t)rs1 >> (int64_t)imm;
+                rd = (int64_t)rs1 >> (int64_t)(imm &= 0x3f);
             else // SRLI
-                rd = rs1 >> imm;
+                rd = rs1 >> (imm &= 0x3f);
+        static const char *iname[] = {
+            "addi", "slli", "slti", "sltiu", "xori", "srli", "ori", "andi"};
+        if (ir == 0x13)
+            sprintf(asmcode, "nop");
+        else
+            sprintf(asmcode, "%s x%d, x%d, %ld",
+                    funct3 == 5 && BIT(ir, 30) ? "srai" : iname[funct3], rda, rs1a, imm);
         break;
     case 0b00101: // AUIPC
         rd = pc + SEXT(BITS(ir, 12, 31) << 12, 32);
@@ -151,12 +158,15 @@ void simulator::step()
         if (funct3 == 0b000) // ADDIW
             rd = (int32_t)rs1 + (int32_t)imm;
         else if (funct3 == 0b001) // SLLIW
-            rd = (int32_t)rs1 << (int32_t)imm;
+            rd = (int32_t)rs1 << (int32_t)(imm &= 0x3f);
         else if (funct3 == 0b101)
             if (BIT(ir, 30)) // SRAIW
-                rd = (int64_t)((int32_t)rs1 >> (int32_t)imm);
+                rd = (int64_t)((int32_t)rs1 >> (int32_t)(imm &= 0x3f));
             else // SRLIW
-                rd = (int64_t)(int32_t)((uint32_t)rs1 >> imm);
+                rd = (int64_t)(int32_t)((uint32_t)rs1 >> (imm &= 0x3f));
+        if (funct3 == 0 || funct3 == 1 || funct3 == 5)
+            sprintf(asmcode, "%sw x%d, x%d, %ld",
+                    funct3 == 5 && BIT(ir, 30) ? "srai" : iname[funct3], rda, rs1a, imm);
         break;
     case 0b01000: // STORE
         imm = SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
@@ -192,7 +202,7 @@ void simulator::step()
         else if (funct3 == 0b100) // XOR
             rd = rs1 ^ rs2;
         else if (funct3 == 0b101)
-            if (BIT(ir, 31)) // SRA
+            if (BIT(ir, 30)) // SRA
                 rd = (int64_t)rs1 >> (int64_t)rs2;
             else // SRL
                 rd = rs1 >> rs2;
@@ -200,6 +210,14 @@ void simulator::step()
             rd = rs1 | rs2;
         else if (funct3 == 0b111) // AND
             rd = rs1 & rs2;
+        static const char *oname[] = {
+            "add", "sll", "slt", "sltu", "xor", "srl", "or", "and"};
+        if (funct3 == 0 && BIT(ir, 30))
+            sprintf(asmcode, "sub x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 5 && BIT(ir, 30))
+            sprintf(asmcode, "sra x%d, x%d, x%d", rda, rs1a, rs2a);
+        else
+            sprintf(asmcode, "%s x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
         break;
     case 0b01101: // LUI
         rd = SEXT(BITS(ir, 12, 31) << 12, 32);
@@ -218,6 +236,12 @@ void simulator::step()
                 rd = (int64_t)((int32_t)rs1 >> (int32_t)rs2);
             else // SRLW
                 rd = (int64_t)(int32_t)((uint32_t)rs1 >> (uint32_t)rs2);
+        if (funct3 == 0 && BIT(ir, 30))
+            sprintf(asmcode, "subw x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 5 && BIT(ir, 30))
+            sprintf(asmcode, "sraw x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 0 || funct3 == 1 || funct3 == 5)
+            sprintf(asmcode, "%sw x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
         break;
     case 0b10000: // MADD
         break;

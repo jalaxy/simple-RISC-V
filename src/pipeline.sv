@@ -528,6 +528,7 @@ module ex_stage(input logic clk, input logic rst,
     logic [63:0] jpc;
     logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
+    logic [31:0] srlw, sraw;
     logic lsu, mul, div;
     logic [2:0] bflag;
     logic ready, mul_valid, lsu_vaild;
@@ -541,6 +542,8 @@ module ex_stage(input logic clk, input logic rst,
     always_comb sll = a << b[5:0];
     always_comb srl = a >> b[5:0];
     always_comb sra = $signed($signed(a) >>> b[5:0]);
+    always_comb srlw = a[31:0] >> b[4:0];
+    always_comb sraw = $signed($signed(a[31:0]) >>> b[4:0]);
     always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
     always_comb begin
         out_pt = in;
@@ -595,8 +598,8 @@ module ex_stage(input logic clk, input logic rst,
             {65{op[`EX_ADDW]}} & {1'b0, {32{add[31]}}, add[31:0]} |
             {65{op[`EX_SUBW]}} & {1'b0, {32{sub[31]}}, sub[31:0]} |
             {65{op[`EX_SLLW]}} & {1'b0, {32{sll[31]}}, sll[31:0]} |
-            {65{op[`EX_SRLW]}} & {1'b0, {32{srl[31]}}, srl[31:0]} |
-            {65{op[`EX_SRAW]}} & {1'b0, {32{sra[31]}}, sra[31:0]} |
+            {65{op[`EX_SRLW]}} & {1'b0, {32{srlw[31]}}, srlw} |
+            {65{op[`EX_SRAW]}} & {1'b0, {32{sraw[31]}}, sraw} |
             {65{mul}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
             {65{div}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
     always_ff @(posedge clk) if (rst) pt_done <= 0;
