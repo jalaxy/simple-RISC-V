@@ -556,14 +556,17 @@ module ex_stage(input logic clk, input logic rst,
     always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] & ~frompt &
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
         ~(mul & ~mul_free) & ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
+    // late components not free should not frequently happen
+    //     as it stucks the pipeline with above control
+    //     and so late components need be able to buffer inputs to maximize ILP
     always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
     always_comb cqid = frompt ? cqid_pt : cqid_id;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
                       op[`EX_MULW];
     always_comb mul_valid = ~rst & ready & mul;
     always_comb mul_rqst = {`lgCQSZ+1{mul_valid}} & cqid;
-    always_comb mul_op = {op[`EX_MUL], op[`EX_MULH], op[`EX_MULHSU], op[`EX_MULHU],
-                          op[`EX_MULW]};
+    always_comb mul_op = {op[`EX_MULW],
+        op[`EX_MULHU], op[`EX_MULHSU], op[`EX_MULH], op[`EX_MUL]};
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
@@ -987,55 +990,6 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : fwddata_r;
     always_comb excp = 0;
     always_comb dcache_wdat = lsqdata[front][63:0];
-endmodule
-
-module mul(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic [`lgCQSZ:0] rqst, input logic [4:0] op,
-    input logic [63:0] a, input logic [63:0] b,
-    output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
-);
-`define latency 10
-    logic [`latency-1:0][63:0] r_q;
-    logic [`latency-1:0][`lgCQSZ:0] valid;
-    logic [127:0] res;
-    always_comb res = {64'd0, a} * {64'd0, b};
-    always_ff @(posedge clk)
-        if (rst | flush) valid <= {`lgCQSZ+1{`latency'd0}};
-        else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst, valid[`latency-1:1]};
-            r_q <= {res[63:0], r_q[`latency-1:1]};
-        end
-    always_comb r = {1'b0, r_q[0]};
-    always_comb e = 0;
-    always_comb done = valid[0];
-    always_comb get = ena | ~valid[0][`lgCQSZ];
-endmodule
-
-module regfile #(parameter dwidth = 64,
-    parameter rports = 2, parameter wports = 1,
-    parameter awidth = 6, parameter depth = 64) (
-    input  logic clk, input logic rst,
-    input  logic [rports-1:0][awidth-1:0] raddr,
-    output logic [rports-1:0][dwidth-1:0] rvalue,
-    input  logic [wports-1:0][awidth-1:0] waddr,
-    input  logic [wports-1:0][dwidth-1:0] wvalue,
-    input  logic [wports-1:0] wena
-);
-    int sel[depth-1:0];
-    always_ff @(posedge clk)
-        for (int i = 0; i < wports; i++) if (wena[i]) sel[waddr[i]] <= i;
-    for (genvar i = 0; i < wports; i++) begin : dupregs
-        logic [dwidth-1:0] regs[depth-1:0];
-        always_ff @(posedge clk)
-            if (wena[i]) regs[waddr[i]] <= wvalue[i];
-    end
-    for (genvar i = 0; i < rports; i++) begin
-        logic [dwidth-1:0] dupval[wports-1:0];
-        for (genvar j = 0; j < wports; j++)
-            always_comb dupval[j] = dupregs[j].regs[raddr[i]];
-        always_comb rvalue[i] = dupval[sel[raddr[i]]];
-    end
 endmodule
 
 module arbiter(
