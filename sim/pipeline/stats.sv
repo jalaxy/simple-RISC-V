@@ -71,9 +71,9 @@ module mul(input logic clk, input logic rst, input logic flush,
     input logic [63:0] a, input logic [63:0] b,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
-`define latency 10
-    logic [`latency-1:0][63:0] r_q;
-    logic [`latency-1:0][`lgCQSZ:0] valid;
+`define mullatency 10
+    logic [`mullatency-1:0][63:0] r_q;
+    logic [`mullatency-1:0][`lgCQSZ:0] valid;
     logic [127:0] res, aext, bext;
     logic [63:0] rext;
     // op: 0 -> MUL  1 -> MULH  2 -> MULHSU  3 -> MULHU  4 -> MULW
@@ -83,14 +83,51 @@ module mul(input logic clk, input logic rst, input logic flush,
         bext = {128{op[0] | op[1] | op[4]}} & {{64{b[63]}}, b} |
                {128{op[2] | op[3]}} & {64'd0, b};
         res = aext * bext;
-        rext = {64{op[0] | op[4]}} & res[63:0] |
+        rext = {64{op[0]}} & res[63:0] | {64{op[4]}} & {{32{res[31]}}, res[31:0]} |
                {64{op[1] | op[2] | op[3]}} & res[127:64];
     end
     always_ff @(posedge clk)
-        if (rst | flush) valid <= {`lgCQSZ+1{`latency'd0}};
+        if (rst | flush) valid <= {`lgCQSZ+1{`mullatency'd0}};
         else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst, valid[`latency-1:1]};
-            r_q <= {rext, r_q[`latency-1:1]};
+            valid <= {rqst, valid[`mullatency-1:1]};
+            r_q <= {rext, r_q[`mullatency-1:1]};
+        end
+    always_comb r = {1'b0, r_q[0]};
+    always_comb e = 0;
+    always_comb done = valid[0];
+    always_comb get = ena | ~valid[0][`lgCQSZ];
+endmodule
+
+module div(input logic clk, input logic rst, input logic flush,
+    input logic ena, output logic get,
+    input logic [`lgCQSZ:0] rqst, input logic [7:0] op,
+    input logic [63:0] a, input logic [63:0] b,
+    output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
+);
+
+// should be un-pipelined
+
+`define divlatency 20
+    logic [`divlatency-1:0][63:0] r_q;
+    logic [`divlatency-1:0][`lgCQSZ:0] valid;
+    logic [63:0] res, aabs, babs, rabs, qabs;
+    logic [31:0] res32;
+    // op: 0 -> DIV   1 -> DIVU   2 -> REM   3 -> REMU
+    //     4 -> DIVW  5 -> DIVUW  6 -> REMW  7 -> REMUW
+    always_comb res32 = {32{op[4]}} & $signed($signed(a[31:0]) / $signed(b[31:0])) |
+                        {32{op[5]}} & (a[31:0] / b[31:0]) |
+                        {32{op[6]}} & $signed($signed(a[31:0]) % $signed(b[31:0])) |
+                        {32{op[7]}} & (a[31:0] % b[31:0]);
+    always_comb res = {64{op[0]}} & $signed($signed(a) / $signed(b)) |
+                      {64{op[1]}} & (a / b) |
+                      {64{op[2]}} & $signed($signed(a) % $signed(b)) |
+                      {64{op[3]}} & (a % b) |
+                      {64{|op[7:4]}} & {{32{res32[31]}}, res32};
+    always_ff @(posedge clk)
+        if (rst | flush) valid <= {`lgCQSZ+1{`divlatency'd0}};
+        else if (ena | ~valid[0][`lgCQSZ]) begin
+            valid <= {rqst, valid[`divlatency-1:1]};
+            r_q <= {res, r_q[`divlatency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;

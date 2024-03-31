@@ -11,7 +11,7 @@
                             (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
 #define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
 #define BIT(dw, i) BITS(dw, i, i)
-#define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)-1 << (width) : 0) | dw & ~((uint64_t)-1 << (width)))
+#define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)-1 << (width) : 0) | (dw) & ~((uint64_t)-1 << (width)))
 
 /**
  * @brief simulator constructor
@@ -186,8 +186,41 @@ void simulator::step()
     case 0b01011: // AMO
         break;
     case 0b01100: // OP
+        static const char *oname[] = {
+            "add", "sll", "slt", "sltu", "xor", "srl", "or", "and"};
+        if (funct3 == 0 && BIT(ir, 30))
+            sprintf(asmcode, "sub x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 5 && BIT(ir, 30))
+            sprintf(asmcode, "sra x%d, x%d, x%d", rda, rs1a, rs2a);
+        else
+            sprintf(asmcode, "%s x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
         if (BIT(ir, 25))
-            rd = rs1 * rs2;
+        {
+            static const char *mname[] = {
+                "mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"};
+            sprintf(asmcode, "%s x%d, x%d, x%d", mname[funct3], rda, rs1a, rs2a);
+            uint64_t a[4], b[4];
+            a[0] = BITS(rs1, 0, 31), a[1] = BITS(rs1, 32, 63);
+            a[2] = a[3] = BIT(rs1, 63) && funct3 <= 2 ? 0xffffffffull : 0;
+            b[0] = BITS(rs2, 0, 31), b[1] = BITS(rs2, 32, 63);
+            b[2] = b[3] = BIT(rs2, 63) && funct3 <= 1 ? 0xffffffffull : 0;
+            uint64_t l = a[0] * b[0] + ((a[0] * b[1] + a[1] * b[0]) << 32);
+            uint64_t h = ((a[0] * b[1] + a[1] * b[0]) >> 32) +
+                         (a[0] * b[2] + a[1] * b[1] + a[2] * b[0]) +
+                         ((a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]) << 32);
+            if (funct3 == 0b000) // MUL
+                rd = l;
+            else if (funct3 <= 0b011) // MULH[[S]U]
+                rd = h;
+            else if (funct3 == 0b100) // DIV
+                rd = (int64_t)rs1 / (int64_t)rs2;
+            else if (funct3 == 0b101) // DIVU
+                rd = rs1 / rs2;
+            else if (funct3 == 0b110) // REM
+                rd = (int64_t)rs1 % (int64_t)rs2;
+            else if (funct3 == 0b111) // REMU
+                rd = rs1 % rs2;
+        }
         else if (funct3 == 0b000)
             if (BIT(ir, 30)) // SUB
                 rd = rs1 - rs2;
@@ -210,21 +243,36 @@ void simulator::step()
             rd = rs1 | rs2;
         else if (funct3 == 0b111) // AND
             rd = rs1 & rs2;
-        static const char *oname[] = {
-            "add", "sll", "slt", "sltu", "xor", "srl", "or", "and"};
-        if (funct3 == 0 && BIT(ir, 30))
-            sprintf(asmcode, "sub x%d, x%d, x%d", rda, rs1a, rs2a);
-        else if (funct3 == 5 && BIT(ir, 30))
-            sprintf(asmcode, "sra x%d, x%d, x%d", rda, rs1a, rs2a);
-        else
-            sprintf(asmcode, "%s x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
         break;
     case 0b01101: // LUI
         rd = SEXT(BITS(ir, 12, 31) << 12, 32);
         sprintf(asmcode, "lui x%d, 0x%lx", rda, BITS(ir, 12, 31));
         break;
     case 0b01110: // OP-32
-        if (funct3 == 0b000)
+        if (funct3 == 0 && BIT(ir, 30))
+            sprintf(asmcode, "subw x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 5 && BIT(ir, 30))
+            sprintf(asmcode, "sraw x%d, x%d, x%d", rda, rs1a, rs2a);
+        else if (funct3 == 0 || funct3 == 1 || funct3 == 5)
+            sprintf(asmcode, "%sw x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
+        if (BIT(ir, 25))
+        {
+            static const char *mwname[] = {
+                "mulw", 0, 0, 0, "divw", "divuw", "remw", "remuw"};
+            if (funct3 != 1 && funct3 != 2 && funct3 != 3)
+                sprintf(asmcode, "%s x%d, x%d, x%d", mwname[funct3], rda, rs1a, rs2a);
+            if (funct3 == 0b000) // MULW
+                rd = SEXT(rs1 * rs2, 32);
+            else if (funct3 == 0b100) // DIVW
+                rd = SEXT((int32_t)rs1 / (int32_t)rs2, 32);
+            else if (funct3 == 0b101) // DIVUW
+                rd = SEXT((uint32_t)rs1 / (uint32_t)rs2, 32);
+            else if (funct3 == 0b110) // REMW
+                rd = SEXT((int32_t)rs1 % (int32_t)rs2, 32);
+            else if (funct3 == 0b111) // REMUW
+                rd = SEXT((uint32_t)rs1 % (uint32_t)rs2, 32);
+        }
+        else if (funct3 == 0b000)
             if (BIT(ir, 30)) // SUBW
                 rd = (int32_t)rs1 - (int32_t)rs2;
             else // ADDW
@@ -236,12 +284,6 @@ void simulator::step()
                 rd = (int64_t)((int32_t)rs1 >> (int32_t)rs2);
             else // SRLW
                 rd = (int64_t)(int32_t)((uint32_t)rs1 >> (uint32_t)rs2);
-        if (funct3 == 0 && BIT(ir, 30))
-            sprintf(asmcode, "subw x%d, x%d, x%d", rda, rs1a, rs2a);
-        else if (funct3 == 5 && BIT(ir, 30))
-            sprintf(asmcode, "sraw x%d, x%d, x%d", rda, rs1a, rs2a);
-        else if (funct3 == 0 || funct3 == 1 || funct3 == 5)
-            sprintf(asmcode, "%sw x%d, x%d, x%d", oname[funct3], rda, rs1a, rs2a);
         break;
     case 0b10000: // MADD
         break;

@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 471
+`define PTLEN 485
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -81,15 +81,6 @@
 `define EX_FCVTFI 6'd50
 `define EX_FCVTSD 6'd51
 `define EX_FCVTDS 6'd52
-`define ID_PT  4'd1 // late component ID
-`define ID_LSU 4'd2
-`define ID_MUL 4'd4
-`define ID_DIV 4'd8
-`define MUL_MUL    3'd0 // multiplier operations
-`define MUL_MULH   3'd1
-`define MUL_MULHSU 3'd2
-`define MUL_MULHU  3'd3
-`define MUL_MULW   3'd4
 
 typedef struct packed { logic valid, b; logic [63:0] pc, bpc; } pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
@@ -101,6 +92,7 @@ typedef struct packed {
 } if_id_t;
 typedef struct packed {
     logic valid, branch, c;
+    logic [6:0] raa, rba;
     logic [63:0] pc, bpc;
     logic [52:0] exop;
     logic [2:0] frm, bmask;
@@ -158,7 +150,7 @@ module pipeline(
     logic [`lgCQSZ:0] mul_rqst, mul_done; logic mul_exc, mul_ena, mul_free;
     logic [4:0] mul_op; logic [63:0] mul_a, mul_b; logic [64:0] mul_r;
     logic [`lgCQSZ:0] div_rqst, div_done; logic div_exc, div_ena, div_free;
-    logic [4:0] div_op; logic [63:0] div_a, div_b; logic [64:0] div_r;
+    logic [7:0] div_op; logic [63:0] div_a, div_b; logic [64:0] div_r;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -184,6 +176,8 @@ module pipeline(
         .cqid_id(cqid_new), .cqid_pt(cqid_old),
         .mul_free(mul_free), .mul_rqst(mul_rqst),
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
+        .div_free(div_free), .div_rqst(div_rqst),
+        .div_op(div_op), .div_a(div_a), .div_b(div_b),
         .lsu_free(lsu_free), .lsu_rqst(lsu_rqst), .lsu_wena(lsu_wena),
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
@@ -215,6 +209,10 @@ module pipeline(
         .ena(mul_ena), .get(mul_free),
         .rqst(mul_rqst), .op(mul_op), .a(mul_a), .b(mul_b),
         .done(mul_done), .r(mul_r), .e(mul_exc));
+    div div_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover),
+        .ena(div_ena), .get(div_free),
+        .rqst(div_rqst), .op(div_op), .a(div_a), .b(div_b),
+        .done(div_done), .r(div_r), .e(div_exc));
     arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
                           // or use dynamic priority?
         .done_in({pt_done, div_done, mul_done, lsu_done}),
@@ -502,9 +500,10 @@ module ex_stage(input logic clk, input logic rst,
     output id_ex_t out_pt, input logic ena_pt,
     output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] cqid_id, input logic [`lgCQSZ:0] cqid_pt,
-    input logic mul_free, output logic [`lgCQSZ:0] mul_rqst,
-    output logic [4:0] mul_op,
+    input logic mul_free, output logic [`lgCQSZ:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
+    input logic div_free, output logic [`lgCQSZ:0] div_rqst, output logic [7:0] div_op,
+    output logic [63:0] div_a, output logic [63:0] div_b,
     input logic lsu_free, output logic [`lgCQSZ:0] lsu_rqst,
     output logic lsu_wena, output logic [64:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
@@ -531,7 +530,7 @@ module ex_stage(input logic clk, input logic rst,
     logic [31:0] srlw, sraw;
     logic lsu, mul, div;
     logic [2:0] bflag;
-    logic ready, mul_valid, lsu_vaild;
+    logic ready, mul_valid, div_valid, lsu_vaild;
     logic [`lgCQSZ:0] cqid;
     always_comb op = in.valid ? in.exop : 0;
     always_comb if (frompt & in_pt.j) a = in.pc; // JALR in PT
@@ -552,13 +551,12 @@ module ex_stage(input logic clk, input logic rst,
         out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
         out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
-    always_comb get_pt = ~in_pt.valid | frompt & ~(mul & ~mul_free);
+    always_comb get_pt = ~in_pt.valid |
+        frompt & ~(mul & ~mul_free) & ~(div & ~div_free);
     always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] & ~frompt &
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
-        ~(mul & ~mul_free) & ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
-    // late components not free should not frequently happen
-    //     as it stucks the pipeline with above control
-    //     and so late components need be able to buffer inputs to maximize ILP
+        ~(mul & ~mul_free) & ~(div & ~div_free) &
+        ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
     always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
     always_comb cqid = frompt ? cqid_pt : cqid_id;
     always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
@@ -570,6 +568,11 @@ module ex_stage(input logic clk, input logic rst,
     always_comb {mul_a, mul_b} = {a, b};
     always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
                       op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
+    always_comb div_valid = ~rst & ready & div;
+    always_comb div_rqst = {`lgCQSZ+1{div_valid}} & cqid;
+    always_comb div_op = {op[`EX_REMUW], op[`EX_REMW], op[`EX_DIVUW], op[`EX_DIVW],
+                          op[`EX_REMU],  op[`EX_REM],  op[`EX_DIVU],  op[`EX_DIV]};
+    always_comb {div_a, div_b} = {a, b};
     always_comb lsu = in.mr | in.mw;
     always_comb lsu_vaild = ~rst & (get_id & in_id.valid) & lsu;
     always_ff @(posedge clk) if (lsu_free | ~lsu_rqst[`lgCQSZ])
