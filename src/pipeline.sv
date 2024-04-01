@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 485
+`define PTLEN 471
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -92,7 +92,6 @@ typedef struct packed {
 } if_id_t;
 typedef struct packed {
     logic valid, branch, c;
-    logic [6:0] raa, rba;
     logic [63:0] pc, bpc;
     logic [52:0] exop;
     logic [2:0] frm, bmask;
@@ -165,14 +164,15 @@ module pipeline(
         .icache_done(icache_done), .icache_data(icache_data));
     id_stage id_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_id), .get_if(get_if_id),
-        .out_ex(data_id_ex), .ena_ex(get_id_ex & ~|wb_stage_inst.cqexc));
+        .out_ex(data_id_ex), .ena_ex(get_id_ex & ~|wb_stage_inst.cqexc),
+        .raddr(raddr));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst),
         .in_id(data_id_ex), .get_id(get_id_ex),
         .in_pt(data_pt_ex), .get_pt(get_pt_ex),
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
         .out_pc(data_ex_pc), .ena_pc(get_ex_pc),
         .out_pt(data_ex_pt), .ena_pt(get_ex_pt),
-        .raddr(raddr), .rvalue(rvalue),
+        .rvalue(rvalue),
         .cqid_id(cqid_new), .cqid_pt(cqid_old),
         .mul_free(mul_free), .mul_rqst(mul_rqst),
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
@@ -183,7 +183,7 @@ module pipeline(
         .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
         .addr_done(addr_done), .addr_val(addr_val));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
-        .in_ex(data_ex_wb), .get_ex(get_ex_wb),
+        .in_ex(data_ex_wb), .get_ex(get_ex_wb), .ena_ex(get_id_ex),
         .raddr(raddr), .rvalue(rvalue), .cqid(cqid_new),
         .late_done(late_done), .late_val(late_val), .late_exc(late_exc));
     pending_table pending_table_inst(.clk(clk), .rst(rst),
@@ -277,7 +277,8 @@ endmodule
 
 module id_stage(input logic clk, input logic rst, input logic flush,
     input  if_id_t in_if, output logic get_if,
-    output id_ex_t out_ex, input logic ena_ex
+    output id_ex_t out_ex, input logic ena_ex,
+    output logic [1:0][6:0] raddr
 );
     logic [31:0] ir, op;
     logic [63:0] imm;
@@ -490,6 +491,12 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[2].rda <= 0;
         end else if (ena_ex)
             out_ex_q[1:0] <= {out_ex_q[2], out_ex_q[1]};
+    always_comb if (out_ex_q[1].valid) raddr[0] = out_ex_q[1].a[6:0];
+        else raddr[0] = {1'b0, op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                               op[`OP_FP], ir[19:15]};
+    always_comb if (out_ex_q[1].valid) raddr[0] = out_ex_q[1].b[6:0];
+        else raddr[1] = {1'b0, op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                               op[`OP_FP], ir[24:20]};
 endmodule
 
 module ex_stage(input logic clk, input logic rst,
@@ -498,7 +505,7 @@ module ex_stage(input logic clk, input logic rst,
     output ex_wb_t out_wb, input logic ena_wb,
     output ex_pc_t out_pc, input logic ena_pc, // always enabled
     output id_ex_t out_pt, input logic ena_pt,
-    output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
+    input logic [1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] cqid_id, input logic [`lgCQSZ:0] cqid_pt,
     input logic mul_free, output logic [`lgCQSZ:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
@@ -515,12 +522,6 @@ module ex_stage(input logic clk, input logic rst,
     logic frompt;
     always_comb frompt = in_pt.valid & (ena_arb | in_pt.mr | in_pt.mw);
     always_comb in = frompt ? in_pt : in_id;
-    always_comb if (in.valid & in.a[64]) raddr[0] = in.a[6:0];
-        else if (~frompt & in.valid & in.base[64]) raddr[0] = in.base[6:0]; // JALR
-        else raddr[0] = 0;
-    always_comb if (in.valid & in.b[64]) raddr[1] = in.b[6:0];
-        else if (in.valid & in.mw) raddr[1] = in.rmwa;
-        else raddr[1] = 0;
     logic [52:0] op;
     logic [63:0] a, b;
     logic jump, excp;
@@ -640,6 +641,7 @@ endmodule
 
 module wb_stage(input logic clk, input logic rst,
     input ex_wb_t in_ex, output logic get_ex,
+    input logic ena_ex, // for register read sync
     input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
     output logic [`lgCQSZ:0] cqid,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val, input logic late_exc
@@ -719,14 +721,22 @@ module wb_stage(input logic clk, input logic rst,
         end
     always_comb for (int i = 0; i < 2; i++)
         cqraddr[i] = regscqid[raddr[i]][`lgCQSZ-1:0];
-    always_comb for (int i = 0; i < 2; i++)
-        if (raddr[i] == 0) rvalue[i] = 0;
-        else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
+    logic [1:0][6:0] raddr_r;
+    logic [1:0][64:0] rvalue_r;
+    always_ff @(posedge clk) if (ena_ex) raddr_r <= raddr; // sync with ID stage output
+    always_ff @(posedge clk) if (ena_ex) for (int i = 0; i < 2; i++)
+        if (in_ex.valid & raddr[i] == in_ex.rda) rvalue_r[i] <= in_ex.rd;
         else if (regscqid[raddr[i]][`lgCQSZ]) begin
-            rvalue[i] = cqrvalue[i];
-            if (rvalue[i][64] & late_done == rvalue[i][`lgCQSZ:0])
-                rvalue[i] = late_val;
-        end else rvalue[i] = {1'b0, regsval[i]};
+            rvalue_r[i] <= cqrvalue[i];
+            if (rvalue_r[i][64] & late_done == rvalue_r[i][`lgCQSZ:0])
+                rvalue_r[i] <= late_val;
+        end else rvalue_r[i] <= {1'b0, regsval[i]};
+    always_comb for (int i = 0; i < 2; i++)
+        if (raddr_r[i] == 0) rvalue[i] = 0;
+        else if (in_ex.valid & raddr_r[i] == in_ex.rda) rvalue[i] = in_ex.rd;
+        else if (rvalue_r[i][64] & late_done == rvalue_r[i][`lgCQSZ:0])
+            rvalue[i] = late_val;
+        else rvalue[i] = rvalue_r[i];
 endmodule
 
 module pending_table(input logic clk, input logic rst, input logic flush,
