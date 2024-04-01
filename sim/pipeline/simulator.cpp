@@ -21,6 +21,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 {
     npc = initpc;
     memory = initmem;
+    simtime = 0;
 }
 
 /**
@@ -28,6 +29,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
  */
 void simulator::step()
 {
+    simtime++;
     // instruction fetch
     pc = npc;
     uint32_t idata = DLE(memory, pc);

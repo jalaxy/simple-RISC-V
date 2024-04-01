@@ -320,6 +320,17 @@ int main(int argc, char **argv)
                 getchar();
             }
     }
+    for (int i = sim->simtime; i < cmd.simtime; i++)
+        sim->step();
+    for (int i = 0; i < 64; i++)
+        if (sim->get_arreg()[i] != dut->arregs[i])
+        {
+            printf("Difference found at maximum cycle:\n");
+            printf("    DUT: x%d: 0x%016lx\n", i, dut->arregs[i]);
+            printf("    SIM: x%d: 0x%016lx\n", i, sim->get_arreg()[i]);
+            printf("Press Enter to continue...\n");
+            getchar();
+        }
     cmd.debug ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
 
     // Clean

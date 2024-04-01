@@ -284,6 +284,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
     logic [63:0] imm;
     id_ex_t [2:0] out_ex_q;
     logic [2:0][52:0] exop;
+    logic [64:0] a0, b0;
     ci2i ci2i_inst(.ci(in_if.ir), .i(ir));
     always_comb for (int i = 0; i < 32; i++)
         op[i] = ir[6:2] == i[4:0];
@@ -398,6 +399,29 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
         (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
+    always_comb a0 =
+        {1'd1, 59'd0, ir[19:15]} & {65{
+            op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
+            op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
+            op[`BRANCH] | op[`AMO]}} |
+        {1'd1, 59'd1, ir[19:15]} & {{65{
+            op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+            op[`OP_FP]}}} |
+        {1'd0, in_if.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
+    always_comb if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
+            b0 = {60'd0, ir[24:20]};
+        else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
+            exop[0][`EX_FMVIF] | exop[0][`EX_FMVFI])
+            b0 = 65'd0;
+        else b0 = {1'd1, 59'd0, ir[24:20]} & {65{
+                      op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
+                  {1'd1, 59'd1, ir[24:20]} & {{65{
+                      op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                      op[`OP_FP]}}} |
+                  {1'd0, imm} & {65{
+                      op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
+                      op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
+                  (in_if.c ? 65'd2 : 65'd4) & {65{op[`JAL] | op[`JALR]}};
     always_comb get_if = ena_ex & ~out_ex_q[1].valid | ~in_if.valid;
     always_comb begin out_ex = out_ex_q[0]; out_ex.valid = out_ex.valid & ~flush; end
     always_ff @(posedge clk)
@@ -409,30 +433,8 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[0].c <= in_if.c;
             out_ex_q[0].pc <= in_if.pc;
             out_ex_q[0].bpc <= in_if.bpc;
-            out_ex_q[0].a <=
-                {1'd1, 59'd0, ir[19:15]} & {65{
-                    op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
-                    op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
-                    op[`BRANCH] | op[`AMO]}} |
-                {1'd1, 59'd1, ir[19:15]} & {{65{
-                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                    op[`OP_FP]}}} |
-                {1'd0, in_if.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
-            if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
-                out_ex_q[0].b <= {60'd0, ir[24:20]};
-            else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
-                exop[0][`EX_FMVIF] | exop[0][`EX_FMVFI])
-                out_ex_q[0].b <= 65'd0;
-            else out_ex_q[0].b <=
-                {1'd1, 59'd0, ir[24:20]} & {65{
-                    op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
-                {1'd1, 59'd1, ir[24:20]} & {{65{
-                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                    op[`OP_FP]}}} |
-                {1'd0, imm} & {65{
-                    op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
-                    op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
-                (in_if.c ? 65'd2 : 65'd4) & {65{op[`JAL] | op[`JALR]}};
+            out_ex_q[0].a <= a0;
+            out_ex_q[0].b <= b0;
             out_ex_q[0].exop <= exop[0];
             out_ex_q[0].bmask <= {3{op[`BRANCH]}} &
                 {ir[14:13] == 2'b00, ir[14:13] == 2'b10, ir[14:13] == 2'b11};
@@ -491,12 +493,15 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[2].rda <= 0;
         end else if (ena_ex)
             out_ex_q[1:0] <= {out_ex_q[2], out_ex_q[1]};
-    always_comb if (out_ex_q[1].valid) raddr[0] = out_ex_q[1].a[6:0];
-        else raddr[0] = {1'b0, op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                               op[`OP_FP], ir[19:15]};
-    always_comb if (out_ex_q[1].valid) raddr[0] = out_ex_q[1].b[6:0];
-        else raddr[1] = {1'b0, op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                               op[`OP_FP], ir[24:20]};
+    always_comb if (out_ex_q[1].valid & out_ex_q[1].a[64])
+            raddr[0] = out_ex_q[1].a[6:0];
+        else if (a0[64]) raddr[0] = a0[6:0];
+        else if (op[`JALR]) raddr[0] = {2'd0, ir[19:15]};
+        else raddr[0] = 0;
+    always_comb if (b0[64]) raddr[1] = b0[6:0];
+        else if (op[`STORE]) raddr[1] = {2'b0, ir[24:20]};
+        else if (op[`STORE_FP]) raddr[1] = {2'b1, ir[24:20]};
+        else raddr[1] = 0;
 endmodule
 
 module ex_stage(input logic clk, input logic rst,
@@ -549,6 +554,7 @@ module ex_stage(input logic clk, input logic rst,
         out_pt = in;
         if (lsu) out_pt.valid = in.valid & rvalue[0][64];
         else out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64]);
+        if (frompt) out_pt.valid = 0;
         out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
         out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
@@ -730,7 +736,7 @@ module wb_stage(input logic clk, input logic rst,
             rvalue_r[i] <= cqrvalue[i];
             if (rvalue_r[i][64] & late_done == rvalue_r[i][`lgCQSZ:0])
                 rvalue_r[i] <= late_val;
-        end else rvalue_r[i] <= {1'b0, regsval[i]};
+        end else rvalue_r[i] <= {1'b0, regsval[i]}; else rvalue_r <= rvalue;
     always_comb for (int i = 0; i < 2; i++)
         if (raddr_r[i] == 0) rvalue[i] = 0;
         else if (in_ex.valid & raddr_r[i] == in_ex.rda) rvalue[i] = in_ex.rd;
@@ -781,8 +787,10 @@ module pending_table(input logic clk, input logic rst, input logic flush,
         end
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) id[i] <= 0;
-        else if (in_ex_fwd.valid & in_ena) id[in] <= cqid_in;
-        else if (out_ena & ena_ex) id[out] <= 0;
+        else begin
+            if (in_ex_fwd.valid & in_ena) id[in] <= cqid_in;
+            if (out_ena & ena_ex) id[out] <= 0;
+        end
     always_ff @(posedge clk) for (int i = 0; i < `PTSZ; i++)
         if (in_ex_fwd.valid & in_ena & i[`lgPTSZ-1:0] == in)
             {a[i], b[i]} <= {in_ex_fwd.a, in_ex_fwd.b};
@@ -950,6 +958,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_comb begin
         {lsqequal, fwd, fwdbits, fwddata} = 0;
         through = rqst[`lgCQSZ] & ~wena & ~addr[64];
+through=0;
         if (rqst[`lgCQSZ])
             for (int i = 0; i < `LSQSZ; i++) lsqequal[i] = lsqaddr[i] == addr;
         if (rqst[`lgCQSZ] & ~wena) for (int i = 0; i < `LSQSZ; i++)

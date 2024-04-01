@@ -11,6 +11,7 @@ private:
     char asmcode[32];
 
 public:
+    int simtime;
     simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &initmem);
     void step();
     int check(uint64_t pc, uint64_t rda, uint64_t rd,
