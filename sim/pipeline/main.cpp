@@ -51,10 +51,10 @@ typedef struct struct_store
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
-    printf("Memory@%08lx:", addr);
+    printf("Memory@%016lx:", addr);
     for (int i = 0; i < size; i++)
     {
-        i % 16 ? printf(i % 2 ? "" : " ") : printf("\n%08lx: ", addr + i);
+        i % 16 ? printf(i % 2 ? "" : " ") : printf("\n%016lx: ", addr + i);
         printf("%02x", mem[addr + i]);
         if ((i + 1) % 16 == 0 || i == size - 1)
         {
@@ -70,6 +70,17 @@ void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
             if (i == size - 1)
                 printf("\n");
         }
+    }
+}
+
+void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
+{
+    printf("Memory@%016lx:\n", addr);
+    simulator sim(addr, mem);
+    while (sim.get_pc() < addr + size)
+    {
+        sim.step(1);
+        printf("    0x%016lx: %s\n", sim.get_pc(), sim.get_asmcode());
     }
 }
 
@@ -320,18 +331,21 @@ int main(int argc, char **argv)
                 getchar();
             }
     }
-    for (int i = sim->simtime; i < cmd.simtime; i++)
-        sim->step();
-    for (int i = 0; i < 64; i++)
-        if (sim->get_arreg()[i] != dut->arregs[i])
-        {
-            printf("Difference found at maximum cycle:\n");
-            printf("    DUT: x%d: 0x%016lx\n", i, dut->arregs[i]);
-            printf("    SIM: x%d: 0x%016lx\n", i, sim->get_arreg()[i]);
-            printf("Press Enter to continue...\n");
-            getchar();
-        }
-    cmd.debug ? printf("Maximum cycle %d reached.\n", cmd.simtime) : 0;
+    if (cmd.debug)
+    {
+        for (int i = sim->simtime; i < cmd.simtime; i++)
+            sim->step();
+        for (int i = 0; i < 64; i++)
+            if (sim->get_arreg()[i] != dut->arregs[i])
+            {
+                printf("Difference found at maximum cycle:\n");
+                printf("    DUT: x%d: 0x%016lx\n", i, dut->arregs[i]);
+                printf("    SIM: x%d: 0x%016lx\n", i, sim->get_arreg()[i]);
+                printf("Press Enter to continue...\n");
+                getchar();
+            }
+        printf("Maximum cycle %d reached.\n", cmd.simtime);
+    }
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);

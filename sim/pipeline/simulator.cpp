@@ -27,7 +27,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 /**
  * @brief step with an instruction
  */
-void simulator::step()
+void simulator::step(int nojump)
 {
     simtime++;
     // instruction fetch
@@ -331,7 +331,7 @@ void simulator::step()
     case 0b11100: // SYSTEM
         break;
     }
-    if (!jump)
+    if (!jump | nojump)
         npc = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
     arregs[0] = 0;
 }

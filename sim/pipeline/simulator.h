@@ -13,7 +13,7 @@ private:
 public:
     int simtime;
     simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &initmem);
-    void step();
+    void step(int nojump = 0);
     int check(uint64_t pc, uint64_t rda, uint64_t rd,
               uint64_t mwaddr, uint64_t mwdata, uint8_t mwwidth);
     const uint64_t *get_arreg();
