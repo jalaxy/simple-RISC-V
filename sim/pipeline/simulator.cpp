@@ -96,6 +96,8 @@ void simulator::step(int nojump)
             rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
     uint64_t &rd = arregs[rda], rs1 = arregs[rs1a],
              rs2 = arregs[rs2a], rs3 = arregs[rs3a];
+    double &fd = *(double *)&arregs[rda + 32], fs1 = *(double *)&arregs[rs1a + 32],
+           fs2 = *(double *)&arregs[rs2a + 32], fs3 = *(double *)&arregs[rs3a + 32];
     int64_t imm;
     switch (BITS(ir, 2, 6)) // opcode
     {
@@ -296,6 +298,29 @@ void simulator::step(int nojump)
     case 0b10011: // NMADD
         break;
     case 0b10100: // OP-FP
+        switch (BITS(ir, 27, 31))
+        {
+        case 0b00000:
+            if (BIT(ir, 25)) // FADD.D
+                fd = fs1 + fs2;
+            else // FADD.S
+                *(float *)&fd = *(float *)&fs1 + *(float *)&fs2, *((float *)&fd + 1) = 0;
+            sprintf(asmcode, "fadd.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b11010: // FCVT.F.I
+            switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))
+            {
+            case 0b010: // FCVT.S.L
+                *(float *)&fd = (float)rs1, *((float *)&fd + 1) = 0;
+                sprintf(asmcode, "fcvt.s.l f%d, x%d", rda, rs1a);
+                break;
+            case 0b110: // FCVT.D.L
+                fd = (double)rs1;
+                sprintf(asmcode, "fcvt.d.l f%d, x%d", rda, rs1a);
+                break;
+            }
+            break;
+        }
         break;
     case 0b11000: // BRANCH
         imm = (BIT(ir, 31) << 12) | (BIT(ir, 7) << 11) |

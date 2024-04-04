@@ -333,6 +333,7 @@ int main(int argc, char **argv)
     }
     if (cmd.debug)
     {
+        // final status check
         for (int i = sim->simtime; i < cmd.simtime; i++)
             sim->step();
         for (int i = 0; i < 64; i++)

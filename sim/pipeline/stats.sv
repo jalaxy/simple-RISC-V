@@ -110,7 +110,7 @@ module div(input logic clk, input logic rst, input logic flush,
 `define divlatency 20
     logic [`divlatency-1:0][63:0] r_q;
     logic [`divlatency-1:0][`lgCQSZ:0] valid;
-    logic [63:0] res, aabs, babs, rabs, qabs;
+    logic [63:0] res;
     logic [31:0] res32;
     // op: 0 -> DIV   1 -> DIVU   2 -> REM   3 -> REMU
     //     4 -> DIVW  5 -> DIVUW  6 -> REMW  7 -> REMUW
@@ -128,6 +128,63 @@ module div(input logic clk, input logic rst, input logic flush,
         else if (ena | ~valid[0][`lgCQSZ]) begin
             valid <= {rqst, valid[`divlatency-1:1]};
             r_q <= {res, r_q[`divlatency-1:1]};
+        end
+    always_comb r = {1'b0, r_q[0]};
+    always_comb e = 0;
+    always_comb done = valid[0];
+    always_comb get = ena | ~valid[0][`lgCQSZ];
+endmodule
+
+function logic [63:0] single2double(input logic [31:0] s);
+    logic sgn, ov;
+    logic [7:0] e;
+    logic [22:0] b;
+    {sgn, e, b} = s;
+    single2double = {sgn, {3'd0, e} + 11'd896, b, 29'd0};
+endfunction
+
+function logic [31:0] double2single(input logic [63:0] d, input logic [2:0] rm);
+    logic s, ov;
+    logic [10:0] e;
+    logic [51:0] b;
+    {s, e, b} = d;
+    if (b[28]) {ov, b[51:29]} = {1'b0, b[51:29]} + 1;
+    if (ov) begin b = b >> 1; if (e != 1023) e++; end
+    if (e > 896) e = e - 896; else e = 0;
+    double2single = {s, e[7:0], b[51:29]};
+endfunction
+
+module fpu(input logic clk, input logic rst, input logic flush,
+    input logic ena, output logic get,
+    input logic [`lgCQSZ:0] rqst, input logic [20:0] op,
+    input logic [63:0] a, input logic [63:0] b,
+    input logic [2:0] rm, input logic double,
+    output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
+);
+`define fpulatency 10
+    logic [`fpulatency-1:0][63:0] r_q;
+    logic [`fpulatency-1:0][`lgCQSZ:0] valid;
+    logic [63:0] res;
+    real af, bf;
+    always_comb begin
+        af = $bitstoreal(a);
+        bf = $bitstoreal(b);
+        if (~double & op[0]) begin
+            af = $bitstoreal(single2double(a[31:0]));
+            bf = $bitstoreal(single2double(b[31:0]));
+        end
+    end
+    always_comb begin
+        res = {64{op[0]}} & $realtobits(af + bf) | // FADD
+              {64{op[18]}} & $realtobits($itor(a)) | // FCVT.F.L
+              0;
+        if (~double & (op[0] | op[18])) res = {32'd0, double2single(res, rm)};
+    end
+    always_ff @(posedge clk)
+        if (rst | flush) valid <= {`lgCQSZ+1{`fpulatency'd0}};
+        else if (ena | ~valid[0][`lgCQSZ]) begin
+            valid <= {rqst, valid[`fpulatency-1:1]};
+            r_q <= {res, r_q[`fpulatency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;

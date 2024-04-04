@@ -6,7 +6,7 @@
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
 `define lgLSQSZ 3
-`define LATENUM 4 // number of late components
+`define LATENUM 5 // number of late components
 `define LOAD      5'b00000 // opcode map
 `define LOAD_FP   5'b00001
 `define MISC_MEM  5'b00011
@@ -150,6 +150,9 @@ module pipeline(
     logic [4:0] mul_op; logic [63:0] mul_a, mul_b; logic [64:0] mul_r;
     logic [`lgCQSZ:0] div_rqst, div_done; logic div_exc, div_ena, div_free;
     logic [7:0] div_op; logic [63:0] div_a, div_b; logic [64:0] div_r;
+    logic [`lgCQSZ:0] fpu_rqst, fpu_done; logic fpu_exc, fpu_ena, fpu_free;
+    logic [20:0] fpu_op; logic [63:0] fpu_a, fpu_b;
+    logic [2:0] fpu_rm; logic fpu_double; logic [64:0] fpu_r;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -178,6 +181,9 @@ module pipeline(
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
         .div_free(div_free), .div_rqst(div_rqst),
         .div_op(div_op), .div_a(div_a), .div_b(div_b),
+        .fpu_free(fpu_free), .fpu_rqst(fpu_rqst),
+        .fpu_op(fpu_op), .fpu_a(fpu_a), .fpu_b(fpu_b),
+        .fpu_rm(fpu_rm), .fpu_double(fpu_double),
         .lsu_free(lsu_free), .lsu_rqst(lsu_rqst), .lsu_wena(lsu_wena),
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
@@ -213,12 +219,17 @@ module pipeline(
         .ena(div_ena), .get(div_free),
         .rqst(div_rqst), .op(div_op), .a(div_a), .b(div_b),
         .done(div_done), .r(div_r), .e(div_exc));
+    fpu fpu_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover),
+        .ena(fpu_ena), .get(fpu_free),
+        .rqst(fpu_rqst), .op(fpu_op), .a(fpu_a), .b(fpu_b),
+        .rm(fpu_rm), .double(fpu_double),
+        .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
                           // or use dynamic priority?
-        .done_in({pt_done, div_done, mul_done, lsu_done}),
-        .val_in({pt_data, div_r, mul_r, lsu_rdat}),
-        .exc_in({pt_exc, div_exc, mul_exc, lsu_exc}),
-        .get({pt_ena, div_ena, mul_ena, lsu_ena}),
+        .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
+        .val_in({pt_data, fpu_r, div_r, mul_r, lsu_rdat}),
+        .exc_in({pt_exc, fpu_exc, div_exc, mul_exc, lsu_exc}),
+        .get({pt_ena, fpu_ena, div_ena, mul_ena, lsu_ena}),
         .done_out(late_done), .val_out(late_val), .exc_out(late_exc));
 endmodule
 
@@ -399,15 +410,16 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
         (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
-    always_comb a0 =
-        {1'd1, 59'd0, ir[19:15]} & {65{
-            op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
-            op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
-            op[`BRANCH] | op[`AMO]}} |
-        {1'd1, 59'd1, ir[19:15]} & {{65{
-            op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-            op[`OP_FP]}}} |
-        {1'd0, in_if.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
+    always_comb if (exop[0][`EX_FCVTFI])
+            a0 = {1'd1, 59'd0, ir[19:15]};
+        else a0 = {1'd1, 59'd0, ir[19:15]} & {65{
+                      op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
+                      op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
+                      op[`BRANCH] | op[`AMO]}} |
+                  {1'd1, 59'd1, ir[19:15]} & {{65{
+                      op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                      op[`OP_FP]}}} |
+                  {1'd0, in_if.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
     always_comb if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
             b0 = {60'd0, ir[24:20]};
         else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
@@ -516,6 +528,9 @@ module ex_stage(input logic clk, input logic rst,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
     input logic div_free, output logic [`lgCQSZ:0] div_rqst, output logic [7:0] div_op,
     output logic [63:0] div_a, output logic [63:0] div_b,
+    input logic fpu_free, output logic [`lgCQSZ:0] fpu_rqst, output logic [20:0] fpu_op,
+    output logic [63:0] fpu_a, output logic [63:0] fpu_b,
+    output logic [2:0] fpu_rm, output logic fpu_double,
     input logic lsu_free, output logic [`lgCQSZ:0] lsu_rqst,
     output logic lsu_wena, output logic [64:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
@@ -534,9 +549,9 @@ module ex_stage(input logic clk, input logic rst,
     logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
     logic [31:0] srlw, sraw;
-    logic lsu, mul, div;
+    logic lsu;
     logic [2:0] bflag;
-    logic ready, mul_valid, div_valid, lsu_vaild;
+    logic ready, mul_valid, div_valid, fpu_valid, lsu_vaild;
     logic [`lgCQSZ:0] cqid;
     always_comb op = in.valid ? in.exop : 0;
     always_comb if (frompt & in_pt.j) a = in.pc; // JALR in PT
@@ -558,28 +573,35 @@ module ex_stage(input logic clk, input logic rst,
         out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
         out_pt.b = in.b[64] ? rvalue[1] : in.b;
     end
-    always_comb get_pt = ~in_pt.valid |
-        frompt & ~(mul & ~mul_free) & ~(div & ~div_free);
+    always_comb get_pt = ~in_pt.valid | frompt &
+        ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free);
     always_comb get_id = ~in_id.valid | cqid_id[`lgCQSZ] & ~frompt &
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
-        ~(mul & ~mul_free) & ~(div & ~div_free) &
+        ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free) &
         ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
     always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
     always_comb cqid = frompt ? cqid_pt : cqid_id;
-    always_comb mul = op[`EX_MUL] | op[`EX_MULH] | op[`EX_MULHSU] | op[`EX_MULHU] |
-                      op[`EX_MULW];
-    always_comb mul_valid = ~rst & ready & mul;
+    always_comb mul_valid = ~rst & ready & |mul_op;
     always_comb mul_rqst = {`lgCQSZ+1{mul_valid}} & cqid;
     always_comb mul_op = {op[`EX_MULW],
         op[`EX_MULHU], op[`EX_MULHSU], op[`EX_MULH], op[`EX_MUL]};
     always_comb {mul_a, mul_b} = {a, b};
-    always_comb div = op[`EX_DIV]  | op[`EX_DIVU]  | op[`EX_REM]  | op[`EX_REMU] |
-                      op[`EX_DIVW] | op[`EX_DIVUW] | op[`EX_REMW] | op[`EX_REMUW];
-    always_comb div_valid = ~rst & ready & div;
+    always_comb div_valid = ~rst & ready & |div_op;
     always_comb div_rqst = {`lgCQSZ+1{div_valid}} & cqid;
     always_comb div_op = {op[`EX_REMUW], op[`EX_REMW], op[`EX_DIVUW], op[`EX_DIVW],
                           op[`EX_REMU],  op[`EX_REM],  op[`EX_DIVU],  op[`EX_DIV]};
     always_comb {div_a, div_b} = {a, b};
+    always_comb fpu_valid = ~rst & ready & |fpu_op;
+    always_comb fpu_rqst = {`lgCQSZ+1{fpu_valid}} & cqid;
+    always_comb fpu_op = {
+        op[`EX_FCVTDS], op[`EX_FCVTSD], op[`EX_FCVTFI], op[`EX_FCVTIF],
+        op[`EX_FMVIF],  op[`EX_FCLASS], op[`EX_FMVFI],  op[`EX_FLE],
+        op[`EX_FLT],    op[`EX_FEQ],    op[`EX_FMAX],   op[`EX_FMIN],
+        op[`EX_FSGNJX], op[`EX_FSGNJN], op[`EX_FSGNJ],  op[`EX_FSQRT],
+        op[`EX_FDIV],   op[`EX_FNMUL],  op[`EX_FMUL],   op[`EX_FSUB],
+        op[`EX_FADD]};
+    always_comb {fpu_a, fpu_b} = {a, b};
+    always_comb {fpu_rm, fpu_double} = {in.frm, in.fdouble};
     always_comb lsu = in.mr | in.mw;
     always_comb lsu_vaild = ~rst & (get_id & in_id.valid) & lsu;
     always_ff @(posedge clk) if (lsu_free | ~lsu_rqst[`lgCQSZ])
@@ -613,8 +635,9 @@ module ex_stage(input logic clk, input logic rst,
             {65{op[`EX_SLLW]}} & {1'b0, {32{sll[31]}}, sll[31:0]} |
             {65{op[`EX_SRLW]}} & {1'b0, {32{srlw[31]}}, srlw} |
             {65{op[`EX_SRAW]}} & {1'b0, {32{sraw[31]}}, sraw} |
-            {65{mul}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
-            {65{div}}          & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
+            {65{|mul_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
+            {65{|div_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
+            {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
     always_ff @(posedge clk) if (rst) pt_done <= 0;
         else if (frompt & ~lsu)
             {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & excp};
