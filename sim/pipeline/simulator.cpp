@@ -1,5 +1,6 @@
 #include "simulator.h"
 #include <cstdio>
+#include <cmath>
 
 #define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                                         \
     ((((uint64_t)(uint8_t)(b0)) << (uint64_t)0x00) | (((uint64_t)(uint8_t)(b1)) << (uint64_t)0x08) | \
@@ -12,6 +13,9 @@
 #define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
 #define BIT(dw, i) BITS(dw, i, i)
 #define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)-1 << (width) : 0) | (dw) & ~((uint64_t)-1 << (width)))
+#define RVQNAN64(x) (BITS(x, 52, 62) == 0x7ff && BITS(x, 0, 51) ? 0x7ff8'0000'0000'0000ul : (x))
+#define RVQNAN32(x) (BITS(x, 23, 30) == 0x0ff && BITS(x, 0, 22) ? 0x7fc0'0000u : (x))
+#define CLRH(p) *((float *)(p) + 1) = 0
 
 /**
  * @brief simulator constructor
@@ -96,8 +100,10 @@ void simulator::step(int nojump)
             rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
     uint64_t &rd = arregs[rda], rs1 = arregs[rs1a],
              rs2 = arregs[rs2a], rs3 = arregs[rs3a];
-    double &fd = *(double *)&arregs[rda + 32], fs1 = *(double *)&arregs[rs1a + 32],
-           fs2 = *(double *)&arregs[rs2a + 32], fs3 = *(double *)&arregs[rs3a + 32];
+    double &dd = *(double *)&arregs[rda + 32], ds1 = *(double *)&arregs[rs1a + 32],
+           ds2 = *(double *)&arregs[rs2a + 32], ds3 = *(double *)&arregs[rs3a + 32];
+    float &sd = *(float *)&arregs[rda + 32], ss1 = *(float *)&arregs[rs1a + 32],
+          ss2 = *(float *)&arregs[rs2a + 32], ss3 = *(float *)&arregs[rs3a + 32];
     int64_t imm;
     switch (BITS(ir, 2, 6)) // opcode
     {
@@ -300,25 +306,100 @@ void simulator::step(int nojump)
     case 0b10100: // OP-FP
         switch (BITS(ir, 27, 31))
         {
-        case 0b00000:
-            if (BIT(ir, 25)) // FADD.D
-                fd = fs1 + fs2;
-            else // FADD.S
-                *(float *)&fd = *(float *)&fs1 + *(float *)&fs2, *((float *)&fd + 1) = 0;
+        case 0b00000: // FADD
+            BIT(ir, 25) ? (dd = ds1 + ds2) : (sd = ss1 + ss2, CLRH(&dd));
             sprintf(asmcode, "fadd.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b00001: // FSUB
+            BIT(ir, 25) ? (dd = ds1 - ds2) : (sd = ss1 - ss2, CLRH(&dd));
+            sprintf(asmcode, "fsub.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b00010: // FMUL
+            BIT(ir, 25) ? (dd = ds1 * ds2) : (sd = ss1 * ss2, CLRH(&dd));
+            sprintf(asmcode, "fmul.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b00011: // FDIV
+            BIT(ir, 25) ? (dd = ds1 / ds2) : (sd = ss1 / ss2, CLRH(&dd));
+            sprintf(asmcode, "fdiv.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b01011:
+            // RISC-V uses quiet canonical NAN
+            if (BIT(ir, 25)) // FSQRT.D
+                dd = sqrt(ds1), *(uint64_t *)&dd = RVQNAN64(*(uint64_t *)&dd);
+            else // FSQRT.S
+                sd = sqrtf(ss1), *(uint32_t *)&sd = RVQNAN32(*(uint32_t *)&sd), CLRH(&dd);
+            sprintf(asmcode, "fsqrt.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+            break;
+        case 0b00100:
+            switch (funct3)
+            {
+            case 0:
+                if (BIT(ir, 25)) // FSGNJ.D
+                    dd = ds2 < 0 ? -ds1 : ds1;
+                else
+                    sd = ss2 < 0 ? -ss1 : ss1, CLRH(&dd);
+                sprintf(asmcode, "fsgnj.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            case 1:
+                if (BIT(ir, 25)) // FSGNJN.D
+                    dd = ds2 < 0 ? ds1 : -ds1;
+                else
+                    sd = ss2 < 0 ? ss1 : -ss1, CLRH(&dd);
+                sprintf(asmcode, "fsgnjn.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            case 2:
+                if (BIT(ir, 25)) // FSGNJX.D
+                    dd = ds1 < 0 ^ ds2 < 0 ? -ds1 : ds1;
+                else
+                    sd = ss1 < 0 ^ ss2 < 0 ? -ss1 : ss1, CLRH(&dd);
+                sprintf(asmcode, "fsgnjx.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            }
+            break;
+        case 0b00101:
+            switch (funct3)
+            {
+            case 0: // FMIN
+                BIT(ir, 25) ? (dd = fmin(ds1, ds2)) : (sd = fminf(ss1, ss2));
+                sprintf(asmcode, "fmin.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            case 1: // FMAX
+                BIT(ir, 25) ? (dd = fmax(ds1, ds2)) : (sd = fmaxf(ss1, ss2));
+                sprintf(asmcode, "fmax.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            }
             break;
         case 0b11010: // FCVT.F.I
             switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))
             {
+            case 0b000: // FCVT.S.W
+                sd = (float)(int32_t)BITS(rs1, 0, 31), CLRH(&dd);
+                break;
+            case 0b001: // FCVT.S.WU
+                sd = (float)BITS(rs1, 0, 31), CLRH(&dd);
+                break;
             case 0b010: // FCVT.S.L
-                *(float *)&fd = (float)rs1, *((float *)&fd + 1) = 0;
-                sprintf(asmcode, "fcvt.s.l f%d, x%d", rda, rs1a);
+                sd = (float)(int64_t)rs1, CLRH(&dd);
+                break;
+            case 0b011: // FCVT.S.LU
+                sd = (float)rs1, CLRH(&dd);
+                break;
+            case 0b100: // FCVT.D.W
+                dd = (double)(int32_t)BITS(rs1, 0, 31);
+                break;
+            case 0b101: // FCVT.D.W
+                dd = (double)BITS(rs1, 0, 31);
                 break;
             case 0b110: // FCVT.D.L
-                fd = (double)rs1;
-                sprintf(asmcode, "fcvt.d.l f%d, x%d", rda, rs1a);
+                dd = (double)(int64_t)rs1;
+                break;
+            case 0b111: // FCVT.D.LU
+                dd = (double)rs1;
                 break;
             }
+            sprintf(asmcode, "fcvt.%c.%c%s f%d, x%d",
+                    BIT(ir, 25) ? 'd' : 's', BIT(ir, 21) ? 'l' : 'w',
+                    BIT(ir, 20) ? "u" : "", rda, rs1a);
             break;
         }
         break;

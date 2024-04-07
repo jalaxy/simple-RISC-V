@@ -148,9 +148,10 @@ function logic [31:0] double2single(input logic [63:0] d, input logic [2:0] rm);
     logic [10:0] e;
     logic [51:0] b;
     {s, e, b} = d;
-    if (b[28]) {ov, b[51:29]} = {1'b0, b[51:29]} + 1;
+    if (b[28]) {ov, b[51:29]} = {1'b0, b[51:29]} + 1; else ov = 0;
     if (ov) begin b = b >> 1; if (e != 1023) e++; end
-    if (e > 896) e = e - 896; else e = 0;
+    if (e < 896) e = 896; else if (e > 1151) e = 1151;
+    e = e - 896;
     double2single = {s, e[7:0], b[51:29]};
 endfunction
 
@@ -164,21 +165,34 @@ module fpu(input logic clk, input logic rst, input logic flush,
 `define fpulatency 10
     logic [`fpulatency-1:0][63:0] r_q;
     logic [`fpulatency-1:0][`lgCQSZ:0] valid;
-    logic [63:0] res;
+    logic [63:0] res, ad, bd;
     real af, bf;
     always_comb begin
-        af = $bitstoreal(a);
-        bf = $bitstoreal(b);
-        if (~double & op[0]) begin
-            af = $bitstoreal(single2double(a[31:0]));
-            bf = $bitstoreal(single2double(b[31:0]));
-        end
+        ad = double ? a : single2double(a[31:0]);
+        bd = double ? b : single2double(b[31:0]);
+        af = $bitstoreal(ad);
+        bf = $bitstoreal(bd);
     end
     always_comb begin
         res = {64{op[0]}} & $realtobits(af + bf) | // FADD
-              {64{op[18]}} & $realtobits($itor(a)) | // FCVT.F.L
+              {64{op[1]}} & $realtobits(af - bf) | // FSUB
+              {64{op[2]}} & $realtobits(af * bf) | // FMUL
+              {64{op[4]}} & $realtobits(af / bf) | // FDIV
+              {64{op[5]}} & $realtobits($sqrt(af)) | // FSQRT
+              {64{op[6]}} & {bd[63], ad[62:0]} | // FSGNJ
+              {64{op[7]}} & {~bd[63], ad[62:0]} | // FSGNJN
+              {64{op[8]}} & {a[63] ^ bd[63], ad[62:0]} | // FSGNJX
+              {64{op[9]}} & $realtobits(af < bf ? af : bf) | // FMIN
+              {64{op[10]}} & $realtobits(af > bf ? af : bf) | // FMAX
+              {64{op[18] & b[1:0] == 0}} &
+                    $realtobits($itor($signed({{32{a[31]}}, a[31:0]}))) | // FCVT.F.W
+              {64{op[18] & b[1:0] == 1}} &
+                    $realtobits($itor({32'd0, a[31:0]})) | // FCVT.F.WU
+              {64{op[18] & b[1:0] == 2}} & $realtobits($itor($signed(a))) | // FCVT.F.L
+              {64{op[18] & b[1:0] == 3}} & $realtobits($itor(a)) | // FCVT.F.LU
               0;
-        if (~double & (op[0] | op[18])) res = {32'd0, double2single(res, rm)};
+        if (res[62:52] == 11'h7ff) res = 64'h7ff8_0000_0000_0000; // quiet canonical NAN
+        if (~double) res = {32'd0, double2single(res, rm)};
     end
     always_ff @(posedge clk)
         if (rst | flush) valid <= {`lgCQSZ+1{`fpulatency'd0}};

@@ -410,7 +410,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
         (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
-    always_comb if (exop[0][`EX_FCVTFI])
+    always_comb if (exop[0][`EX_FCVTFI] | exop[0][`EX_FMVFI])
             a0 = {1'd1, 59'd0, ir[19:15]};
         else a0 = {1'd1, 59'd0, ir[19:15]} & {65{
                       op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
