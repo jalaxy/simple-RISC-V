@@ -74,9 +74,9 @@
 `define EX_FEQ    6'd43
 `define EX_FLT    6'd44
 `define EX_FLE    6'd45
-`define EX_FMVFI  6'd46
+`define EX_FMVXF  6'd46
 `define EX_FCLASS 6'd47
-`define EX_FMVIF  6'd48
+`define EX_FMVFX  6'd48
 `define EX_FCVTIF 6'd49
 `define EX_FCVTFI 6'd50
 `define EX_FCVTSD 6'd51
@@ -386,11 +386,11 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         exop[0][`EX_FEQ] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b010;
         exop[0][`EX_FLT] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b001;
         exop[0][`EX_FLE] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b000;
-        exop[0][`EX_FMVFI] = op[`OP_FP] & ir[31:26] == 6'b111000 &
+        exop[0][`EX_FMVXF] = op[`OP_FP] & ir[31:26] == 6'b111000 &
             ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
         exop[0][`EX_FCLASS] = op[`OP_FP] & ir[31:26] == 6'b111000 &
             ir[14:12] == 3'b001 & ir[24:20] == 5'd0;
-        exop[0][`EX_FMVIF] = op[`OP_FP] & ir[31:26] == 6'b111100 &
+        exop[0][`EX_FMVFX] = op[`OP_FP] & ir[31:26] == 6'b111100 &
             ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
         exop[0][`EX_FCVTIF] = op[`OP_FP] & ir[31:26] == 6'b110000;
         exop[0][`EX_FCVTFI] = op[`OP_FP] & ir[31:26] == 6'b110100;
@@ -410,7 +410,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
         (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
-    always_comb if (exop[0][`EX_FCVTFI] | exop[0][`EX_FMVFI])
+    always_comb if (exop[0][`EX_FCVTFI] | exop[0][`EX_FMVFX])
             a0 = {1'd1, 59'd0, ir[19:15]};
         else a0 = {1'd1, 59'd0, ir[19:15]} & {65{
                       op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
@@ -423,7 +423,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
     always_comb if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
             b0 = {60'd0, ir[24:20]};
         else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
-            exop[0][`EX_FMVIF] | exop[0][`EX_FMVFI])
+            exop[0][`EX_FMVFX] | exop[0][`EX_FMVXF])
             b0 = 65'd0;
         else b0 = {1'd1, 59'd0, ir[24:20]} & {65{
                       op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
@@ -463,7 +463,10 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[0].rmwa <=
                 {2'b0, ir[24:20]} & {7{op[`STORE]}} |
                 {2'b1, ir[24:20]} & {7{op[`STORE_FP]}};
-            out_ex_q[0].rda <=
+            if (exop[0][`EX_FEQ] | exop[0][`EX_FLT] | exop[0][`EX_FLE] |
+                exop[0][`EX_FMVXF] | exop[0][`EX_FCLASS])
+                out_ex_q[0].rda <= {2'd0, ir[11:7]};
+            else out_ex_q[0].rda <=
                 {2'd0, ir[11:7]} & {7{
                     op[`LOAD] | op[`OP_IMM] | op[`AUIPC] | op[`OP_IMM_32] |
                     op[`OP]   | op[`LUI]    | op[`OP_32] | op[`JALR]      |
@@ -595,7 +598,7 @@ module ex_stage(input logic clk, input logic rst,
     always_comb fpu_rqst = {`lgCQSZ+1{fpu_valid}} & cqid;
     always_comb fpu_op = {
         op[`EX_FCVTDS], op[`EX_FCVTSD], op[`EX_FCVTFI], op[`EX_FCVTIF],
-        op[`EX_FMVIF],  op[`EX_FCLASS], op[`EX_FMVFI],  op[`EX_FLE],
+        op[`EX_FMVFX],  op[`EX_FCLASS], op[`EX_FMVXF],  op[`EX_FLE],
         op[`EX_FLT],    op[`EX_FEQ],    op[`EX_FMAX],   op[`EX_FMIN],
         op[`EX_FSGNJX], op[`EX_FSGNJN], op[`EX_FSGNJ],  op[`EX_FSQRT],
         op[`EX_FDIV],   op[`EX_FNMUL],  op[`EX_FMUL],   op[`EX_FSUB],

@@ -13,9 +13,9 @@
 #define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
 #define BIT(dw, i) BITS(dw, i, i)
 #define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)-1 << (width) : 0) | (dw) & ~((uint64_t)-1 << (width)))
-#define RVQNAN64(x) (BITS(x, 52, 62) == 0x7ff && BITS(x, 0, 51) ? 0x7ff8'0000'0000'0000ul : (x))
-#define RVQNAN32(x) (BITS(x, 23, 30) == 0x0ff && BITS(x, 0, 22) ? 0x7fc0'0000u : (x))
-#define CLRH(p) *((float *)(p) + 1) = 0
+#define CNAN64(x) (BITS(x, 52, 62) == 0x7ff && BITS(x, 0, 51) ? 0x7ff8'0000'0000'0000ul : (x))
+#define CNAN32(x) (BITS(x, 23, 30) == 0x0ff && BITS(x, 0, 22) ? 0xffff'ffff'7fc0'0000ul : (x))
+#define BNAN(p) *((uint32_t *)(p) + 1) = 0xffff'ffffu
 
 /**
  * @brief simulator constructor
@@ -104,6 +104,10 @@ void simulator::step(int nojump)
            ds2 = *(double *)&arregs[rs2a + 32], ds3 = *(double *)&arregs[rs3a + 32];
     float &sd = *(float *)&arregs[rda + 32], ss1 = *(float *)&arregs[rs1a + 32],
           ss2 = *(float *)&arregs[rs2a + 32], ss3 = *(float *)&arregs[rs3a + 32];
+    if (BITS(ds1, 32, 63) != 0xffff'ffffu) // NaN-boxing
+        ss1 = CNAN32(ss1);
+    if (BITS(ds2, 32, 63) != 0xffff'ffffu)
+        ss2 = CNAN32(ss2);
     int64_t imm;
     switch (BITS(ir, 2, 6)) // opcode
     {
@@ -307,27 +311,26 @@ void simulator::step(int nojump)
         switch (BITS(ir, 27, 31))
         {
         case 0b00000: // FADD
-            BIT(ir, 25) ? (dd = ds1 + ds2) : (sd = ss1 + ss2, CLRH(&dd));
+            BIT(ir, 25) ? (dd = ds1 + ds2) : (sd = ss1 + ss2, BNAN(&dd));
             sprintf(asmcode, "fadd.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
             break;
         case 0b00001: // FSUB
-            BIT(ir, 25) ? (dd = ds1 - ds2) : (sd = ss1 - ss2, CLRH(&dd));
+            BIT(ir, 25) ? (dd = ds1 - ds2) : (sd = ss1 - ss2, BNAN(&dd));
             sprintf(asmcode, "fsub.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
             break;
         case 0b00010: // FMUL
-            BIT(ir, 25) ? (dd = ds1 * ds2) : (sd = ss1 * ss2, CLRH(&dd));
+            BIT(ir, 25) ? (dd = ds1 * ds2) : (sd = ss1 * ss2, BNAN(&dd));
             sprintf(asmcode, "fmul.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
             break;
         case 0b00011: // FDIV
-            BIT(ir, 25) ? (dd = ds1 / ds2) : (sd = ss1 / ss2, CLRH(&dd));
+            BIT(ir, 25) ? (dd = ds1 / ds2) : (sd = ss1 / ss2, BNAN(&dd));
             sprintf(asmcode, "fdiv.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
             break;
         case 0b01011:
-            // RISC-V uses quiet canonical NAN
             if (BIT(ir, 25)) // FSQRT.D
-                dd = sqrt(ds1), *(uint64_t *)&dd = RVQNAN64(*(uint64_t *)&dd);
+                dd = sqrt(ds1), *(uint64_t *)&dd = CNAN64(*(uint64_t *)&dd);
             else // FSQRT.S
-                sd = sqrtf(ss1), *(uint32_t *)&sd = RVQNAN32(*(uint32_t *)&sd), CLRH(&dd);
+                sd = sqrtf(ss1), *(uint32_t *)&sd = CNAN32(*(uint32_t *)&sd), BNAN(&dd);
             sprintf(asmcode, "fsqrt.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
             break;
         case 0b00100:
@@ -337,21 +340,21 @@ void simulator::step(int nojump)
                 if (BIT(ir, 25)) // FSGNJ.D
                     dd = ds2 < 0 ? -ds1 : ds1;
                 else
-                    sd = ss2 < 0 ? -ss1 : ss1, CLRH(&dd);
+                    sd = ss2 < 0 ? -ss1 : ss1, BNAN(&dd);
                 sprintf(asmcode, "fsgnj.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             case 1:
                 if (BIT(ir, 25)) // FSGNJN.D
                     dd = ds2 < 0 ? ds1 : -ds1;
                 else
-                    sd = ss2 < 0 ? ss1 : -ss1, CLRH(&dd);
+                    sd = ss2 < 0 ? ss1 : -ss1, BNAN(&dd);
                 sprintf(asmcode, "fsgnjn.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             case 2:
                 if (BIT(ir, 25)) // FSGNJX.D
                     dd = ds1 < 0 ^ ds2 < 0 ? -ds1 : ds1;
                 else
-                    sd = ss1 < 0 ^ ss2 < 0 ? -ss1 : ss1, CLRH(&dd);
+                    sd = ss1 < 0 ^ ss2 < 0 ? -ss1 : ss1, BNAN(&dd);
                 sprintf(asmcode, "fsgnjx.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             }
@@ -360,12 +363,29 @@ void simulator::step(int nojump)
             switch (funct3)
             {
             case 0: // FMIN
-                BIT(ir, 25) ? (dd = fmin(ds1, ds2)) : (sd = fminf(ss1, ss2));
+                BIT(ir, 25) ? (dd = fmin(ds1, ds2)) : (sd = fminf(ss1, ss2), BNAN(&dd));
                 sprintf(asmcode, "fmin.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             case 1: // FMAX
-                BIT(ir, 25) ? (dd = fmax(ds1, ds2)) : (sd = fmaxf(ss1, ss2));
+                BIT(ir, 25) ? (dd = fmax(ds1, ds2)) : (sd = fmaxf(ss1, ss2), BNAN(&dd));
                 sprintf(asmcode, "fmax.%c f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            }
+            break;
+        case 0b10100:
+            switch (funct3)
+            {
+            case 0: // FLE
+                rd = BIT(ir, 25) ? ds1 <= ds2 : ss1 <= ss2;
+                sprintf(asmcode, "fle.%c x%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            case 1: // FLT
+                rd = BIT(ir, 25) ? ds1 < ds2 : ss1 < ss2;
+                sprintf(asmcode, "flt.%c x%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
+                break;
+            case 2: // FEQ
+                rd = BIT(ir, 25) ? ds1 == ds2 : ss1 == ss2;
+                sprintf(asmcode, "feq.%c x%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             }
             break;
@@ -373,16 +393,16 @@ void simulator::step(int nojump)
             switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))
             {
             case 0b000: // FCVT.S.W
-                sd = (float)(int32_t)BITS(rs1, 0, 31), CLRH(&dd);
+                sd = (float)(int32_t)BITS(rs1, 0, 31), BNAN(&dd);
                 break;
             case 0b001: // FCVT.S.WU
-                sd = (float)BITS(rs1, 0, 31), CLRH(&dd);
+                sd = (float)BITS(rs1, 0, 31), BNAN(&dd);
                 break;
             case 0b010: // FCVT.S.L
-                sd = (float)(int64_t)rs1, CLRH(&dd);
+                sd = (float)(int64_t)rs1, BNAN(&dd);
                 break;
             case 0b011: // FCVT.S.LU
-                sd = (float)rs1, CLRH(&dd);
+                sd = (float)rs1, BNAN(&dd);
                 break;
             case 0b100: // FCVT.D.W
                 dd = (double)(int32_t)BITS(rs1, 0, 31);
@@ -400,6 +420,42 @@ void simulator::step(int nojump)
             sprintf(asmcode, "fcvt.%c.%c%s f%d, x%d",
                     BIT(ir, 25) ? 'd' : 's', BIT(ir, 21) ? 'l' : 'w',
                     BIT(ir, 20) ? "u" : "", rda, rs1a);
+            break;
+        case 0b11100: // FMV.X.F
+            if (funct3 == 0)
+            {
+                BIT(ir, 25) ? (rd = *(uint64_t *)&ds1) : (rd = *(uint32_t *)&ds1, BNAN(&rd));
+                sprintf(asmcode, "fmv.x.%c x%d, f%d", BIT(ir, 25) ? 'd' : 'w', rda, rs1a);
+            }
+            else if (funct3 == 1) // FCLASS
+            {
+                using namespace std;
+                if (BIT(ir, 25) ? isinf(ds1) && ds1 < 0 : isinf(ss1) && ss1 < 0)
+                    rd = 1;
+                else if (BIT(ir, 25) ? isnormal(ds1) && ds1 < 0 : isnormal(ss1) && ss1 < 0)
+                    rd = 2;
+                else if (BIT(ir, 25) ? issubnormal(ds1) && ds1 < 0 : issubnormal(ss1) && ss1 < 0)
+                    rd = 4;
+                else if (BIT(ir, 25) ? iszero(ds1) && ds1 < 0 : iszero(ss1) && ss1 < 0)
+                    rd = 8;
+                else if (BIT(ir, 25) ? iszero(ds1) && ds1 > 0 : iszero(ss1) && ss1 > 0)
+                    rd = 16;
+                else if (BIT(ir, 25) ? issubnormal(ds1) && ds1 > 0 : issubnormal(ss1) && ss1 > 0)
+                    rd = 32;
+                else if (BIT(ir, 25) ? isnormal(ds1) && ds1 > 0 : isnormal(ss1) && ss1 > 0)
+                    rd = 64;
+                else if (BIT(ir, 25) ? isinf(ds1) && ds1 > 0 : isinf(ss1) && ss1 > 0)
+                    rd = 128;
+                else if (BIT(ir, 25) ? isnan(ds1) && issignaling(ds1) : isnan(ss1) && issignaling(ss1))
+                    rd = 256;
+                else if (BIT(ir, 25) ? isnan(ds1) && !issignaling(ds1) : isnan(ss1) && !issignaling(ss1))
+                    rd = 512;
+                sprintf(asmcode, "fclass.%c x%d, f%d", BIT(ir, 25) ? 'd' : 'w', rda, rs1a);
+            }
+            break;
+        case 0b11110: // FMV.F.X
+            BIT(ir, 25) ? (*(uint64_t *)&dd = rs1) : (*(uint32_t *)&sd = rs1, BNAN(&dd));
+            sprintf(asmcode, "fmv.%c.x f%d, x%d", BIT(ir, 25) ? 'd' : 'w', rda, rs1a);
             break;
         }
         break;

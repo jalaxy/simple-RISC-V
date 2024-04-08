@@ -168,8 +168,10 @@ module fpu(input logic clk, input logic rst, input logic flush,
     logic [63:0] res, ad, bd;
     real af, bf;
     always_comb begin
-        ad = double ? a : single2double(a[31:0]);
-        bd = double ? b : single2double(b[31:0]);
+        if (double) ad = a; else if (a[63:32] == -1) ad = single2double(a[31:0]);
+        else ad = {-32'd1, 32'h7fc00000};
+        if (double) bd = b; else if (b[63:32] == -1) bd = single2double(b[31:0]);
+        else bd = {-32'd1, 32'h7fc00000};
         af = $bitstoreal(ad);
         bf = $bitstoreal(bd);
     end
@@ -181,9 +183,15 @@ module fpu(input logic clk, input logic rst, input logic flush,
               {64{op[5]}} & $realtobits($sqrt(af)) | // FSQRT
               {64{op[6]}} & {bd[63], ad[62:0]} | // FSGNJ
               {64{op[7]}} & {~bd[63], ad[62:0]} | // FSGNJN
-              {64{op[8]}} & {a[63] ^ bd[63], ad[62:0]} | // FSGNJX
+              {64{op[8]}} & {ad[63] ^ bd[63], ad[62:0]} | // FSGNJX
               {64{op[9]}} & $realtobits(af < bf ? af : bf) | // FMIN
               {64{op[10]}} & $realtobits(af > bf ? af : bf) | // FMAX
+              {64{op[11]}} & {63'd0, af == bf} | // FEQ
+              {64{op[12]}} & {63'd0, af < bf} | // FLT
+              {64{op[13]}} & {63'd0, af <= bf} | // FLE
+              {64{op[14]}} & a | //FMV.X.F
+              {64{op[15]}} & 64'd0 | // FCLASS
+              {64{op[16]}} & a | // FMV.F.X
               {64{op[18] & b[1:0] == 0}} &
                     $realtobits($itor($signed({{32{a[31]}}, a[31:0]}))) | // FCVT.F.W
               {64{op[18] & b[1:0] == 1}} &
@@ -191,8 +199,12 @@ module fpu(input logic clk, input logic rst, input logic flush,
               {64{op[18] & b[1:0] == 2}} & $realtobits($itor($signed(a))) | // FCVT.F.L
               {64{op[18] & b[1:0] == 3}} & $realtobits($itor(a)) | // FCVT.F.LU
               0;
-        if (res[62:52] == 11'h7ff) res = 64'h7ff8_0000_0000_0000; // quiet canonical NAN
-        if (~double) res = {32'd0, double2single(res, rm)};
+        if (op[16]) begin
+            if (~double) res = {-32'd1, res[31:0]};
+        end else if (~op[11] & ~op[12] & ~op[13] & ~op[14] & ~op[15]) begin
+            if (res[62:52] == 11'h7ff) res = 64'h7ff8_0000_0000_0000;
+            if (~double) res = {-32'd1, double2single(res, rm)};
+        end
     end
     always_ff @(posedge clk)
         if (rst | flush) valid <= {`lgCQSZ+1{`fpulatency'd0}};
