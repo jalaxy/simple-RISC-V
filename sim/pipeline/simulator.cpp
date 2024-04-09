@@ -131,6 +131,13 @@ void simulator::step(int nojump)
             sprintf(asmcode, "%s x%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
     case 0b00001: // LOAD-FP
+        imm = SEXT(BITS(ir, 20, 31), 12);
+        if (funct3 == 0b010) // FLW
+            *(uint32_t *)&sd = DLE(memory, rs1 + imm), BNAN(&dd);
+        else if (funct3 == 0b011) // FLD
+            *(uint64_t *)&dd = DLE(memory, rs1 + imm);
+        if (funct3 == 2 || funct3 == 3)
+            sprintf(asmcode, "f%s f%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
     case 0b00011: // MISC-MEM
         break;
@@ -183,9 +190,10 @@ void simulator::step(int nojump)
                     funct3 == 5 && BIT(ir, 30) ? "srai" : iname[funct3], rda, rs1a, imm);
         break;
     case 0b01000: // STORE
+    case 0b01001: // STORE-FP
         imm = SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
         mwaddr = rs1 + imm;
-        mwdata = rs2;
+        mwdata = BIT(ir, 2) ? *(uint64_t *)&ds2 : rs2;
         mwwidth = 1 << BITS(ir, 12, 13);
         if (mwwidth < 8)
             mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
@@ -193,9 +201,9 @@ void simulator::step(int nojump)
             memory[mwaddr + i] = DTOB(mwdata, i);
         static const char *snames[] = {"sb", "sh", "sw", "sd"};
         if (funct3 < 4)
-            sprintf(asmcode, "%s x%d, %ld(x%d)", snames[funct3], rs2a, imm, rs1a);
-        break;
-    case 0b01001: // STORE-FP
+            sprintf(asmcode, "%s%s %c%d, %ld(x%d)",
+                    BIT(ir, 2) ? "f" : "", snames[funct3],
+                    BIT(ir, 2) ? 'f' : 'x', rs2a, imm, rs1a);
         break;
     case 0b01011: // AMO
         break;
@@ -388,6 +396,45 @@ void simulator::step(int nojump)
                 sprintf(asmcode, "feq.%c x%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's', rda, rs1a, rs2a);
                 break;
             }
+            break;
+        case 0b01000:
+            if (BIT(ir, 25)) // FCVT.D.S
+                dd = (double)ss1;
+            else // FCVT.S.D
+                sd = (float)ds1, BNAN(&dd);
+            sprintf(asmcode, "fcvt.%s f%d, x%d", BIT(ir, 25) ? "d.s" : "s.d", rda, rs1a);
+            break;
+        case 0b11000: // FCVT.I.F
+            switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))
+            {
+            case 0b000: // FCVT.W.S
+                rd = (int32_t)(ss1 + .5f);
+                break;
+            case 0b001: // FCVT.WU.S
+                rd = (uint32_t)(ss1 + .5f);
+                break;
+            case 0b010: // FCVT.L.S
+                rd = (int64_t)(ss1 + .5f);
+                break;
+            case 0b011: // FCVT.LU.S
+                rd = ss1 + .5f;
+                break;
+            case 0b100: // FCVT.W.D
+                rd = (int32_t)(ds1 + .5);
+                break;
+            case 0b101: // FCVT.WU.D
+                rd = (uint32_t)(ds1 + .5);
+                break;
+            case 0b110: // FCVT.L.D
+                rd = (int64_t)(ds1 + .5);
+                break;
+            case 0b111: // FCVT.LU.D
+                rd = ds1 + .5;
+                break;
+            }
+            sprintf(asmcode, "fcvt.%c.%c%s x%d, f%d",
+                    BIT(ir, 21) ? 'l' : 'w', BIT(ir, 25) ? 'd' : 's',
+                    BIT(ir, 20) ? "u" : "", rda, rs1a);
             break;
         case 0b11010: // FCVT.F.I
             switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))

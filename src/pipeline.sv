@@ -464,7 +464,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
                 {2'b0, ir[24:20]} & {7{op[`STORE]}} |
                 {2'b1, ir[24:20]} & {7{op[`STORE_FP]}};
             if (exop[0][`EX_FEQ] | exop[0][`EX_FLT] | exop[0][`EX_FLE] |
-                exop[0][`EX_FMVXF] | exop[0][`EX_FCLASS])
+                exop[0][`EX_FMVXF] | exop[0][`EX_FCLASS] | exop[0][`EX_FCVTIF])
                 out_ex_q[0].rda <= {2'd0, ir[11:7]};
             else out_ex_q[0].rda <=
                 {2'd0, ir[11:7]} & {7{

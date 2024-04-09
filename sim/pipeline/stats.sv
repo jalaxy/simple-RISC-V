@@ -166,19 +166,41 @@ module fpu(input logic clk, input logic rst, input logic flush,
     logic [`fpulatency-1:0][63:0] r_q;
     logic [`fpulatency-1:0][`lgCQSZ:0] valid;
     logic [63:0] res, ad, bd;
+    logic [9:0] fclass;
     real af, bf;
     always_comb begin
-        if (double) ad = a; else if (a[63:32] == -1) ad = single2double(a[31:0]);
+        if (double) ad = a; else if (a[63:32] == -32'd1) ad = single2double(a[31:0]);
         else ad = {-32'd1, 32'h7fc00000};
-        if (double) bd = b; else if (b[63:32] == -1) bd = single2double(b[31:0]);
+        if (double) bd = b; else if (b[63:32] == -32'd1) bd = single2double(b[31:0]);
         else bd = {-32'd1, 32'h7fc00000};
         af = $bitstoreal(ad);
         bf = $bitstoreal(bd);
     end
+    always_comb if (double) fclass[0] = a[63] & a[62:52] == -11'd1 & a[51:0] == 0;
+                       else fclass[0] = a[31] & a[30:23] == -8'd1 & a[22:0] == 0;
+    always_comb if (double) fclass[1] = a[63] & a[62:52] != -11'd1 & a[62:52] != 0;
+                       else fclass[1] = a[31] & a[30:23] != -8'd1 & a[30:23] != 0;
+    always_comb if (double) fclass[2] = a[63] & a[62:52] == 0 & a[51:0] != 0;
+                       else fclass[2] = a[31] & a[30:23] == 0 & a[22:0] != 0;
+    always_comb if (double) fclass[3] = a[63] & a[62:0] == 0;
+                       else fclass[3] = a[31] & a[30:0] == 0;
+    always_comb if (double) fclass[4] = ~a[63] & a[62:0] == 0;
+                       else fclass[4] = ~a[31] & a[30:0] == 0;
+    always_comb if (double) fclass[5] = ~a[63] & a[62:52] == 0 & a[51:0] != 0;
+                       else fclass[5] = ~a[31] & a[30:23] == 0 & a[22:0] != 0;
+    always_comb if (double) fclass[6] = ~a[63] & a[62:52] != -11'd1 & a[62:52] != 0;
+                       else fclass[6] = ~a[31] & a[30:23] != -8'd1 & a[30:23] != 0;
+    always_comb if (double) fclass[7] = ~a[63] & a[62:52] == -11'd1 & a[51:0] == 0;
+                       else fclass[7] = ~a[31] & a[30:23] == -8'd1 & a[22:0] == 0;
+    always_comb if (double) fclass[8] = a[62:52] == -11'd1 & a[51] == 0;
+                       else fclass[8] = a[30:23] == -8'd1 & a[22] == 0;
+    always_comb if (double) fclass[9] = a[62:52] == -11'd1 & a[51] == 1;
+                       else fclass[9] = a[30:23] == -8'd1 & a[22] == 1;
     always_comb begin
         res = {64{op[0]}} & $realtobits(af + bf) | // FADD
               {64{op[1]}} & $realtobits(af - bf) | // FSUB
               {64{op[2]}} & $realtobits(af * bf) | // FMUL
+              {64{op[3]}} & $realtobits(-af * bf) | // FNMUL
               {64{op[4]}} & $realtobits(af / bf) | // FDIV
               {64{op[5]}} & $realtobits($sqrt(af)) | // FSQRT
               {64{op[6]}} & {bd[63], ad[62:0]} | // FSGNJ
@@ -190,18 +212,25 @@ module fpu(input logic clk, input logic rst, input logic flush,
               {64{op[12]}} & {63'd0, af < bf} | // FLT
               {64{op[13]}} & {63'd0, af <= bf} | // FLE
               {64{op[14]}} & a | //FMV.X.F
-              {64{op[15]}} & 64'd0 | // FCLASS
+              {64{op[15]}} & {54'd0, fclass} | // FCLASS
               {64{op[16]}} & a | // FMV.F.X
+              {64{op[17] & b[1:0] == 0}} & {32'd0, int'(af)} | // FCVT.W.F
+              {64{op[17] & b[1:0] == 1}} & {32'd0, $signed(int'(af))} | // FCVT.WU.F
+              {64{op[17] & b[1:0] == 2}} & longint'(af) | // FCVT.L.F
+              {64{op[17] & b[1:0] == 3}} & $signed(longint'(af)) | // FCVT.LU.F
               {64{op[18] & b[1:0] == 0}} &
-                    $realtobits($itor($signed({{32{a[31]}}, a[31:0]}))) | // FCVT.F.W
+                    $realtobits(real'($signed({{32{a[31]}}, a[31:0]}))) | // FCVT.F.W
               {64{op[18] & b[1:0] == 1}} &
-                    $realtobits($itor({32'd0, a[31:0]})) | // FCVT.F.WU
-              {64{op[18] & b[1:0] == 2}} & $realtobits($itor($signed(a))) | // FCVT.F.L
-              {64{op[18] & b[1:0] == 3}} & $realtobits($itor(a)) | // FCVT.F.LU
+                    $realtobits(real'({32'd0, a[31:0]})) | // FCVT.F.WU
+              {64{op[18] & b[1:0] == 2}} & $realtobits(real'($signed(a))) | // FCVT.F.L
+              {64{op[18] & b[1:0] == 3}} & $realtobits(real'(a)) | // FCVT.F.LU
+              {64{op[19]}} & a | // FCVT.S.D
+              {64{op[20]}} & single2double(a[31:0]) | // FCVT.D.S
               0;
+        if (op[17] & b[1:0] == 0) res = {{32{res[31]}}, res[31:0]};
         if (op[16]) begin
             if (~double) res = {-32'd1, res[31:0]};
-        end else if (~op[11] & ~op[12] & ~op[13] & ~op[14] & ~op[15]) begin
+        end else if (~op[11] & ~op[12] & ~op[13] & ~op[14] & ~op[15] & ~op[17]) begin
             if (res[62:52] == 11'h7ff) res = 64'h7ff8_0000_0000_0000;
             if (~double) res = {-32'd1, double2single(res, rm)};
         end
