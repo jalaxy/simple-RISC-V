@@ -308,12 +308,24 @@ void simulator::step(int nojump)
                 rd = (int64_t)(int32_t)((uint32_t)rs1 >> (uint32_t)rs2);
         break;
     case 0b10000: // MADD
+        BIT(ir, 25) ? (dd = ds1 * ds2 + ds3) : (sd = ss1 * ss2 + ss3, BNAN(&dd));
+        sprintf(asmcode, "fmadd.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
+                rda, rs1a, rs2a, rs3a);
         break;
     case 0b10001: // MSUB
+        BIT(ir, 25) ? (dd = ds1 * ds2 - ds3) : (sd = ss1 * ss2 - ss3, BNAN(&dd));
+        sprintf(asmcode, "fmsub.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
+                rda, rs1a, rs2a, rs3a);
         break;
     case 0b10010: // NMSUB
+        BIT(ir, 25) ? (dd = -ds1 * ds2 + ds3) : (sd = -ss1 * ss2 + ss3, BNAN(&dd));
+        sprintf(asmcode, "fnmsub.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
+                rda, rs1a, rs2a, rs3a);
         break;
     case 0b10011: // NMADD
+        BIT(ir, 25) ? (dd = -ds1 * ds2 - ds3) : (sd = -ss1 * ss2 - ss3, BNAN(&dd));
+        sprintf(asmcode, "fnmadd.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
+                rda, rs1a, rs2a, rs3a);
         break;
     case 0b10100: // OP-FP
         switch (BITS(ir, 27, 31))
@@ -408,28 +420,28 @@ void simulator::step(int nojump)
             switch ((BIT(ir, 25) << 2) | BITS(ir, 20, 21))
             {
             case 0b000: // FCVT.W.S
-                rd = (int32_t)(ss1 + .5f);
+                rd = (int32_t)round(ss1);
                 break;
             case 0b001: // FCVT.WU.S
-                rd = (uint32_t)(ss1 + .5f);
+                rd = (uint32_t)round(ss1);
                 break;
             case 0b010: // FCVT.L.S
-                rd = (int64_t)(ss1 + .5f);
+                rd = (int64_t)round(ss1);
                 break;
             case 0b011: // FCVT.LU.S
-                rd = ss1 + .5f;
+                rd = round(ss1);
                 break;
             case 0b100: // FCVT.W.D
-                rd = (int32_t)(ds1 + .5);
+                rd = (int32_t)round(ds1);
                 break;
             case 0b101: // FCVT.WU.D
-                rd = (uint32_t)(ds1 + .5);
+                rd = (uint32_t)round(ds1);
                 break;
             case 0b110: // FCVT.L.D
-                rd = (int64_t)(ds1 + .5);
+                rd = (int64_t)round(ds1);
                 break;
             case 0b111: // FCVT.LU.D
-                rd = ds1 + .5;
+                rd = round(ds1);
                 break;
             }
             sprintf(asmcode, "fcvt.%c.%c%s x%d, f%d",

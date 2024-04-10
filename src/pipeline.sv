@@ -370,12 +370,8 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         exop[0][`EX_REMUW] = op[`OP_32] & ir[14:12] == 3'b111 & ir[31:25] == 7'b1;
         exop[0][`EX_FADD] = op[`OP_FP] & ir[31:26] == 6'b000000;
         exop[0][`EX_FSUB] = op[`OP_FP] & ir[31:26] == 6'b000010;
-        exop[0][`EX_FMUL] = op[`OP_FP] & ir[31:26] == 6'b000100 |
-            op[`MADD] & ir[26:25] == 2'd0 |
-            op[`MSUB] & ir[26:25] == 2'd0;
-        exop[0][`EX_FNMUL] =
-            op[`NMADD] & ir[26:25] == 2'd0 |
-            op[`NMSUB] & ir[26:25] == 2'd0;
+        exop[0][`EX_FMUL] = op[`OP_FP] & ir[31:26] == 6'b000100 | op[`MADD] | op[`MSUB];
+        exop[0][`EX_FNMUL] = op[`NMADD] | op[`NMSUB];
         exop[0][`EX_FDIV] = op[`OP_FP] & ir[31:26] == 6'b000110;
         exop[0][`EX_FSQRT] = op[`OP_FP] & ir[31:26] == 6'b010110 & ir[24:20] == 5'd0;
         exop[0][`EX_FSGNJ] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b000;
@@ -407,8 +403,8 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         (1 << `EX_MAX)  & {53{op[`AMO] & ir[31:27] == 5'b10100}} |
         (1 << `EX_MINU) & {53{op[`AMO] & ir[31:27] == 5'b11000}} |
         (1 << `EX_MAXU) & {53{op[`AMO] & ir[31:27] == 5'b11100}} |
-        (1 << `EX_FADD) & {53{op[`MADD] | op[`NMADD]}} |
-        (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMSUB]}};
+        (1 << `EX_FADD) & {53{op[`MADD] | op[`NMSUB]}} |
+        (1 << `EX_FSUB) & {53{op[`MSUB] | op[`NMADD]}};
     always_comb exop[2] = (1 << `EX_ADD) & {53{op[`AMO]}};
     always_comb if (exop[0][`EX_FCVTFI] | exop[0][`EX_FMVFX])
             a0 = {1'd1, 59'd0, ir[19:15]};
@@ -476,9 +472,13 @@ module id_stage(input logic clk, input logic rst, input logic flush,
 
             out_ex_q[1].valid <=
                 op[`AMO] | op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD];
+            out_ex_q[1].branch <= in_if.b;
+            out_ex_q[1].c <= in_if.c;
+            out_ex_q[1].pc <= in_if.pc;
+            out_ex_q[1].bpc <= in_if.bpc;
             out_ex_q[1].a <=
                 {1'd1, 59'd0, ir[11:7]} & {65{op[`AMO]}} |
-                {1'd1, 59'd3, 5'd0} & {65{
+                {1'd1, 59'd2, 5'd0} & {65{
                     op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
             out_ex_q[1].b <=
                 {1'd1, 59'd0, ir[24:20]} & {65{op[`AMO]}} |
@@ -496,6 +496,10 @@ module id_stage(input logic clk, input logic rst, input logic flush,
                 {2'd1, ir[11:7]} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
 
             out_ex_q[2].valid <= op[`AMO];
+            out_ex_q[2].branch <= in_if.b;
+            out_ex_q[2].c <= in_if.c;
+            out_ex_q[2].pc <= in_if.pc;
+            out_ex_q[2].bpc <= in_if.bpc;
             out_ex_q[2].a <= {1'd1, 59'd0, ir[19:15]} & {65{op[`AMO]}};
             out_ex_q[2].b <= {1'd0, imm} & {65{op[`AMO]}};
             out_ex_q[2].exop <= exop[2];
@@ -513,7 +517,9 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         else if (a0[64]) raddr[0] = a0[6:0];
         else if (op[`JALR]) raddr[0] = {2'd0, ir[19:15]};
         else raddr[0] = 0;
-    always_comb if (b0[64]) raddr[1] = b0[6:0];
+    always_comb if (out_ex_q[1].valid & out_ex_q[1].b[64])
+            raddr[1] = out_ex_q[1].b[6:0];
+        else if (b0[64]) raddr[1] = b0[6:0];
         else if (op[`STORE]) raddr[1] = {2'b0, ir[24:20]};
         else if (op[`STORE_FP]) raddr[1] = {2'b1, ir[24:20]};
         else raddr[1] = 0;
@@ -643,7 +649,8 @@ module ex_stage(input logic clk, input logic rst,
             {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
     always_ff @(posedge clk) if (rst) pt_done <= 0;
         else if (frompt & ~lsu)
-            {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & excp};
+            if (res[64]) pt_done <= 0;
+            else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & excp};
         else if (ena_arb) pt_done <= 0;
     always_ff @(posedge clk) if (rst) addr_done <= 0;
         else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};

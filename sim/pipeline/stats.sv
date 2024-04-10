@@ -31,12 +31,12 @@ module stats(
 
     // monitor registers change
     always_comb {cmtpc[0], cmtaddr[0], cmtdata[0]} =
-        pipeline_inst.wb_stage_inst.cqpop1 ?
+        pipeline_inst.wb_stage_inst.cqpop1 & ~pipeline_inst.wb_stage_inst.cqrda[6] ?
             {pipeline_inst.wb_stage_inst.cqpc,
              pipeline_inst.wb_stage_inst.cqrda,
              pipeline_inst.wb_stage_inst.cqfrontval[63:0]} : 0;
     always_comb {cmtpc[1], cmtaddr[1], cmtdata[1]} =
-        pipeline_inst.wb_stage_inst.cqpop2 ?
+        pipeline_inst.wb_stage_inst.cqpop2 & ~pipeline_inst.wb_stage_inst.cqrdap1[6] ?
             {pipeline_inst.wb_stage_inst.cqpcp1,
              pipeline_inst.wb_stage_inst.cqrdap1,
              pipeline_inst.wb_stage_inst.cqfrontp1val[63:0]} : 0;
