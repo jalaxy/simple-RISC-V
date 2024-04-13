@@ -1005,9 +1005,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
                 endcase
         through = rqst[`lgCQSZ] & ~wena & ~addr[64];
         if (rqst[`lgCQSZ] & ~wena)
-            for (int iext = {{32-`lgLSQSZ{1'b0}}, front};
-                     iext < {{32-`lgLSQSZ{1'b0}}, front} + `LSQSZ; iext++) begin
-                automatic logic [`lgLSQSZ-1:0] i = iext[`lgLSQSZ-1:0];
+            for (int d = 0; d < `LSQSZ; d++) begin
+                automatic logic [`lgLSQSZ-1:0] i = front + d[`lgLSQSZ-1:0];
                 if (lsqrqst[i][`lgCQSZ] & ~lsqwena[i] & lsqequal[i]) // CoRR
                     {fwd, through} = 0;
                 else if (lsqrqst[i][`lgCQSZ] & lsqwena[i] & ~lsqold[i])
