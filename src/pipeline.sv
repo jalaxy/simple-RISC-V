@@ -980,7 +980,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     logic [`LSQSZ-1:0][64:0] lsqaddr;
     logic [`LSQSZ-1:0][64:0] lsqdata;
     logic [`LSQSZ-1:0][2:0] lsqbits;
-    logic [`LSQSZ-1:0] lsqcmt, lsqwena, lsqold, lsqequal;
+    logic [`LSQSZ-1:0] lsqcmt, lsqwena, lsqfwd;
     logic [`lgLSQSZ-1:0] front, rear;
     logic full, empty, push, pop, through;
     logic [`lgCQSZ:0] fwd, fwd_r; logic [64:0] fwddata, fwddata_r;
@@ -993,28 +993,14 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_comb get = ~rqst[`lgCQSZ] | push | through | ~wena & fwd[`lgCQSZ] &
         ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ]);
     always_comb begin
-        {lsqequal, fwd, fwddata} = 0;
-        if (rqst[`lgCQSZ]) for (int i = 0; i < `LSQSZ; i++)
-            if (lsqaddr[i] == addr) lsqequal[i] = 1;
-            else if (~lsqaddr[i][64] & ~addr[64])
-                case (lsqbits[i][1:0] > bits[1:0] ? lsqbits[i][1:0] : bits[1:0])
-                    0: lsqequal[i] = lsqaddr[i][63:0] == addr[63:0];
-                    1: lsqequal[i] = lsqaddr[i][63:1] == addr[63:1];
-                    2: lsqequal[i] = lsqaddr[i][63:2] == addr[63:2];
-                    3: lsqequal[i] = lsqaddr[i][63:3] == addr[63:3];
-                endcase
+        {fwd, fwddata} = 0;
         through = rqst[`lgCQSZ] & ~wena & ~addr[64];
         if (rqst[`lgCQSZ] & ~wena)
-            for (int d = 0; d < `LSQSZ; d++) begin
-                automatic logic [`lgLSQSZ-1:0] i = front + d[`lgLSQSZ-1:0];
-                if (lsqrqst[i][`lgCQSZ] & ~lsqwena[i] & lsqequal[i]) // CoRR
-                    {fwd, through} = 0;
-                else if (lsqrqst[i][`lgCQSZ] & lsqwena[i] & ~lsqold[i])
-                    if (lsqequal[i] & lsqbits[i][1:0] >= bits[1:0] & ~lsqdata[i][64])
-                        {through, fwd, fwddata} = {1'b0, rqst,
-                            lsqdata[i] << ({3'd0, lsqaddr[i][2:0]} << 3)
-                                       >> ({3'd0, addr[2:0]}       << 3)};
-                    else if (lsqaddr[i][64] | lsqequal[i]) {fwd, through} = 0;
+            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
+                if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) through = 0;
+                if (~lsqaddr[i][64] & ~lsqdata[i][64] & lsqfwd[i] & lsqwena[i] &
+                    addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
+                    {fwd, fwddata} = {rqst, lsqdata[i]};
             end
     end
     always_ff @(posedge clk) if (rst | flush) fwd_r <= 0;
@@ -1036,7 +1022,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
             if (pop) begin lsqrqst[front] <= 0; front <= front + 1; end
             if (push) begin
                 rear <= rear + 1; lsqcmt[rear] <= cmt & empty;
-                lsqrqst[rear] <= rqst; lsqwena[rear] <= wena; lsqold[rear] <= 0;
+                lsqrqst[rear] <= rqst; lsqwena[rear] <= wena; lsqfwd[rear] <= ~addr[64];
                 lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
                 if (addr[64] & addr_done == addr[`lgCQSZ:0])
                     lsqaddr[rear] <= {1'b0, addr_val};
@@ -1046,7 +1032,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
             if (cmt) lsqcmt[front] <= 1;
             if (cmtp1) lsqcmt[front + 1] <= 1;
             for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
-                if (lsqequal[i] & wena) lsqold[i] <= 1;
+                if (push & (addr[64] | addr[64:3] == lsqaddr[i][64:3]))
+                    lsqfwd[i] <= 0;
                 if (lsqaddr[i][64] & addr_done == lsqaddr[i][`lgCQSZ:0])
                     lsqaddr[i] <= {1'b0, addr_val};
                 if (lsqdata[i][64] & late_done == lsqdata[i][`lgCQSZ:0])
