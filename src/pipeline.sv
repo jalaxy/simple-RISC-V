@@ -839,6 +839,126 @@ module pending_table(input logic clk, input logic rst, input logic flush,
         else {a[i], b[i]} <= {fwd_a[i], fwd_b[i]};
 endmodule
 
+module lsu(input logic clk, input logic rst, input logic flush,
+    input logic ena, output logic get,
+    input logic cmt, input logic cmtp1,
+    input logic [11:0] fence, input logic [1:0] rsrv, input logic [1:0] aqrl,
+    input logic [`lgCQSZ:0] rqst, input logic wena,
+    input logic [64:0] addr, input logic [2:0] bits,
+    output logic [`lgCQSZ:0] done, output logic excp,
+    output logic [64:0] rdata, input logic [64:0] wdata,
+    input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
+    input logic [`lgCQSZ:0] addr_done, input logic [63:0] addr_val,
+    output logic [`lgCQSZ:0] dcache_rqst,
+    output logic       [1:0] dcache_rsrv,
+    output logic             dcache_wena,
+    output logic      [63:0] dcache_addr,
+    output logic       [2:0] dcache_bits,
+    input  logic [`lgCQSZ:0] dcache_done,
+    input  logic      [63:0] dcache_rdat,
+    output logic      [63:0] dcache_wdat
+);
+    logic [`LSQSZ-1:0][`lgCQSZ:0] lsqrqst;
+    logic [`LSQSZ-1:0][64:0] lsqaddr;
+    logic [`LSQSZ-1:0][64:0] lsqdata;
+    logic [`LSQSZ-1:0][2:0] lsqbits;
+    logic [`LSQSZ-1:0][1:0] lsqrsrv;
+    logic [`LSQSZ-1:0] lsqcmt, lsqwena, lsqfwd, lsqraq;
+    logic [`lgLSQSZ-1:0] front, rear;
+    logic full, empty, push, pop, through;
+    logic [`lgCQSZ:0] fwd, fwd_r; logic [64:0] fwddata, fwddata_r;
+    always_comb push = rqst[`lgCQSZ] &
+        (wena | ~(through | fwd[`lgCQSZ] & ~|rsrv)) & (~full | pop);
+    always_comb if (~empty & ~through)
+        if (lsqwena[front])
+            pop = (cmt | lsqcmt[front]) & ~lsqaddr[front][64] & ~lsqdata[front][64];
+        else pop = ~lsqaddr[front][64]; else pop = 0;
+    always_comb get = ~rqst[`lgCQSZ] | push | through | ~wena & fwd[`lgCQSZ] &
+        ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ]);
+    always_comb begin
+        {fwd, fwddata} = 0;
+        through = rqst[`lgCQSZ] & ~wena & ~addr[64];
+        if (rqst[`lgCQSZ] & ~wena)
+            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
+                if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) through = 0;
+                if (~lsqaddr[i][64] & ~lsqdata[i][64] &
+                    lsqfwd[i] & lsqwena[i] & ~|lsqrsrv[i] &
+                    addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
+                    {fwd, fwddata} = {rqst, lsqdata[i]};
+            end
+        for (int i = 0; i < `LSQSZ; i++)
+            if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) {fwd, through} = 0;
+        if (aqrl[0]) {fwd, through} = 0;
+    end
+    always_ff @(posedge clk) if (rst | flush) fwd_r <= 0;
+        else if (fwd[`lgCQSZ] & ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ])) begin
+            fwd_r <= fwd;
+            case (bits[1:0])
+                0: fwddata_r <= {1'b0, {56{fwddata[7] & ~bits[2]}}, fwddata[7:0]};
+                1: fwddata_r <= {1'b0, {48{fwddata[15] & ~bits[2]}}, fwddata[15:0]};
+                2: fwddata_r <= {1'b0, {32{fwddata[31] & ~bits[2]}}, fwddata[31:0]};
+                3: fwddata_r <= fwddata;
+            endcase
+        end else if (fwd_r[`lgCQSZ] & ~dcache_done[`lgCQSZ]) fwd_r <= 0;
+    always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
+        else begin
+            if (pop & ~push & front + `lgLSQSZ'b1 == rear) empty <= 1;
+            if (push & ~pop & rear + `lgLSQSZ'b1 == front) full <= 1;
+            if (push) empty <= 0;
+            if (pop & ~push) full <= 0;
+            if (pop) begin lsqrqst[front] <= 0; front <= front + 1; end
+            if (push) begin
+                rear <= rear + 1; lsqcmt[rear] <= cmt & empty;
+                lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1];
+                lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
+                lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
+                if (addr[64] & addr_done == addr[`lgCQSZ:0])
+                    lsqaddr[rear] <= {1'b0, addr_val};
+                if (wdata[64] & late_done == wdata[`lgCQSZ:0])
+                    lsqdata[rear] <= late_val;
+            end
+            if (cmt) lsqcmt[front] <= 1;
+            if (cmtp1) lsqcmt[front + 1] <= 1;
+            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
+                if (push & (addr[64] | addr[64:3] == lsqaddr[i][64:3])) lsqfwd[i] <= 0;
+                if (lsqaddr[i][64] & addr_done == lsqaddr[i][`lgCQSZ:0])
+                    lsqaddr[i] <= {1'b0, addr_val};
+                if (lsqdata[i][64] & late_done == lsqdata[i][`lgCQSZ:0])
+                    lsqdata[i] <= late_val;
+            end
+            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
+                if (fence[1] & (~lsqwena[i] & fence[5] | lsqwena[i] & fence[4]))
+                    lsqraq[i] <= 1;
+        end
+    always_comb dcache_rqst = through ? rqst : (pop ? lsqrqst[front] : 0);
+    always_comb dcache_rsrv = through ? rsrv : lsqrsrv[front];
+    always_comb dcache_wena = through ? wena : lsqwena[front];
+    always_comb dcache_addr = through ? addr[63:0] : lsqaddr[front][63:0];
+    always_comb dcache_bits = through ? bits : lsqbits[front];
+    always_comb done = dcache_done[`lgCQSZ] ? dcache_done : fwd_r;
+    always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : fwddata_r;
+    always_comb excp = 0;
+    always_comb dcache_wdat = lsqdata[front][63:0];
+endmodule
+
+module arbiter(
+    input logic [`LATENUM-1:0][`lgCQSZ:0] done_in,
+    input logic [`LATENUM-1:0][64:0] val_in,
+    input logic [`LATENUM-1:0] exc_in,
+    output logic [`lgCQSZ:0] done_out,
+    output logic [64:0] val_out, output logic exc_out,
+    output logic [`LATENUM-1:0] get);
+    always_comb begin
+        get = 0;
+        {done_out, val_out, exc_out} = 0;
+        for (int i = `LATENUM - 1; i >= 0; i--) if (done_in[i][`lgCQSZ]) begin
+            get = 1 << i;
+            {done_out, val_out, exc_out} = {done_in[i], val_in[i], exc_in[i]};
+        end
+        for (int i = 0; i < `LATENUM; i++) if (~done_in[i][`lgCQSZ]) get[i] = 1;
+    end
+endmodule
+
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
     logic [7:0][4:0] map;
     always_comb map = {5'd15, 5'd14, 5'd13, 5'd12, 5'd11, 5'd10, 5'd9, 5'd8};
@@ -961,119 +1081,4 @@ module ci2i(input logic [31:0] ci, output logic [31:0] i);
                      {ci[11:10], 3'd0}, 7'h23};
             default: i = 0; // an illegal instruction
         endcase
-endmodule
-
-module lsu(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic cmt, input logic cmtp1,
-    input logic [11:0] fence, input logic [1:0] rsrv, input logic [1:0] aqrl,
-    input logic [`lgCQSZ:0] rqst, input logic wena,
-    input logic [64:0] addr, input logic [2:0] bits,
-    output logic [`lgCQSZ:0] done, output logic excp,
-    output logic [64:0] rdata, input logic [64:0] wdata,
-    input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
-    input logic [`lgCQSZ:0] addr_done, input logic [63:0] addr_val,
-    output logic [`lgCQSZ:0] dcache_rqst,
-    output logic       [1:0] dcache_rsrv,
-    output logic             dcache_wena,
-    output logic      [63:0] dcache_addr,
-    output logic       [2:0] dcache_bits,
-    input  logic [`lgCQSZ:0] dcache_done,
-    input  logic      [63:0] dcache_rdat,
-    output logic      [63:0] dcache_wdat
-);
-    logic [`LSQSZ-1:0][`lgCQSZ:0] lsqrqst;
-    logic [`LSQSZ-1:0][64:0] lsqaddr;
-    logic [`LSQSZ-1:0][64:0] lsqdata;
-    logic [`LSQSZ-1:0][2:0] lsqbits;
-    logic [`LSQSZ-1:0][1:0] lsqrsrv;
-    logic [`LSQSZ-1:0] lsqcmt, lsqwena, lsqfwd;
-    logic [`lgLSQSZ-1:0] front, rear;
-    logic full, empty, push, pop, through;
-    logic [`lgCQSZ:0] fwd, fwd_r; logic [64:0] fwddata, fwddata_r;
-    always_comb push = rqst[`lgCQSZ] &
-        (wena | ~(through | fwd[`lgCQSZ] & ~|rsrv)) & (~full | pop);
-    always_comb if (~empty & ~through)
-        if (lsqwena[front])
-            pop = (cmt | lsqcmt[front]) & ~lsqaddr[front][64] & ~lsqdata[front][64];
-        else pop = ~lsqaddr[front][64]; else pop = 0;
-    always_comb get = ~rqst[`lgCQSZ] | push | through | ~wena & fwd[`lgCQSZ] &
-        ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ]);
-    always_comb begin
-        {fwd, fwddata} = 0;
-        through = rqst[`lgCQSZ] & ~wena & ~addr[64];
-        if (rqst[`lgCQSZ] & ~wena)
-            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
-                if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) through = 0;
-                if (~lsqaddr[i][64] & ~lsqdata[i][64] &
-                    lsqfwd[i] & lsqwena[i] & ~|lsqrsrv[i] &
-                    addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
-                    {fwd, fwddata} = {rqst, lsqdata[i]};
-            end
-    end
-    always_ff @(posedge clk) if (rst | flush) fwd_r <= 0;
-        else if (fwd[`lgCQSZ] & ~(fwd_r[`lgCQSZ] & dcache_done[`lgCQSZ])) begin
-            fwd_r <= fwd;
-            case (bits[1:0])
-                0: fwddata_r <= {1'b0, {56{fwddata[7] & ~bits[2]}}, fwddata[7:0]};
-                1: fwddata_r <= {1'b0, {48{fwddata[15] & ~bits[2]}}, fwddata[15:0]};
-                2: fwddata_r <= {1'b0, {32{fwddata[31] & ~bits[2]}}, fwddata[31:0]};
-                3: fwddata_r <= fwddata;
-            endcase
-        end else if (fwd_r[`lgCQSZ] & ~dcache_done[`lgCQSZ]) fwd_r <= 0;
-    always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
-        else begin
-            if (pop & ~push & front + `lgLSQSZ'b1 == rear) empty <= 1;
-            if (push & ~pop & rear + `lgLSQSZ'b1 == front) full <= 1;
-            if (push) empty <= 0;
-            if (pop & ~push) full <= 0;
-            if (pop) begin lsqrqst[front] <= 0; front <= front + 1; end
-            if (push) begin
-                rear <= rear + 1; lsqcmt[rear] <= cmt & empty;
-                lsqfwd[rear] <= ~addr[64];
-                lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
-                lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
-                if (addr[64] & addr_done == addr[`lgCQSZ:0])
-                    lsqaddr[rear] <= {1'b0, addr_val};
-                if (wdata[64] & late_done == wdata[`lgCQSZ:0])
-                    lsqdata[rear] <= late_val;
-            end
-            if (cmt) lsqcmt[front] <= 1;
-            if (cmtp1) lsqcmt[front + 1] <= 1;
-            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
-                if (push & (addr[64] | addr[64:3] == lsqaddr[i][64:3]))
-                    lsqfwd[i] <= 0;
-                if (lsqaddr[i][64] & addr_done == lsqaddr[i][`lgCQSZ:0])
-                    lsqaddr[i] <= {1'b0, addr_val};
-                if (lsqdata[i][64] & late_done == lsqdata[i][`lgCQSZ:0])
-                    lsqdata[i] <= late_val;
-            end
-        end
-    always_comb dcache_rqst = through ? rqst : (pop ? lsqrqst[front] : 0);
-    always_comb dcache_rsrv = through ? rsrv : lsqrsrv[front];
-    always_comb dcache_wena = through ? wena : lsqwena[front];
-    always_comb dcache_addr = through ? addr[63:0] : lsqaddr[front][63:0];
-    always_comb dcache_bits = through ? bits : lsqbits[front];
-    always_comb done = dcache_done[`lgCQSZ] ? dcache_done : fwd_r;
-    always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : fwddata_r;
-    always_comb excp = 0;
-    always_comb dcache_wdat = lsqdata[front][63:0];
-endmodule
-
-module arbiter(
-    input logic [`LATENUM-1:0][`lgCQSZ:0] done_in,
-    input logic [`LATENUM-1:0][64:0] val_in,
-    input logic [`LATENUM-1:0] exc_in,
-    output logic [`lgCQSZ:0] done_out,
-    output logic [64:0] val_out, output logic exc_out,
-    output logic [`LATENUM-1:0] get);
-    always_comb begin
-        get = 0;
-        {done_out, val_out, exc_out} = 0;
-        for (int i = `LATENUM - 1; i >= 0; i--) if (done_in[i][`lgCQSZ]) begin
-            get = 1 << i;
-            {done_out, val_out, exc_out} = {done_in[i], val_in[i], exc_in[i]};
-        end
-        for (int i = 0; i < `LATENUM; i++) if (~done_in[i][`lgCQSZ]) get[i] = 1;
-    end
 endmodule
