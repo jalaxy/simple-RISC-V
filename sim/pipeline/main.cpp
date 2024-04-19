@@ -39,9 +39,15 @@ typedef struct struct_icache_req
 
 typedef struct struct_dcache_req
 {
-    uint8_t rqst = 0, bits = 0, wena = 0;
+    uint8_t rqst = 0, bits = 0, wena = 0, rsrv = 0;
     uint64_t addr = 0, wdata = 0;
 } dcache_req_t;
+
+typedef struct struct_commit
+{
+    int cycle, addr;
+    uint64_t pc, data;
+} commit_t;
 
 typedef struct struct_store
 {
@@ -145,7 +151,7 @@ int main(int argc, char **argv)
     }
 
     // Load and set reset code in memory
-    std::map<uint64_t, uint8_t> memory;
+    std::map<uint64_t, uint8_t> memory, reserved;
     std::vector<uint32_t> ini_code;
     htif_t htif;
     FILE *fp = fopen(cmd.filename, "r");
@@ -255,66 +261,80 @@ int main(int argc, char **argv)
     // clock and memory loop
     std::queue<icache_req_t> i_delay;
     std::queue<dcache_req_t> d_delay;
+    std::queue<commit_t> commits;
     std::queue<store_t> stores;
-    for (int i = 0; i < cmd.simtime; i++)
+    int i = 0;
+    while (i < cmd.simtime)
     {
-        // negedge clock
-        dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
-        // posedge clock
-        if (dut->icache_rqst) // record stats before posedge
+        if (commits.size() <= 1)
         {
-            // if (i == 0004) // delay for some cycles in some conditions
-            //     for (int i = 0; i < 0004; i++)
-            //         i_delay.push({0, 0});
-            i_delay.push({1, dut->icache_addr});
-        }
-        if (dut->dcache_rqst)
-            d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena,
-                          dut->dcache_addr, dut->dcache_wdat});
-        dut->clk = 1, dut->eval(); // clock changes first
-        i_delay.empty() ? i_delay.push({0, 0}), 0 : 0;
-        d_delay.empty() ? d_delay.push({0, 0}), 0 : 0;
-        dut->icache_done = i_delay.front().rqst; // other signals change after clk
-        if (i_delay.front().rqst)
-            dut->icache_data = DLE(memory, i_delay.front().addr);
-        dut->dcache_done = d_delay.front().rqst;
-        if (d_delay.front().rqst && !d_delay.front().wena)
-            dut->dcache_rdat = DLE(memory, d_delay.front().addr);
-        // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
-        uint64_t bitwidth = 8 * (1 << (d_delay.front().bits & 3));
-        uint64_t mask = bitwidth < 64 ? (1llu << bitwidth) - 1 : ~0llu;
-        dut->dcache_rdat &= mask;
-        if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
-            dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
-        if (d_delay.front().rqst && d_delay.front().wena)
-        {
-            uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
-            uint8_t width = 1 << (d_delay.front().bits & 3);
-            for (int j = 0; j < width; j++)
-                memory[addr + j] = DTOB(data, j);
-            stores.push({addr, data, width});
-        }
-        i_delay.pop(), d_delay.pop();
-        dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
-        // simulator checker
-        if (!cmd.debug)
-            continue;
-        for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
-            if (dut->cmtpc[j])
+            // negedge clock
+            dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+            // posedge clock
+            if (dut->icache_rqst) // record stats before posedge
             {
-                sim->step();
-                store_t curstore;
-                if (sim->get_mwwidth() && !stores.empty())
-                    curstore = stores.front(), stores.pop();
+                // if (i == 0004) // delay for some cycles in some conditions
+                //     for (int i = 0; i < 0004; i++)
+                //         i_delay.push({0, 0});
+                i_delay.push({1, dut->icache_addr});
+            }
+            if (dut->dcache_rqst)
+                d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena,
+                              dut->dcache_rsrv, dut->dcache_addr, dut->dcache_wdat});
+            dut->clk = 1, dut->eval(); // clock changes first
+            i_delay.empty() ? i_delay.push({0, 0}), 0 : 0;
+            d_delay.empty() ? d_delay.push({0, 0}), 0 : 0;
+            dut->icache_done = i_delay.front().rqst; // other signals change after clk
+            if (i_delay.front().rqst)
+                dut->icache_data = DLE(memory, i_delay.front().addr);
+            dut->dcache_done = d_delay.front().rqst;
+            if (d_delay.front().rqst && !d_delay.front().wena)
+                dut->dcache_rdat = DLE(memory, d_delay.front().addr);
+            if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv)
+                reserved[d_delay.front().addr] = 1;
+            // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
+            uint64_t bitwidth = 8 * (1 << (d_delay.front().bits & 3));
+            uint64_t mask = bitwidth < 64 ? (1llu << bitwidth) - 1 : ~0llu;
+            dut->dcache_rdat &= mask;
+            if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
+                dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
+            if (d_delay.front().rqst && d_delay.front().wena)
+                if (!d_delay.front().rsrv || reserved[d_delay.front().addr])
+                {
+                    uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
+                    uint8_t width = 1 << (d_delay.front().bits & 3);
+                    for (int j = 0; j < width; j++)
+                        memory[addr + j] = DTOB(data, j);
+                    stores.push({addr, data, width});
+                    if (d_delay.front().rsrv)
+                        reserved[addr] = dut->dcache_rdat = 0;
+                }
                 else
-                    curstore = {0, 0, 0};
-                int check = sim->check(dut->cmtpc[j], dut->cmtaddr[j], dut->cmtdata[j],
-                                       curstore.addr, curstore.data, curstore.width);
-                if (check && !cmd.step)
-                    continue;
-                printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", i);
-                printf("DUT:\n    pc: 0x%016lx\n", dut->cmtpc[j]);
-                printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], dut->cmtdata[j]);
+                    dut->dcache_rdat = 1;
+            i_delay.pop(), d_delay.pop();
+            dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
+            for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
+                if (dut->cmtpc[j])
+                    commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j]});
+            i++;
+        }
+        // simulator checker
+        if (cmd.debug && commits.size() > 1)
+        {
+            sim->step();
+            commit_t curcommit = commits.front();
+            store_t curstore;
+            if (sim->get_mwwidth() && !stores.empty())
+                curstore = stores.front(), stores.pop();
+            else
+                curstore = {0, 0, 0};
+            int check = sim->check(curcommit.pc, curcommit.addr, curcommit.data,
+                                   curstore.addr, curstore.data, curstore.width);
+            if (!check || cmd.step)
+            {
+                printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", curcommit.cycle);
+                printf("DUT:\n    pc: 0x%016lx\n", curcommit.pc);
+                printf("    x%d: 0x%016lx\n", curcommit.addr, curcommit.data);
                 if (curstore.width < 8)
                     curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
                 if (sim->get_mwwidth())
@@ -322,7 +342,7 @@ int main(int argc, char **argv)
                            curstore.width, curstore.addr,
                            curstore.width * 2, curstore.data);
                 printf("SIM:\n    pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
-                printf("    x%d: 0x%016lx\n", dut->cmtaddr[j], sim->get_arreg()[dut->cmtaddr[j]]);
+                printf("    x%d: 0x%016lx\n", curcommit.addr, sim->get_arreg()[curcommit.addr]);
                 if (sim->get_mwwidth())
                     printf("    mem%d@0x%lx: 0x%0*lx\n",
                            sim->get_mwwidth(), sim->get_mwaddr(),
@@ -330,6 +350,9 @@ int main(int argc, char **argv)
                 printf("Press Enter to continue...\n");
                 getchar();
             }
+        }
+        if (commits.size() > 1)
+            commits.pop();
     }
     if (cmd.debug)
     {

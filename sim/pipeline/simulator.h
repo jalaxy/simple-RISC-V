@@ -4,7 +4,7 @@
 class simulator
 {
 private:
-    std::map<uint64_t, uint8_t> memory;
+    std::map<uint64_t, uint8_t> memory, reserved;
     uint64_t pc = 0, npc, ir, arregs[64] = {0};
     uint64_t mwaddr, mwdata;
     uint8_t mwwidth;

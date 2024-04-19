@@ -140,6 +140,20 @@ void simulator::step(int nojump)
             sprintf(asmcode, "f%s f%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
     case 0b00011: // MISC-MEM
+        switch (funct3)
+        {
+        case 0b000: // FENCE
+            if (BIT(ir, 31))
+                sprintf(asmcode, "fence.tso");
+            else if ((BIT(ir, 27) | BIT(ir, 26) | BIT(ir, 25) | BIT(ir, 24)) &
+                     (BIT(ir, 23) | BIT(ir, 22) | BIT(ir, 21) | BIT(ir, 20)))
+                sprintf(asmcode, "fence.%s%s%s%s.%s%s%s%s",
+                        BIT(ir, 27) ? "i" : "", BIT(ir, 26) ? "o" : "",
+                        BIT(ir, 25) ? "r" : "", BIT(ir, 24) ? "w" : "",
+                        BIT(ir, 23) ? "i" : "", BIT(ir, 22) ? "o" : "",
+                        BIT(ir, 21) ? "r" : "", BIT(ir, 20) ? "w" : "");
+            break;
+        }
         break;
     case 0b00100: // OP-IMM
         imm = SEXT(BITS(ir, 20, 31), 12);
@@ -206,6 +220,79 @@ void simulator::step(int nojump)
                     BIT(ir, 2) ? 'f' : 'x', rs2a, imm, rs1a);
         break;
     case 0b01011: // AMO
+        switch (BITS(ir, 27, 31))
+        {
+        case 0b00010: // LR
+            rd = DLE(memory, rs1);
+            reserved[rs1] = reserved[rs1 + 1] = reserved[rs1 + 2] = reserved[rs1 + 3] = 1;
+            if (funct3 == 0b010)
+                rd = (int64_t)(int32_t)rd;
+            else // LR.D
+                reserved[rs1 + 4] = reserved[rs1 + 5] = reserved[rs1 + 6] = reserved[rs1 + 7] = 1;
+            sprintf(asmcode, "lr.%c%s%s x%d, (x%d)", funct3 == 0b010 ? 'w' : 'd',
+                    BIT(ir, 26) ? ".aq" : "", BIT(ir, 25) ? ".rl" : "", rda, rs1a);
+            break;
+        case 0b00011: // SC
+            if (reserved[rs1] & reserved[rs1 + 1] & reserved[rs1 + 2] & reserved[rs1 + 3] &
+                (funct3 == 0b010 |
+                 reserved[rs1 + 4] & reserved[rs1 + 5] & reserved[rs1 + 6] & reserved[rs1 + 7]))
+            {
+                reserved[rs1] = reserved[rs1 + 1] = reserved[rs1 + 2] = reserved[rs1 + 3] = 0;
+                if (funct3 == 0b011)
+                    reserved[rs1 + 4] = reserved[rs1 + 5] = reserved[rs1 + 6] = reserved[rs1 + 7] = 0;
+                rd = 0;
+                mwaddr = rs1, mwdata = rs2;
+                mwwidth = 1 << BITS(ir, 12, 13);
+                if (mwwidth < 8)
+                    mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
+                for (int i = 0; i < mwwidth; i++)
+                    memory[mwaddr + i] = DTOB(mwdata, i);
+            }
+            else
+                rd = 1;
+            sprintf(asmcode, "sc.%c%s%s x%d, x%d, (x%d)", funct3 == 0b010 ? 'w' : 'd',
+                    BIT(ir, 26) ? ".aq" : "", BIT(ir, 25) ? ".rl" : "", rda, rs2a, rs1a);
+            break;
+        default:
+            static const char *aname;
+            static uint64_t rdata;
+            rdata = DLE(memory, rs1);
+            if (funct3 == 0b010) // AMO*.W
+                rdata = (int64_t)(int32_t)rdata, rs2 = (int64_t)(int32_t)rs2;
+            aname = NULL;
+            if (BITS(ir, 27, 31) == 0b00001) // AMOSWAP
+                aname = "swap", mwdata = rs2;
+            if (BITS(ir, 27, 31) == 0b00000) // AMOADD
+                aname = "add", mwdata = rs2 + rdata;
+            if (BITS(ir, 27, 31) == 0b00100) // AMOXOR
+                aname = "xor", mwdata = rs2 ^ rdata;
+            if (BITS(ir, 27, 31) == 0b01100) // AMOAND
+                aname = "and", mwdata = rs2 & rdata;
+            if (BITS(ir, 27, 31) == 0b01000) // AMOOR
+                aname = "or", mwdata = rs2 | rdata;
+            if (BITS(ir, 27, 31) == 0b10000) // AMOMIN
+                aname = "min", mwdata = (int64_t)rs2 < (int64_t)rdata ? rs2 : rdata;
+            if (BITS(ir, 27, 31) == 0b10100) // AMOMAX
+                aname = "max", mwdata = (int64_t)rs2 > (int64_t)rdata ? rs2 : rdata;
+            if (BITS(ir, 27, 31) == 0b11000) // AMOMINU
+                aname = "minu", mwdata = rs2 < rdata ? rs2 : rdata;
+            if (BITS(ir, 27, 31) == 0b11100) // AMOMAXU
+                aname = "maxu", mwdata = rs2 > rdata ? rs2 : rdata;
+            if (aname == NULL)
+                break;
+            mwaddr = rs1;
+            mwwidth = 1 << BITS(ir, 12, 13);
+            rd = rdata;
+            if (funct3 == 0b010) // AMO*.W
+                rd = (int64_t)(int32_t)rd;
+            if (mwwidth < 8)
+                mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
+            for (int i = 0; i < mwwidth; i++)
+                memory[mwaddr + i] = DTOB(mwdata, i);
+            sprintf(asmcode, "amo%s.%c%s%s x%d, x%d, (x%d)", aname, funct3 == 0b010 ? 'w' : 'd',
+                    BIT(ir, 26) ? ".aq" : "", BIT(ir, 25) ? ".rl" : "", rda, rs2a, rs1a);
+            break;
+        }
         break;
     case 0b01100: // OP
         static const char *oname[] = {
