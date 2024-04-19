@@ -264,6 +264,7 @@ int main(int argc, char **argv)
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
     int i = 0;
+    uint64_t rsrv_val;
     while (i < cmd.simtime)
     {
         if (commits.size() <= 1)
@@ -298,7 +299,10 @@ int main(int argc, char **argv)
             dut->dcache_rdat &= mask;
             if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
                 dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
+            if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv == 2)
+                rsrv_val = dut->dcache_rdat;
             if (d_delay.front().rqst && d_delay.front().wena)
+            {
                 if (!d_delay.front().rsrv || reserved[d_delay.front().addr])
                 {
                     uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
@@ -311,6 +315,9 @@ int main(int argc, char **argv)
                 }
                 else
                     dut->dcache_rdat = 1;
+                if (d_delay.front().rsrv == 2) // hard reservation should return values again
+                    dut->dcache_rdat = rsrv_val;
+            }
             i_delay.pop(), d_delay.pop();
             dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
             for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)

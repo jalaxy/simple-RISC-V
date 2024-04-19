@@ -446,7 +446,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[0].isign <= (op[`OP_32] | op[`OP_IMM_32]) & ir[30];
             out_ex_q[0].frm <= ir[14:12];
             out_ex_q[0].fdouble <= ir[25];
-            out_ex_q[0].rsrv <= {1'b0, op[`AMO]};
+            out_ex_q[0].rsrv <= {op[`AMO] & |exop1, op[`AMO] & ~|exop1};
             out_ex_q[0].aqrl <= {op[`AMO] & ir[26], op[`AMO] & ir[25]};
             out_ex_q[0].bits <= ir[14:12];
             out_ex_q[0].rmwa <=
@@ -459,9 +459,10 @@ module id_stage(input logic clk, input logic rst, input logic flush,
                 {2'd0, ir[11:7]} & {7{
                     op[`LOAD] | op[`OP_IMM] | op[`AUIPC] | op[`OP_IMM_32] |
                     op[`OP]   | op[`LUI]    | op[`OP_32] | op[`JALR]      |
-                    op[`JAL]  | op[`AMO]}} |
+                    op[`JAL]  | op[`AMO] & ~|exop1}} |
                 {2'd1, ir[11:7]} & {7{op[`LOAD_FP] | op[`OP_FP]}} |
-                {2'd2, 5'd0} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+                {2'd2, 5'd0} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                                  op[`AMO] & |exop1}};
 
             out_ex_q[1].valid <= |exop1 & (
                 op[`AMO] | op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]);
@@ -469,10 +470,8 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[1].c <= in_if.c;
             out_ex_q[1].pc <= in_if.pc;
             out_ex_q[1].bpc <= in_if.bpc;
-            out_ex_q[1].a <=
-                {1'd1, 59'd0, ir[11:7]} & {65{op[`AMO] & ir[31:27] != 5'b00001}} |
-                {1'd1, 59'd2, 5'd0} & {65{
-                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+            out_ex_q[1].a <= {1'd1, 59'd2, 5'd0} & {65{
+                ~(op[`AMO] & ir[31:27] == 5'b00001)}}; // AMOSWAP
             out_ex_q[1].b <=
                 {1'd1, 59'd0, ir[24:20]} & {65{op[`AMO]}} |
                 {1'd1, 59'd1, ir[31:27]} & {65{
@@ -497,12 +496,12 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[2].a <= {1'd1, 59'd0, ir[19:15]} & {65{op[`AMO]}};
             out_ex_q[2].b <= {1'd0, imm} & {65{op[`AMO]}};
             out_ex_q[2].exop <= exop2;
-            out_ex_q[2].rsrv <= {1'b0, op[`AMO]};
+            out_ex_q[2].rsrv <= {op[`AMO] & |exop1, 1'b0};
             out_ex_q[2].bmask <= 0;
             out_ex_q[2].j <= 0;
             out_ex_q[2].bits <= ir[14:12];
             out_ex_q[2].rmwa <= {2'd2, 5'd0} & {7{op[`AMO]}};
-            out_ex_q[2].rda <= {2'd2, 5'd0};
+            out_ex_q[2].rda <= {2'd0, ir[11:7]};
         end else if (ena_ex) begin
             out_ex_q[1:0] <= {out_ex_q[2], out_ex_q[1]};
             out_ex_q[2].valid <= 0;
@@ -993,7 +992,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     logic full, empty, push, pop, through;
     logic [`lgCQSZ:0] fwd, fwd_r; logic [64:0] fwddata, fwddata_r;
     always_comb push = rqst[`lgCQSZ] &
-        (wena | ~through & ~fwd[`lgCQSZ]) & (~full | pop);
+        (wena | ~(through | fwd[`lgCQSZ] & ~|rsrv)) & (~full | pop);
     always_comb if (~empty & ~through)
         if (lsqwena[front])
             pop = (cmt | lsqcmt[front]) & ~lsqaddr[front][64] & ~lsqdata[front][64];
@@ -1007,7 +1006,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
             for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
                 if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) through = 0;
                 if (~lsqaddr[i][64] & ~lsqdata[i][64] &
-                    lsqfwd[i] & lsqwena[i] & ~lsqrsrv[i][0] &
+                    lsqfwd[i] & lsqwena[i] & ~|lsqrsrv[i] &
                     addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
                     {fwd, fwddata} = {rqst, lsqdata[i]};
             end
