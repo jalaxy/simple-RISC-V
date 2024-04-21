@@ -43,6 +43,12 @@ typedef struct struct_dcache_req
     uint64_t addr = 0, wdata = 0;
 } dcache_req_t;
 
+typedef struct struct_dtlb_req
+{
+    uint8_t rqst = 0;
+    uint64_t vadd = 0;
+} dtlb_req_t;
+
 typedef struct struct_commit
 {
     int cycle, addr;
@@ -54,6 +60,11 @@ typedef struct struct_store
     uint64_t addr, data;
     uint8_t width;
 } store_t;
+
+uint64_t vtop(uint64_t vaddr)
+{
+    return vaddr + 0x1230'0000'0000ull;
+}
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
@@ -82,7 +93,7 @@ void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
     printf("Memory@%016lx:\n", addr);
-    simulator sim(addr, mem);
+    simulator sim(addr, mem, vtop);
     while (sim.get_pc() < addr + size)
     {
         sim.step(1);
@@ -242,7 +253,7 @@ int main(int argc, char **argv)
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
 
     // Simulation
-    simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
+    simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory, vtop) : 0;
     Vstats *dut = new (std::nothrow) Vstats;
     VerilatedVcdC *trace = NULL;
     if (cmd.vcd)
@@ -261,6 +272,7 @@ int main(int argc, char **argv)
     // clock and memory loop
     std::queue<icache_req_t> i_delay;
     std::queue<dcache_req_t> d_delay;
+    std::queue<dtlb_req_t> da_delay;
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
     int i = 0;
@@ -282,12 +294,24 @@ int main(int argc, char **argv)
             if (dut->dcache_rqst)
                 d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena,
                               dut->dcache_rsrv, dut->dcache_addr, dut->dcache_wdat});
+            if (dut->dtlb_rqst)
+                da_delay.push({dut->dtlb_rqst, dut->dtlb_vadd});
+            while (dut->icache_flsh && !i_delay.empty())
+                i_delay.pop();
+            while (dut->dcache_flsh && !d_delay.empty())
+                d_delay.pop();
+            while (dut->dcache_flsh && !da_delay.empty())
+                da_delay.pop();
             dut->clk = 1, dut->eval(); // clock changes first
-            i_delay.empty() ? i_delay.push({0, 0}), 0 : 0;
-            d_delay.empty() ? d_delay.push({0, 0}), 0 : 0;
+            i_delay.empty() ? i_delay.push({0}), 0 : 0;
+            d_delay.empty() ? d_delay.push({0}), 0 : 0;
+            da_delay.empty() ? da_delay.push({0}), 0 : 0;
             dut->icache_done = i_delay.front().rqst; // other signals change after clk
             if (i_delay.front().rqst)
                 dut->icache_data = DLE(memory, i_delay.front().addr);
+            dut->dtlb_done = da_delay.front().rqst;
+            if (da_delay.front().rqst)
+                dut->dtlb_padd = vtop(da_delay.front().vadd);
             dut->dcache_done = d_delay.front().rqst;
             if (d_delay.front().rqst && !d_delay.front().wena)
                 dut->dcache_rdat = DLE(memory, d_delay.front().addr);
@@ -318,7 +342,7 @@ int main(int argc, char **argv)
                 if (d_delay.front().rsrv == 2) // hard reservation should return values again
                     dut->dcache_rdat = rsrv_val;
             }
-            i_delay.pop(), d_delay.pop();
+            i_delay.pop(), d_delay.pop(), da_delay.pop();
             dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
             for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
                 if (dut->cmtpc[j])

@@ -5,6 +5,7 @@ class simulator
 {
 private:
     std::map<uint64_t, uint8_t> memory, reserved;
+    uint64_t (*vtop)(uint64_t);
     uint64_t pc = 0, npc, ir, arregs[64] = {0};
     uint64_t mwaddr, mwdata;
     uint8_t mwwidth;
@@ -12,7 +13,9 @@ private:
 
 public:
     int simtime;
-    simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &initmem);
+    simulator(const uint64_t &initpc,
+              const std::map<uint64_t, uint8_t> &initmem,
+              uint64_t (*func)(uint64_t));
     void step(int nojump = 0);
     int check(uint64_t pc, uint64_t rda, uint64_t rd,
               uint64_t mwaddr, uint64_t mwdata, uint8_t mwwidth);

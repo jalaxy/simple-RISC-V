@@ -19,13 +19,18 @@
 
 /**
  * @brief simulator constructor
+ * @param initpc initial pc
  * @param initmem initial memory
+ * @param func function pointer of address translation
  */
-simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &initmem)
+simulator::simulator(const uint64_t &initpc,
+                     const std::map<uint64_t, uint8_t> &initmem,
+                     uint64_t (*func)(uint64_t))
 {
     npc = initpc;
     memory = initmem;
     simtime = 0;
+    this->vtop = func;
 }
 
 /**
@@ -99,7 +104,7 @@ void simulator::step(int nojump)
     uint8_t rda = BITS(ir, 7, 11), rs1a = BITS(ir, 15, 19),
             rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
     uint64_t &rd = arregs[rda], rs1 = arregs[rs1a],
-             rs2 = arregs[rs2a], rs3 = arregs[rs3a];
+             rs2 = arregs[rs2a], rs3 = arregs[rs3a], addr;
     double &dd = *(double *)&arregs[rda + 32], ds1 = *(double *)&arregs[rs1a + 32],
            ds2 = *(double *)&arregs[rs2a + 32], ds3 = *(double *)&arregs[rs3a + 32];
     float &sd = *(float *)&arregs[rda + 32], ss1 = *(float *)&arregs[rs1a + 32],
@@ -113,7 +118,8 @@ void simulator::step(int nojump)
     {
     case 0b00000: // LOAD
         imm = SEXT(BITS(ir, 20, 31), 12);
-        rd = DLE(memory, rs1 + imm);
+        addr = vtop(rs1 + imm);
+        rd = DLE(memory, addr);
         if (funct3 == 0b000) // LB
             rd = (int64_t)(int8_t)rd;
         else if (funct3 == 0b100) // LBU
@@ -132,10 +138,11 @@ void simulator::step(int nojump)
         break;
     case 0b00001: // LOAD-FP
         imm = SEXT(BITS(ir, 20, 31), 12);
+        addr = vtop(rs1 + imm);
         if (funct3 == 0b010) // FLW
-            *(uint32_t *)&sd = DLE(memory, rs1 + imm), BNAN(&dd);
+            *(uint32_t *)&sd = DLE(memory, addr), BNAN(&dd);
         else if (funct3 == 0b011) // FLD
-            *(uint64_t *)&dd = DLE(memory, rs1 + imm);
+            *(uint64_t *)&dd = DLE(memory, addr);
         if (funct3 == 2 || funct3 == 3)
             sprintf(asmcode, "f%s f%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
@@ -152,6 +159,9 @@ void simulator::step(int nojump)
                         BIT(ir, 25) ? "r" : "", BIT(ir, 24) ? "w" : "",
                         BIT(ir, 23) ? "i" : "", BIT(ir, 22) ? "o" : "",
                         BIT(ir, 21) ? "r" : "", BIT(ir, 20) ? "w" : "");
+            break;
+        case 0b001: // FENCE.I
+            sprintf(asmcode, "fence.i");
             break;
         }
         break;
@@ -206,7 +216,7 @@ void simulator::step(int nojump)
     case 0b01000: // STORE
     case 0b01001: // STORE-FP
         imm = SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
-        mwaddr = rs1 + imm;
+        mwaddr = vtop(rs1 + imm);
         mwdata = BIT(ir, 2) ? *(uint64_t *)&ds2 : rs2;
         mwwidth = 1 << BITS(ir, 12, 13);
         if (mwwidth < 8)
@@ -223,7 +233,7 @@ void simulator::step(int nojump)
         switch (BITS(ir, 27, 31))
         {
         case 0b00010: // LR
-            rd = DLE(memory, rs1);
+            rd = DLE(memory, vtop(rs1));
             reserved[rs1] = reserved[rs1 + 1] = reserved[rs1 + 2] = reserved[rs1 + 3] = 1;
             if (funct3 == 0b010)
                 rd = (int64_t)(int32_t)rd;
@@ -241,7 +251,7 @@ void simulator::step(int nojump)
                 if (funct3 == 0b011)
                     reserved[rs1 + 4] = reserved[rs1 + 5] = reserved[rs1 + 6] = reserved[rs1 + 7] = 0;
                 rd = 0;
-                mwaddr = rs1, mwdata = rs2;
+                mwaddr = vtop(rs1), mwdata = rs2;
                 mwwidth = 1 << BITS(ir, 12, 13);
                 if (mwwidth < 8)
                     mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
@@ -256,7 +266,7 @@ void simulator::step(int nojump)
         default:
             static const char *aname;
             static uint64_t rdata;
-            rdata = DLE(memory, rs1);
+            rdata = DLE(memory, vtop(rs1));
             if (funct3 == 0b010) // AMO*.W
                 rdata = (int64_t)(int32_t)rdata, rs2 = (int64_t)(int32_t)rs2;
             aname = NULL;
@@ -280,7 +290,7 @@ void simulator::step(int nojump)
                 aname = "maxu", mwdata = rs2 > rdata ? rs2 : rdata;
             if (aname == NULL)
                 break;
-            mwaddr = rs1;
+            mwaddr = vtop(rs1);
             mwwidth = 1 << BITS(ir, 12, 13);
             rd = rdata;
             if (funct3 == 0b010) // AMO*.W
