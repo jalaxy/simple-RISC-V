@@ -15,11 +15,6 @@ module stats(
     input  logic      [63:0] dcache_rdat,
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh,
-    output logic [`lgCQSZ:0] dtlb_rqst,
-    output logic      [63:0] dtlb_vadd,
-    output logic             dtlb_flsh,
-    input  logic [`lgCQSZ:0] dtlb_done,
-    input  logic      [63:0] dtlb_padd,
     // stats
     output logic [63:0] cmtpc[1:0],
     output logic  [6:0] cmtaddr[1:0],
@@ -34,8 +29,7 @@ module stats(
     pipeline pipeline_inst(clk, rst,
         icache_rqst, icache_addr, icache_flsh, icache_done, icache_data,
         dcache_rqst, dcache_rsrv, dcache_wena, dcache_addr, dcache_bits,
-        dcache_done, dcache_rdat, dcache_wdat, dcache_flsh, dtlb_rqst,
-        dtlb_vadd, dtlb_flsh, dtlb_done, dtlb_padd);
+        dcache_done, dcache_rdat, dcache_wdat, dcache_flsh);
 
     // monitor registers change
     always_comb {cmtpc[0], cmtaddr[0], cmtdata[0]} =
