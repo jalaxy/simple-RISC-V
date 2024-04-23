@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 466
+`define PTLEN 467
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -72,6 +72,7 @@
 `define EX_LOAD   6'd41
 `define EX_STORE  6'd42
 `define EX_FENCE  6'd43
+`define EX_FENCEI 6'd44
 
 typedef struct packed { logic valid, b; logic [63:0] pc, bpc; } pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
@@ -84,7 +85,7 @@ typedef struct packed {
 typedef struct packed {
     logic valid, branch, c;
     logic [63:0] pc, bpc;
-    logic [43:0] exop;
+    logic [44:0] exop;
     logic iword, isign;
     logic [2:0] frm, bmask;
     logic fdouble, bneg, j;
@@ -179,7 +180,8 @@ module pipeline(
         .fpu_free(fpu_free), .fpu_rqst(fpu_rqst),
         .fpu_op(fpu_op), .fpu_a(fpu_a), .fpu_b(fpu_b),
         .fpu_rm(fpu_rm), .fpu_double(fpu_double),
-        .lsu_fence(lsu_fence), .lsu_rsrv(lsu_rsrv), .lsu_aqrl(lsu_aqrl),
+        .lsu_fence(lsu_fence), .lsu_empty(lsu_inst.empty),
+        .lsu_rsrv(lsu_rsrv), .lsu_aqrl(lsu_aqrl),
         .lsu_free(lsu_free), .lsu_rqst(lsu_rqst), .lsu_wena(lsu_wena),
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
@@ -293,7 +295,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
     logic [31:0] ir, op;
     logic [63:0] imm;
     id_ex_t [2:0] out_ex_q;
-    logic [43:0] exop0, exop1, exop2;
+    logic [44:0] exop0, exop1, exop2;
     logic [64:0] a0, b0;
     ci2i ci2i_inst(.ci(in_if.ir), .i(ir));
     always_comb for (int i = 0; i < 32; i++)
@@ -385,21 +387,22 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         exop0[`EX_STORE] = op[`STORE] | op[`STORE_FP] |
             op[`AMO] & ir[31:27] == 5'b00011;
         exop0[`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
+        exop0[`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
         if (ir[1:0] != 2'b11) exop0 = 0;
     end
     always_comb exop1 =
-        (1 << `EX_ADD)  & {44{op[`AMO] & ir[31:27] == 5'b00001}} |
-        (1 << `EX_ADD)  & {44{op[`AMO] & ir[31:27] == 5'b00000}} |
-        (1 << `EX_XOR)  & {44{op[`AMO] & ir[31:27] == 5'b00100}} |
-        (1 << `EX_AND)  & {44{op[`AMO] & ir[31:27] == 5'b01100}} |
-        (1 << `EX_OR)   & {44{op[`AMO] & ir[31:27] == 5'b01000}} |
-        (1 << `EX_MIN)  & {44{op[`AMO] & ir[31:27] == 5'b10000}} |
-        (1 << `EX_MIN)  & {44{op[`AMO] & ir[31:27] == 5'b11000}} |
-        (1 << `EX_MAX)  & {44{op[`AMO] & ir[31:27] == 5'b10100}} |
-        (1 << `EX_MAX)  & {44{op[`AMO] & ir[31:27] == 5'b11100}} |
-        (1 << `EX_FADD) & {44{op[`MADD] | op[`NMSUB]}} |
-        (1 << `EX_FSUB) & {44{op[`MSUB] | op[`NMADD]}};
-    always_comb exop2 = (1 << `EX_STORE) & {44{op[`AMO] & |exop1}};
+        (1 << `EX_ADD)  & {45{op[`AMO] & ir[31:27] == 5'b00001}} |
+        (1 << `EX_ADD)  & {45{op[`AMO] & ir[31:27] == 5'b00000}} |
+        (1 << `EX_XOR)  & {45{op[`AMO] & ir[31:27] == 5'b00100}} |
+        (1 << `EX_AND)  & {45{op[`AMO] & ir[31:27] == 5'b01100}} |
+        (1 << `EX_OR)   & {45{op[`AMO] & ir[31:27] == 5'b01000}} |
+        (1 << `EX_MIN)  & {45{op[`AMO] & ir[31:27] == 5'b10000}} |
+        (1 << `EX_MIN)  & {45{op[`AMO] & ir[31:27] == 5'b11000}} |
+        (1 << `EX_MAX)  & {45{op[`AMO] & ir[31:27] == 5'b10100}} |
+        (1 << `EX_MAX)  & {45{op[`AMO] & ir[31:27] == 5'b11100}} |
+        (1 << `EX_FADD) & {45{op[`MADD] | op[`NMSUB]}} |
+        (1 << `EX_FSUB) & {45{op[`MSUB] | op[`NMADD]}};
+    always_comb exop2 = (1 << `EX_STORE) & {45{op[`AMO] & |exop1}};
     always_comb if (exop0[`EX_FCVTFI] | exop0[`EX_FMVFX])
             a0 = {1'd1, 59'd0, ir[19:15]};
         else a0 = {1'd1, 59'd0, ir[19:15]} & {65{
@@ -540,7 +543,7 @@ module ex_stage(input logic clk, input logic rst,
     output logic [63:0] fpu_a, output logic [63:0] fpu_b,
     output logic [2:0] fpu_rm, output logic fpu_double,
     input logic lsu_free, output logic [`lgCQSZ:0] lsu_rqst,
-    output logic [11:0] lsu_fence,
+    output logic [11:0] lsu_fence, input logic lsu_empty,
     output logic [1:0] lsu_rsrv, output logic [1:0] lsu_aqrl,
     output logic lsu_wena, output logic [64:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
@@ -554,13 +557,13 @@ module ex_stage(input logic clk, input logic rst,
     always_comb frompt = in_pt.valid &
         (ena_arb | in_pt.exop[`EX_LOAD] | in_pt.exop[`EX_STORE]);
     always_comb in = frompt ? in_pt : in_id;
-    logic [43:0] op;
+    logic [44:0] op;
     logic [63:0] a, b;
     logic jump, excp;
     logic [63:0] jpc;
     logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
-    logic lsu;
+    logic lsu, fencei, fencei_r;
     logic [2:0] bflag;
     logic ready, mul_valid, div_valid, fpu_valid, lsu_valid;
     logic [`lgCQSZ:0] cqid;
@@ -682,12 +685,17 @@ module ex_stage(input logic clk, input logic rst,
         else jpc = in.base[63:0] + in.offset;
     always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
     always_comb excp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
+    always_comb fencei = (fencei_r | op[`EX_FENCEI]) & ~lsu_empty;
+    always_ff @(posedge clk) if (rst | ready & excp | lsu_empty) fencei_r <= 0;
+        else if (fencei) fencei_r <= 1;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
-        else if (ready & excp) begin
+        else if (ready & excp | fencei) begin
             out_pc.valid <= 1'b1;
-            out_pc.pc <= in.pc;
-            out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
+            if (ready & excp | in_id.valid) begin
+                out_pc.pc <= in.pc;
+                out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
+            end
         end else out_pc.valid <= 1'b0;
 endmodule
 
@@ -885,6 +893,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
         th = rqst[`lgCQSZ] & ~wena & ~addr[64];
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
             if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) th = 0;
+        for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) th = 0;
+        if (aqrl[0]) th = 0;
     end
     always_comb case (fwdbits[1:0])
         0: fwdval = {1'b0, {56{fwddata[7] & ~fwdbits[2]}}, fwddata[7:0]};
@@ -902,8 +912,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
                         addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
                         {fwd, fwdbits, fwddata} <= {rqst, bits, lsqdata[i]};
             for (int i = 0; i < `LSQSZ; i++)
-                if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) {fwd, thr} <= 0;
-            if (aqrl[0]) {fwd, thr} <= 0;
+                if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) fwd <= 0;
+            if (aqrl[0]) fwd <= 0;
         end else if (~dcache_done[`lgCQSZ]) {fwd, thr} <= 0; else thr <= 0;
     always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
         else begin
