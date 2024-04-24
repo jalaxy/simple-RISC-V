@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 467
+`define PTLEN 465
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -73,6 +73,8 @@
 `define EX_STORE  6'd42
 `define EX_FENCE  6'd43
 `define EX_FENCEI 6'd44
+`define EX_CSR    6'd45
+`define EX_END    6'd46
 
 typedef struct packed { logic valid, b; logic [63:0] pc, bpc; } pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
@@ -85,14 +87,13 @@ typedef struct packed {
 typedef struct packed {
     logic valid, branch, c;
     logic [63:0] pc, bpc;
-    logic [44:0] exop;
+    logic [`EX_END-1:0] exop;
     logic iword, isign;
-    logic [2:0] frm, bmask;
+    logic [2:0] funct3, bmask;
     logic fdouble, bneg, j;
     logic [64:0] base;
     logic [63:0] offset;
     logic [1:0] rsrv, aqrl;
-    logic [2:0] bits;
     logic [6:0] rmwa;
     logic [64:0] a, b;
     logic [6:0] rda;
@@ -101,8 +102,9 @@ typedef struct packed {
     logic valid;
     logic mw;
     logic [63:0] pc;
-    logic [64:0] rd;
+    logic [64:0] rd, csrd;
     logic [6:0] rda;
+    logic [11:0] csrda;
 } ex_wb_t;
 
 module pipeline(
@@ -134,6 +136,7 @@ module pipeline(
     id_ex_t data_ex_pt; logic get_ex_pt;
     id_ex_t data_pt_ex; logic get_pt_ex;
     logic [1:0][6:0] raddr; logic [1:0][64:0] rvalue;
+    logic [11:0] csraddr; logic [64:0] csrval;
     logic [`lgCQSZ:0] cqid_new, cqid_old;
     logic [`lgCQSZ:0] late_done; logic [64:0] late_val; logic late_exc;
     logic [`lgCQSZ:0] pt_done; logic [64:0] pt_data; logic pt_exc, pt_ena;
@@ -171,7 +174,7 @@ module pipeline(
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
         .out_pc(data_ex_pc), .ena_pc(get_ex_pc),
         .out_pt(data_ex_pt), .ena_pt(get_ex_pt),
-        .rvalue(rvalue),
+        .rvalue(rvalue), .csraddr(csraddr), .csrval(csrval),
         .cqid_id(cqid_new), .cqid_pt(cqid_old),
         .mul_free(mul_free), .mul_rqst(mul_rqst),
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
@@ -190,6 +193,7 @@ module pipeline(
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb), .ena_ex(get_id_ex),
         .raddr(raddr), .rvalue(rvalue), .cqid(cqid_new),
+        .csraddr(csraddr), .csrval(csrval),
         .late_done(late_done), .late_val(late_val), .late_exc(late_exc));
     pending_table pending_table_inst(.clk(clk), .rst(rst),
         .flush(wb_stage_inst.recover),
@@ -282,7 +286,7 @@ module if_stage(input logic clk, input logic rst, input logic flush,
     always_comb out_id.pc = in_pc_r.pc;
     always_comb out_id.bpc = in_pc_r.bpc;
     always_comb out_id.ir = icache_data;
-    always_comb out_pc.valid = ~flush & (sent & icache_done);
+    always_comb out_pc.valid = ~flush & (sent & icache_done | hold_data);
     always_comb out_pc.c = icache_data[1:0] != 2'b11;
     always_ff @(posedge clk) in_pc_r <= icache_rqst ? in_pc : in_pc_r;
 endmodule
@@ -295,7 +299,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
     logic [31:0] ir, op;
     logic [63:0] imm;
     id_ex_t [2:0] out_ex_q;
-    logic [44:0] exop0, exop1, exop2;
+    logic [`EX_END-1:0] exop0, exop1, exop2;
     logic [64:0] a0, b0;
     ci2i ci2i_inst(.ci(in_if.ir), .i(ir));
     always_comb for (int i = 0; i < 32; i++)
@@ -388,27 +392,28 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             op[`AMO] & ir[31:27] == 5'b00011;
         exop0[`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
         exop0[`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
+        exop0[`EX_CSR] = op[`SYSTEM] & |ir[14:12];
         if (ir[1:0] != 2'b11) exop0 = 0;
     end
     always_comb exop1 =
-        (1 << `EX_ADD)  & {45{op[`AMO] & ir[31:27] == 5'b00001}} |
-        (1 << `EX_ADD)  & {45{op[`AMO] & ir[31:27] == 5'b00000}} |
-        (1 << `EX_XOR)  & {45{op[`AMO] & ir[31:27] == 5'b00100}} |
-        (1 << `EX_AND)  & {45{op[`AMO] & ir[31:27] == 5'b01100}} |
-        (1 << `EX_OR)   & {45{op[`AMO] & ir[31:27] == 5'b01000}} |
-        (1 << `EX_MIN)  & {45{op[`AMO] & ir[31:27] == 5'b10000}} |
-        (1 << `EX_MIN)  & {45{op[`AMO] & ir[31:27] == 5'b11000}} |
-        (1 << `EX_MAX)  & {45{op[`AMO] & ir[31:27] == 5'b10100}} |
-        (1 << `EX_MAX)  & {45{op[`AMO] & ir[31:27] == 5'b11100}} |
-        (1 << `EX_FADD) & {45{op[`MADD] | op[`NMSUB]}} |
-        (1 << `EX_FSUB) & {45{op[`MSUB] | op[`NMADD]}};
-    always_comb exop2 = (1 << `EX_STORE) & {45{op[`AMO] & |exop1}};
+        (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00001}} |
+        (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00000}} |
+        (1 << `EX_XOR)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00100}} |
+        (1 << `EX_AND)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b01100}} |
+        (1 << `EX_OR)   & {`EX_END{op[`AMO] & ir[31:27] == 5'b01000}} |
+        (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10000}} |
+        (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11000}} |
+        (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10100}} |
+        (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11100}} |
+        (1 << `EX_FADD) & {`EX_END{op[`MADD] | op[`NMSUB]}} |
+        (1 << `EX_FSUB) & {`EX_END{op[`MSUB] | op[`NMADD]}};
+    always_comb exop2 = (1 << `EX_STORE) & {`EX_END{op[`AMO] & |exop1}};
     always_comb if (exop0[`EX_FCVTFI] | exop0[`EX_FMVFX])
             a0 = {1'd1, 59'd0, ir[19:15]};
-        else a0 = {1'd1, 59'd0, ir[19:15]} & {65{
+        else a0 = {~(op[`SYSTEM] & ir[14]), 59'd0, ir[19:15]} & {65{
                       op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
                       op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
-                      op[`BRANCH] | op[`AMO]}} |
+                      op[`BRANCH] | op[`AMO]      | op[`SYSTEM]}} |
                   {1'd1, 59'd1, ir[19:15]} & {{65{
                       op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
                       op[`OP_FP]}}} |
@@ -418,6 +423,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         else if (exop0[`EX_FSQRT] | exop0[`EX_FCVTDS] | exop0[`EX_FCVTSD] |
             exop0[`EX_FMVFX] | exop0[`EX_FMVXF])
             b0 = 65'd0;
+        else if (exop0[`EX_CSR]) b0 = {1'b1, 52'd1, imm[11:0]};
         else b0 = {1'd1, 59'd0, ir[24:20]} & {65{
                       op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
                   {1'd1, 59'd1, ir[24:20]} & {{65{
@@ -450,11 +456,10 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[0].offset <= imm & {64{op[`JAL] | op[`JALR] | op[`BRANCH]}};
             out_ex_q[0].iword <= op[`OP_32] | op[`OP_IMM_32];
             out_ex_q[0].isign <= (op[`OP_32] | op[`OP_IMM_32]) & ir[30];
-            out_ex_q[0].frm <= ir[14:12];
+            out_ex_q[0].funct3 <= ir[14:12];
             out_ex_q[0].fdouble <= ir[25];
             out_ex_q[0].rsrv <= {op[`AMO] & |exop1, op[`AMO] & ~|exop1};
             out_ex_q[0].aqrl <= {op[`AMO] & ir[26], op[`AMO] & ir[25]};
-            out_ex_q[0].bits <= ir[14:12];
             out_ex_q[0].rmwa <=
                 {2'b0, ir[24:20]} & {7{op[`STORE]}} |
                 {2'b1, ir[24:20]} & {7{op[`STORE_FP]}};
@@ -465,7 +470,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
                 {2'd0, ir[11:7]} & {7{
                     op[`LOAD] | op[`OP_IMM] | op[`AUIPC] | op[`OP_IMM_32] |
                     op[`OP]   | op[`LUI]    | op[`OP_32] | op[`JALR]      |
-                    op[`JAL]  | op[`AMO] & ~|exop1}} |
+                    op[`JAL]  | op[`SYSTEM] | op[`AMO] & ~|exop1}} |
                 {2'd1, ir[11:7]} & {7{op[`LOAD_FP] | op[`OP_FP]}} |
                 {2'd2, 5'd0} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
                                   op[`AMO] & |exop1}};
@@ -488,7 +493,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[1].rsrv <= 0;
             out_ex_q[1].bmask <= 0;
             out_ex_q[1].j <= 0;
-            out_ex_q[1].frm <= ir[14:12];
+            out_ex_q[1].funct3 <= ir[14:12];
             out_ex_q[1].fdouble <= ir[25];
             out_ex_q[1].rda <=
                 {2'd2, 5'd0} & {7{op[`AMO]}} |
@@ -505,7 +510,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[2].rsrv <= {op[`AMO] & |exop1, 1'b0};
             out_ex_q[2].bmask <= 0;
             out_ex_q[2].j <= 0;
-            out_ex_q[2].bits <= ir[14:12];
+            out_ex_q[2].funct3 <= ir[14:12];
             out_ex_q[2].rmwa <= {2'd2, 5'd0} & {7{op[`AMO]}};
             out_ex_q[2].rda <= {2'd0, ir[11:7]};
         end else if (ena_ex) begin
@@ -534,6 +539,7 @@ module ex_stage(input logic clk, input logic rst,
     output ex_pc_t out_pc, input logic ena_pc, // always enabled
     output id_ex_t out_pt, input logic ena_pt,
     input logic [1:0][64:0] rvalue,
+    output logic [11:0] csraddr, input logic [64:0] csrval,
     input logic [`lgCQSZ:0] cqid_id, input logic [`lgCQSZ:0] cqid_pt,
     input logic mul_free, output logic [`lgCQSZ:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
@@ -557,7 +563,7 @@ module ex_stage(input logic clk, input logic rst,
     always_comb frompt = in_pt.valid &
         (ena_arb | in_pt.exop[`EX_LOAD] | in_pt.exop[`EX_STORE]);
     always_comb in = frompt ? in_pt : in_id;
-    logic [44:0] op;
+    logic [`EX_END-1:0] op;
     logic [63:0] a, b;
     logic jump, excp;
     logic [63:0] jpc;
@@ -568,6 +574,7 @@ module ex_stage(input logic clk, input logic rst,
     logic ready, mul_valid, div_valid, fpu_valid, lsu_valid;
     logic [`lgCQSZ:0] cqid;
     always_comb op = in.valid ? in.exop : 0;
+    always_comb csraddr = in.b[11:0];
     always_comb begin
         if (frompt & in_pt.j) a = in.pc; // JALR in PT
         else a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
@@ -619,7 +626,7 @@ module ex_stage(input logic clk, input logic rst,
         op[`EX_FDIV],   op[`EX_FNMUL],  op[`EX_FMUL],   op[`EX_FSUB],
         op[`EX_FADD]};
     always_comb {fpu_a, fpu_b} = {a, b};
-    always_comb {fpu_rm, fpu_double} = {in.frm, in.fdouble};
+    always_comb {fpu_rm, fpu_double} = {in.funct3, in.fdouble};
     always_comb lsu = op[`EX_LOAD] | op[`EX_STORE] | op[`EX_FENCE];
     always_comb lsu_valid = ~rst & (get_id & in_id.valid) & lsu;
     always_ff @(posedge clk) begin
@@ -634,7 +641,7 @@ module ex_stage(input logic clk, input logic rst,
                     lsu_wena <= op[`EX_STORE];
                     // maybe using LSQ id instead of CQ id as index is better
                     lsu_addr <= out_pt.valid ? res : {1'b0, add};
-                    lsu_bits <= in.bits;
+                    lsu_bits <= in.funct3;
                     lsu_wdat <= rvalue[1];
                     lsu_rsrv <= in.rsrv;
                     lsu_aqrl <= in.aqrl;
@@ -644,6 +651,10 @@ module ex_stage(input logic clk, input logic rst,
     always_comb if (out_pt.valid) res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
         else if (in.valid & lsu & ~op[`EX_FENCE])
             res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
+        else if (op[`EX_CSR])
+            res = {65{in.funct3[1:0] == 2'b01}} & {1'b0, a} |
+                  {65{in.funct3[1:0] == 2'b10}} & {1'b0, a | b} |
+                  {65{in.funct3[1:0] == 2'b11}} & {1'b0, ~a & b};
         else begin
             res =
                 {65{op[`EX_ADD]}}  & {1'b0, add} |
@@ -676,7 +687,9 @@ module ex_stage(input logic clk, input logic rst,
         else if (get_id & in_id.valid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
-            out_wb.rd <= res;
+            out_wb.rd <= op[`EX_CSR] ? csrval : res;
+            out_wb.csrda <= csraddr;
+            out_wb.csrd <= res;
             out_wb.mw <= op[`EX_STORE];
             out_wb.pc <= in.pc;
         end else if (ena_wb) out_wb.valid <= 0;
@@ -704,11 +717,13 @@ module wb_stage(input logic clk, input logic rst,
     input logic ena_ex, // for register read sync
     input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
     output logic [`lgCQSZ:0] cqid,
+    input logic [11:0] csraddr, output logic [64:0] csrval,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val, input logic late_exc
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
-    logic [`lgCQSZ:0] regscqid[64:0];
+    logic [64:0][`lgCQSZ:0] regscqid;
     logic [1:0][63:0] regsval;
+    logic [63:0] csregsval;
     // commit queue
     logic [`lgCQSZ-1:0] cqfront, cqfrontp1, cqfrontp2, cqrear, cqrearp1;
     logic cqempty, cqfull, cqpush, cqpop1, cqpop2;
@@ -723,6 +738,9 @@ module wb_stage(input logic clk, input logic rst,
         regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
             .waddr({cqrdap1, cqrda}), .wvalue({cqfrontp1val[63:0], cqfrontval[63:0]}),
             .wena({cqpop2 & |cqrdap1, cqpop1 & |cqrda}));
+    csr csr_inst(.clk(clk), .rst(rst), .addr(csraddr),
+        .rval(csregsval), .wena(0), .wval(0),
+        .nret({62'd0, {1'b0, cqpop1 & ~cqrda[6]} + {1'b0, cqpop2 & ~cqrdap1[6]}}));
     regfile #(.dwidth(64), .rports(2), .wports(1), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqpc_inst(.clk(clk), .rst(rst),
             .raddr({cqfrontp1, cqfront}), .rvalue({cqpcp1, cqpc}),
@@ -771,7 +789,7 @@ module wb_stage(input logic clk, input logic rst,
             if (cqpush & in_ex.rd[64]) assert(in_ex.rd[`lgCQSZ-1:0] == cqrear);
         end
     always_ff @(posedge clk)
-        if (rst | recover) for (int i = 0; i < `CQSZ; i++) regscqid[i][`lgCQSZ] <= 0;
+        if (rst | recover) for (int i = 0; i < 65; i++) regscqid[i][`lgCQSZ] <= 0;
         else begin // commit
             if (cqpop1 & regscqid[cqrda][`lgCQSZ-1:0] == cqfront)
                 regscqid[cqrda] <= 0;
@@ -979,6 +997,56 @@ module arbiter(
         end
         for (int i = 0; i < `LATENUM; i++) if (~done_in[i][`lgCQSZ]) get[i] = 1;
     end
+endmodule
+
+/********************************** CSR map ***********************************
+User-level CSR:
+    0x000 -- 0x005:
+        0x000 -> ustatus    0x001 -> fflags    0x002 -> frm    0x003 -> fcsr
+        0x004 -> uie        0x005 -> utvec
+    0x040 -- 0x044:
+        0x040 -> uscratch    0x041 -> uepc    0x042 -> ucause    0x043 -> utval
+        0x044 -> uip
+    0xc00 -- 0xc1f:
+        0xc00 -> cycle    0xc01 -> time    0xc02 -> instret
+        0xc03-0xc1f -> hpmcounter
+Supervisor-level CSR:
+    0x100 -- 0x106:
+        0x100 -> sstatus    0x102 -> sedeleg    0x103 -> sideleg    0x104 -> sie
+        0x105 -> stvec      0x106 -> scounteren
+    0x140 -- 0x144:
+        0x140 -> sscrach    0x141 -> sepc    0x142 -> scause    0x143 -> stval
+        0x144 -> sip
+    0x180 -- 0x180:
+        0x180 -> satp
+Machine-level CSR:
+    0x300 -- 0x306:
+        0x300 -> mstatus    0x301 -> misa     0x302 -> medeleg    0x303 -> mideleg
+        0x304 -> mie        0x305 -> mtvec    0x306 -> mcounteren
+    0x320 -- 0x33f:
+        0x320 -> mcounterinhibit    0x323-0x33f -> mhpmevent
+    0x340 -- 0x344:
+        0x340 -> mscratch    0x341 -> mepc    0x342 -> mcause    0x343 -> mtval
+        0x344 -> mip
+    0x3a0 -- 0x3bf:
+        0x3a0,0x3a2 -> pmpcfg    0x3b0-0x3bf -> pmpaddr
+    0x7a0 -- 0x7a3:
+        0x7a0 -> tselect    0x7a1-0x7a3 -> tdata
+    0x7b0 -- 0x7b3:
+        0x7b0 -> dcsr       0x7b1 -> dpc    0x7b2-0x7b3 -> dscratch
+    0xb00 -- 0xb1f:
+        0xb00 -> mcycle    0xb02 -> minstret    0xb03-0xb1f -> mhpmcounter
+    0xf11 -- 0xf14:
+        0xf11 -> mvendorid    0xf12 -> marchid    0xf13 -> mimpid    0xf14 -> mhartid
+******************************************************************************/
+module csr(input logic clk, input logic rst,
+    input logic [11:0] addr, output logic [63:0] rval,
+    input logic wena, input logic [63:0] wval,
+    input logic [63:0] nret
+);
+    logic [63:0] mcycle, minstret;
+    always_ff @(posedge clk) if (rst) mcycle <= 0; else mcycle <= mcycle + 64'd1;
+    always_ff @(posedge clk) if (rst) minstret <= 0; else minstret <= minstret + nret;
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
