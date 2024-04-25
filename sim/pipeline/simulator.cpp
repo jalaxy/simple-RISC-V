@@ -27,6 +27,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
     npc = initpc;
     memory = initmem;
     simtime = 0;
+    csr[0x005] = {"utvec", 0};
 }
 
 /**
@@ -643,6 +644,23 @@ void simulator::step(int nojump)
         sprintf(asmcode, "jal x%d, %ld(pc)", rda, imm);
         break;
     case 0b11100: // SYSTEM
+        static char csrname[4] = {0, 'w', 's', 'c'};
+        imm = BITS(ir, 20, 31);
+        if (BITS(ir, 12, 13))
+        {
+            uint64_t rs1val = BIT(ir, 14) ? rs1a : rs1;
+            if (BITS(ir, 12, 13) == 1)
+                rd = csr[imm].val, csr[imm].val = rs1val;
+            else if (BITS(ir, 12, 13) == 2)
+                rd = csr[imm].val, csr[imm].val |= rs1val;
+            else if (BITS(ir, 12, 13) == 3)
+                rd = csr[imm].val, csr[imm].val &= ~rs1val;
+            sprintf(asmcode, "csrr%c%s x%d, %s, %s%d",
+                    csrname[BITS(ir, 12, 13)], BIT(ir, 14) ? "i" : "",
+                    rda, csr[imm].name, BIT(ir, 14) ? "" : "x", rs1a);
+        }
+        else
+            sprintf(asmcode, BIT(ir, 20) ? "ebreak" : "ecall");
         break;
     }
     if (!jump | nojump)

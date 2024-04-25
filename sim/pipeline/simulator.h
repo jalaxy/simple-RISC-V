@@ -1,6 +1,12 @@
 #include <cstdint>
 #include <map>
 
+typedef struct
+{
+    const char *name;
+    uint64_t val;
+} csr_t;
+
 class simulator
 {
 private:
@@ -9,6 +15,7 @@ private:
     uint64_t mwaddr, mwdata;
     uint8_t mwwidth;
     char asmcode[32];
+    std::map<uint64_t, csr_t> csr;
 
 public:
     int simtime;
