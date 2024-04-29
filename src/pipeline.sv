@@ -149,6 +149,8 @@ module pipeline(
     logic [`lgCQSZ:0] fpu_rqst, fpu_done; logic fpu_exc, fpu_ena, fpu_free;
     logic [20:0] fpu_op; logic [63:0] fpu_a, fpu_b;
     logic [2:0] fpu_rm; logic fpu_double; logic [64:0] fpu_r;
+    logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
+    logic [63:0] csr_rval, csr_wval;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -206,6 +208,8 @@ module pipeline(
         .done(lsu_done), .excp(lsu_exc), .rdata(lsu_rdat), .wdata(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
         .addr_done(addr_done), .addr_val(addr_val),
+        .csr_addr(csr_addr), .csr_wena(csr_wena), .csr_func(csr_func),
+        .csr_rval(csr_rval), .csr_wval(csr_wval),
         .dcache_rqst(dcache_rqst), .dcache_rsrv(dcache_rsrv), .dcache_wena(dcache_wena),
         .dcache_addr(dcache_addr), .dcache_bits(dcache_bits), .dcache_done(dcache_done),
         .dcache_rdat(dcache_rdat), .dcache_wdat(dcache_wdat), .dcache_flsh(dcache_flsh)
@@ -223,6 +227,9 @@ module pipeline(
         .rqst(fpu_rqst), .op(fpu_op), .a(fpu_a), .b(fpu_b),
         .rm(fpu_rm), .double(fpu_double),
         .done(fpu_done), .r(fpu_r), .e(fpu_exc));
+    csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
+        .rval(csr_rval), .wval(csr_wval), .func(csr_func),
+        .nret(wb_stage_inst.cqpop2 ? 2 : (wb_stage_inst.cqpop1 ? 1 : 0)));
     arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
                           // or use dynamic priority?
         .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
@@ -653,7 +660,7 @@ module ex_stage(input logic clk, input logic rst,
                 {65{op[`EX_SRA]}}  & {1'b0, sra} |
                 {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
                 {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
-                {65{op[`EX_XOR]}}  & {1'b0, a ^ b} | 
+                {65{op[`EX_XOR]}}  & {1'b0, a ^ b} |
                 {65{op[`EX_OR]}}   & {1'b0, a | b} |
                 {65{op[`EX_AND]}}  & {1'b0, a & b} |
                 {65{op[`EX_MIN]}}  & {1'b0, sub[63] ? a : b} |
@@ -860,6 +867,8 @@ module lsu(input logic clk, input logic rst, input logic flush,
     output logic [64:0] rdata, input logic [64:0] wdata,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     input logic [`lgCQSZ:0] addr_done, input logic [63:0] addr_val,
+    output logic [11:0] csr_addr, output logic csr_wena, output logic [2:0] csr_func,
+    input logic [63:0] csr_rval, output logic [63:0] csr_wval,
     output logic [`lgCQSZ:0] dcache_rqst,
     output logic       [1:0] dcache_rsrv,
     output logic             dcache_wena,
@@ -875,7 +884,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     logic [`LSQSZ-1:0][64:0] lsqdata;
     logic [`LSQSZ-1:0][2:0] lsqbits;
     logic [`LSQSZ-1:0][1:0] lsqrsrv;
-    logic [`LSQSZ-1:0] lsqsent, lsqcmt, lsqwena, lsqfwd, lsqraq;
+    logic [`LSQSZ-1:0] lsqsent, lsqcmt, lsqwena, lsqfwd, lsqraq, lsqcsr;
     logic [`lgLSQSZ-1:0] front, rear, frontp1, rearp1;
     logic full, empty, push, pop, th, thr, ready;
     logic [`lgCQSZ:0] fwd; logic [64:0] fwddata, fwdval; logic [2:0] fwdbits;
@@ -894,7 +903,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
             if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) th = 0;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) th = 0;
-        if (aqrl[0]) th = 0;
+        if (aqrl[0] | csr) th = 0;
     end
     always_comb case (fwdbits[1:0])
         0: fwdval = {1'b0, {56{fwddata[7] & ~fwdbits[2]}}, fwddata[7:0]};
@@ -913,7 +922,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
                         {fwd, fwdbits, fwddata} <= {rqst, bits, lsqdata[i]};
             for (int i = 0; i < `LSQSZ; i++)
                 if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) fwd <= 0;
-            if (aqrl[0]) fwd <= 0;
+            if (aqrl[0] | csr) fwd <= 0;
         end else if (~dcache_done[`lgCQSZ]) {fwd, thr} <= 0; else thr <= 0;
     always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
         else begin
@@ -925,7 +934,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
             if (push) begin
                 rear <= rearp1;
                 lsqsent[rear] <= th; lsqcmt[rear] <= cmt & empty;
-                lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1];
+                lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1]; lsqcsr[rear] <= csr;
                 lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
                 lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
                 thrrqst <= rqst; thrrsrv <= rsrv; thrwena <= wena;
@@ -951,16 +960,23 @@ module lsu(input logic clk, input logic rst, input logic flush,
                     ~lsqwena[i] & (fence[1] & fence[5] | fence[11]))
                     lsqraq[i] <= 1;
         end
-    always_comb dcache_rqst = thr ? thrrqst : (ready ? lsqrqst[front] : 0);
+    always_comb dcache_rqst = thr ? thrrqst :
+        (ready & ~lsqcsr[front] ? lsqrqst[front] : 0);
     always_comb dcache_rsrv = thr ? thrrsrv : lsqrsrv[front];
     always_comb dcache_wena = thr ? thrwena : lsqwena[front];
     always_comb dcache_addr = thr ? thraddr[63:0] : lsqaddr[front][63:0];
     always_comb dcache_bits = thr ? thrbits : lsqbits[front];
-    always_comb done = dcache_done[`lgCQSZ] ? dcache_done : fwd;
-    always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : fwdval;
+    always_comb done = dcache_done[`lgCQSZ] ? dcache_done : (
+        fwd[`lgCQSZ] ? fwd : (ready & lsqcsr[front] ? lsqrqst[front] : 0));
+    always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : (
+        fwd[`lgCQSZ] ? fwdval : {1'b0, csr_rval});
     always_comb excp = 0;
     always_comb dcache_wdat = lsqdata[front][63:0];
     always_comb dcache_flsh = flush;
+    always_comb csr_addr = lsqaddr[front][11:0];
+    always_comb csr_wena = ready & lsqcsr[front];
+    always_comb csr_func = lsqbits[front];
+    always_comb csr_wval = lsqdata[front][63:0];
 endmodule
 
 module arbiter(
@@ -1023,12 +1039,30 @@ Machine-level CSR:
 ******************************************************************************/
 module csr(input logic clk, input logic rst,
     input logic [11:0] addr, output logic [63:0] rval,
-    input logic wena, input logic [63:0] wval,
+    input logic wena, input logic [63:0] wval, input logic [2:0] func,
     input logic [63:0] nret
 );
+    logic [63:0] wres;
     logic [63:0] utvec, mcycle, minstret;
-    always_ff @(posedge clk) if (rst) mcycle <= 0; else mcycle <= mcycle + 64'd1;
-    always_ff @(posedge clk) if (rst) minstret <= 0; else minstret <= minstret + nret;
+    always_comb case (func[1:0])
+        2'b00: wres = 0;
+        2'b01: wres = wval;
+        2'b10: wres = wval | rval;
+        2'b11: wres = ~wval & rval;
+    endcase
+    always_comb case (addr)
+        12'h005: rval = utvec;
+        12'hb00: rval = mcycle;
+        12'hb02: rval = minstret;
+        default: rval = 0;
+    endcase
+    always_ff @(posedge clk) begin
+        if (rst) mcycle <= 0; else mcycle <= mcycle + 64'd1;
+        if (rst) minstret <= 0; else minstret <= minstret + nret;
+        if (wena & addr == 12'h005) utvec    <= wres;
+        if (wena & addr == 12'hb00) mcycle   <= wres;
+        if (wena & addr == 12'hb02) minstret <= wres;
+    end
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);

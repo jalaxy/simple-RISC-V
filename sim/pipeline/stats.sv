@@ -19,6 +19,9 @@ module stats(
     output logic [63:0] cmtpc[1:0],
     output logic  [6:0] cmtaddr[1:0],
     output logic [63:0] cmtdata[1:0],
+    output logic        cmtcsrena,
+    output logic [11:0] cmtcsraddr,
+    output logic [63:0] cmtcsrval,
     output logic [63:0] arregs[63:0],
     output logic [31:0] cqocc,
     output logic [31:0] ptocc,
@@ -42,6 +45,8 @@ module stats(
             {pipeline_inst.wb_stage_inst.cqpcp1,
              pipeline_inst.wb_stage_inst.cqrdap1,
              pipeline_inst.wb_stage_inst.cqfrontp1val[63:0]} : 0;
+    always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
+        pipeline_inst.csr_inst.addr, pipeline_inst.csr_inst.wres};
 
     // extract architectural registers from instance
     /*verilator tracing_off*/ logic [63:0] dupregs[1:0][63:0]; /*verilator tracing_on*/

@@ -26,8 +26,9 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 {
     npc = initpc;
     memory = initmem;
-    simtime = 0;
     csr[0x005] = {"utvec", 0};
+    csr[0xb00] = {"mcycle", 0};
+    csr[0xb02] = {"minstret", 0};
 }
 
 /**
@@ -35,7 +36,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
  */
 void simulator::step(int nojump)
 {
-    simtime++;
+    csr[0xb00].val++;
     // instruction fetch
     pc = npc;
     uint32_t idata = DLE(memory, pc);
@@ -97,6 +98,7 @@ void simulator::step(int nojump)
     // decode and execution
     asmcode[0] = 0;
     mwwidth = 0;
+    csraddr = -1;
     uint8_t funct3 = BITS(ir, 12, 14), jump = 0;
     uint8_t rda = BITS(ir, 7, 11), rs1a = BITS(ir, 15, 19),
             rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
@@ -645,19 +647,20 @@ void simulator::step(int nojump)
         break;
     case 0b11100: // SYSTEM
         static char csrname[4] = {0, 'w', 's', 'c'};
-        imm = BITS(ir, 20, 31);
         if (BITS(ir, 12, 13))
         {
+            csraddr = BITS(ir, 20, 31);
             uint64_t rs1val = BIT(ir, 14) ? rs1a : rs1;
             if (BITS(ir, 12, 13) == 1)
-                rd = csr[imm].val, csr[imm].val = rs1val;
+                rd = csr[csraddr].val, csr[csraddr].val = rs1val;
             else if (BITS(ir, 12, 13) == 2)
-                rd = csr[imm].val, csr[imm].val |= rs1val;
+                rd = csr[csraddr].val, csr[csraddr].val |= rs1val;
             else if (BITS(ir, 12, 13) == 3)
-                rd = csr[imm].val, csr[imm].val &= ~rs1val;
+                rd = csr[csraddr].val, csr[csraddr].val &= ~rs1val;
+            csrdata = csr[csraddr].val;
             sprintf(asmcode, "csrr%c%s x%d, %s, %s%d",
                     csrname[BITS(ir, 12, 13)], BIT(ir, 14) ? "i" : "",
-                    rda, csr[imm].name, BIT(ir, 14) ? "" : "x", rs1a);
+                    rda, csr[csraddr].name, BIT(ir, 14) ? "" : "x", rs1a);
         }
         else
             sprintf(asmcode, BIT(ir, 20) ? "ebreak" : "ecall");
@@ -679,51 +682,25 @@ void simulator::step(int nojump)
  * @return if consistent with above arguments
  */
 int simulator::check(uint64_t pc, uint64_t rda, uint64_t rd,
-                     uint64_t mwaddr, uint64_t mwdata, uint8_t mwwidth)
+                     uint64_t mwaddr, uint64_t mwdata, uint8_t mwwidth,
+                     uint64_t csraddr, uint64_t csrdata)
 {
     if (mwwidth < 8)
         mwdata &= ~((uint64_t)-1 << (8 * mwwidth));
     return this->pc == pc && (rda == 0 || this->arregs[rda] == rd) &&
+           this->csr[csraddr].val == csrdata &&
            (!this->mwwidth || this->mwaddr == mwaddr && this->mwdata == mwdata &&
                                   this->mwwidth == mwwidth);
 }
 
-/**
- * @brief get architectural register values
- */
 const uint64_t *simulator::get_arreg() { return arregs; }
-
-/**
- * @brief get program counter
- */
 uint64_t simulator::get_pc() { return pc; }
-
-/**
- * @brief get instruction register value
- */
 uint64_t simulator::get_ir() { return ir; }
-
-/**
- * @brief get reference of memory
- */
 std::map<uint64_t, uint8_t> &simulator::get_mem() { return memory; }
-
-/**
- * @brief get memory write address
- */
 uint64_t simulator::get_mwaddr() { return mwaddr; }
-
-/**
- * @brief get memory write data
- */
 uint64_t simulator::get_mwdata() { return mwdata; }
-
-/**
- * @brief get memory write width
- */
 uint8_t simulator::get_mwwidth() { return mwwidth; }
-
-/**
- * @brief get assembly code
- */
-char *simulator::get_asmcode() { return asmcode; }
+const char *simulator::get_asmcode() { return asmcode; }
+const char *simulator::get_csrname(uint64_t addr) { return csr[addr].name; }
+uint64_t simulator::get_csraddr() { return csraddr; }
+uint64_t simulator::get_csrdata() { return csrdata; }

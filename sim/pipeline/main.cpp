@@ -55,6 +55,11 @@ typedef struct struct_store
     uint8_t width;
 } store_t;
 
+typedef struct struct_csr
+{
+    uint64_t addr, data;
+} csrcmt_t;
+
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
     printf("Memory@%016lx:", addr);
@@ -263,6 +268,7 @@ int main(int argc, char **argv)
     std::queue<dcache_req_t> d_delay;
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
+    std::queue<csrcmt_t> csrs;
     int i = 0;
     uint64_t rsrv_val;
     while (i < cmd.simtime)
@@ -327,6 +333,8 @@ int main(int argc, char **argv)
             for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
                 if (dut->cmtpc[j])
                     commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j]});
+            if (dut->cmtcsrena)
+                csrs.push({dut->cmtcsraddr, dut->cmtcsrval});
             i++;
         }
         // simulator checker
@@ -335,25 +343,38 @@ int main(int argc, char **argv)
             sim->step();
             commit_t curcommit = commits.front();
             store_t curstore;
+            csrcmt_t curcsr;
             if (sim->get_mwwidth() && !stores.empty())
                 curstore = stores.front(), stores.pop();
             else
                 curstore = {0, 0, 0};
+            if (sim->get_csraddr() != -1)
+                curcsr = csrs.front(), csrs.pop();
+            else
+                curcsr = {(uint64_t)-1, 0};
             int check = sim->check(curcommit.pc, curcommit.addr, curcommit.data,
-                                   curstore.addr, curstore.data, curstore.width);
+                                   curstore.addr, curstore.data, curstore.width,
+                                   curcsr.addr, curcsr.data);
             if (!check || cmd.step)
             {
                 printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", curcommit.cycle);
                 printf("DUT:\n    pc: 0x%016lx\n", curcommit.pc);
-                printf("    x%d: 0x%016lx\n", curcommit.addr, curcommit.data);
+                printf("    %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                       curcommit.addr % 32, curcommit.data);
                 if (curstore.width < 8)
                     curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
+                if (sim->get_csraddr() != -1)
+                    printf("    %s: 0x%016lx\n", sim->get_csrname(curcsr.addr), curcsr.data);
                 if (sim->get_mwwidth())
                     printf("    mem%d@0x%lx: 0x%0*lx\n",
                            curstore.width, curstore.addr,
                            curstore.width * 2, curstore.data);
                 printf("SIM:\n    pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
-                printf("    x%d: 0x%016lx\n", curcommit.addr, sim->get_arreg()[curcommit.addr]);
+                printf("    %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                       curcommit.addr % 32, sim->get_arreg()[curcommit.addr]);
+                if (sim->get_csraddr() != -1)
+                    printf("    %s: 0x%016lx\n",
+                           sim->get_csrname(sim->get_csraddr()), sim->get_csrdata());
                 if (sim->get_mwwidth())
                     printf("    mem%d@0x%lx: 0x%0*lx\n",
                            sim->get_mwwidth(), sim->get_mwaddr(),
@@ -368,14 +389,14 @@ int main(int argc, char **argv)
     if (cmd.debug)
     {
         // final status check
-        for (int i = sim->simtime; i < cmd.simtime; i++)
+        for (int i = sim->csr[0xb00].val; i < cmd.simtime; i++)
             sim->step();
         for (int i = 0; i < 64; i++)
             if (sim->get_arreg()[i] != dut->arregs[i])
             {
                 printf("Difference found at maximum cycle:\n");
-                printf("    DUT: x%d: 0x%016lx\n", i, dut->arregs[i]);
-                printf("    SIM: x%d: 0x%016lx\n", i, sim->get_arreg()[i]);
+                printf("    DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, dut->arregs[i]);
+                printf("    SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, sim->get_arreg()[i]);
                 printf("Press Enter to continue...\n");
                 getchar();
             }
