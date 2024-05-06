@@ -26,9 +26,85 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 {
     npc = initpc;
     memory = initmem;
+    csr[0x000] = {"ustatus", 0};
+    csr[0x001] = {"fflags", 0};
+    csr[0x002] = {"frm", 0};
+    csr[0x003] = {"fcsr", 0};
+    csr[0x004] = {"uie", 0};
     csr[0x005] = {"utvec", 0};
+    csr[0x040] = {"uscratch", 0};
+    csr[0x041] = {"uepc", 0};
+    csr[0x042] = {"ucause", 0};
+    csr[0x043] = {"utval", 0};
+    csr[0x044] = {"uip", 0};
+    csr[0xc00] = {"cycle", 0};
+    csr[0xc01] = {"time", 0};
+    csr[0xc02] = {"instret", 0};
+    for (int i = 0xc03; i < 0xc20; i++)
+    {
+        static char hpmcounter[32][32];
+        sprintf(hpmcounter[i % 32], "hpmcounter%d", i % 32);
+        csr[i] = {hpmcounter[i % 32], 0};
+    }
+    csr[0x100] = {"sstatus", 0};
+    csr[0x102] = {"sedeleg", 0};
+    csr[0x103] = {"sideleg", 0};
+    csr[0x104] = {"sie", 0};
+    csr[0x105] = {"stvec", 0};
+    csr[0x106] = {"scounteren", 0};
+    csr[0x140] = {"sscrach", 0};
+    csr[0x141] = {"sepc", 0};
+    csr[0x142] = {"scause", 0};
+    csr[0x143] = {"stval", 0};
+    csr[0x144] = {"sip", 0};
+    csr[0x180] = {"satp", 0};
+    csr[0x300] = {"mstatus", 0};
+    csr[0x301] = {"misa", 0};
+    csr[0x302] = {"medeleg", 0};
+    csr[0x303] = {"mideleg", 0};
+    csr[0x304] = {"mie", 0};
+    csr[0x305] = {"mtvec", 0};
+    csr[0x306] = {"mcounteren", 0};
+    csr[0x320] = {"mcounterinhibit", 0};
+    for (int i = 0x323; i < 0x340; i++)
+    {
+        static char mhpmevent[32][32];
+        sprintf(mhpmevent[i % 32], "mhpmevent%d", i % 32);
+        csr[i] = {mhpmevent[i % 32], 0};
+    }
+    csr[0x340] = {"mscratch", 0};
+    csr[0x341] = {"mepc", 0};
+    csr[0x342] = {"mcause", 0};
+    csr[0x343] = {"mtval", 0};
+    csr[0x344] = {"mip", 0};
+    csr[0x3a0] = {"pmpcfg0", 0};
+    csr[0x3a2] = {"pmpcfg2", 0};
+    for (int i = 0x3b0; i < 0x3c0; i++)
+    {
+        static char pmpaddr[32][32];
+        sprintf(pmpaddr[i % 16], "pmpaddr%d", i % 16);
+        csr[i] = {pmpaddr[i % 16], 0};
+    }
+    csr[0x7a0] = {"tselect", 0};
+    csr[0x7a1] = {"tdata1", 0};
+    csr[0x7a2] = {"tdata2", 0};
+    csr[0x7a3] = {"tdata3", 0};
+    csr[0x7b0] = {"dcsr", 0};
+    csr[0x7b1] = {"dpc", 0};
+    csr[0x7b2] = {"dscratch0", 0};
+    csr[0x7b3] = {"dscratch1", 0};
     csr[0xb00] = {"mcycle", 0};
     csr[0xb02] = {"minstret", 0};
+    for (int i = 0xb03; i < 0xb20; i++)
+    {
+        static char mhpmcounter[32][32];
+        sprintf(mhpmcounter[i % 32], "mhpmcounter%d", i % 32);
+        csr[i] = {mhpmcounter[i % 32], 0};
+    }
+    csr[0xf11] = {"mvendorid", 0};
+    csr[0xf12] = {"marchid", 0};
+    csr[0xf13] = {"mimpid", 0};
+    csr[0xf14] = {"mhartid", 0};
 }
 
 /**
@@ -37,11 +113,13 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 void simulator::step(int nojump)
 {
     csr[0xb00].val++;
+
     // instruction fetch
     pc = npc;
     uint32_t idata = DLE(memory, pc);
 
     // compressed instruction extension
+    ir = 0;
     switch ((BITS(idata, 13, 15) << 2) | BITS(idata, 0, 1))
     {
     case 0b00000:
@@ -96,10 +174,13 @@ void simulator::step(int nojump)
     }
 
     // decode and execution
-    asmcode[0] = 0;
+    if (BITS(idata, 0, 1) == 3)
+        sprintf(asmcode, "unimp 0x%08x", idata);
+    else
+        sprintf(asmcode, "unimp 0x%04x", idata & 0xffff);
     mwwidth = 0;
     csraddr = -1;
-    uint8_t funct3 = BITS(ir, 12, 14), jump = 0;
+    uint8_t funct3 = BITS(ir, 12, 14), jump = 0, excp = 0;
     uint8_t rda = BITS(ir, 7, 11), rs1a = BITS(ir, 15, 19),
             rs2a = BITS(ir, 20, 24), rs3a = BITS(ir, 27, 31);
     uint64_t &rd = arregs[rda], rs1 = arregs[rs1a],
@@ -113,9 +194,9 @@ void simulator::step(int nojump)
     if (BITS(ds2, 32, 63) != 0xffff'ffffu)
         ss2 = CNAN32(ss2);
     int64_t imm;
-    switch (BITS(ir, 2, 6)) // opcode
+    switch (BITS(ir, 0, 6)) // opcode
     {
-    case 0b00000: // LOAD
+    case 0b0000011: // LOAD
         imm = SEXT(BITS(ir, 20, 31), 12);
         addr = rs1 + imm;
         rd = DLE(memory, addr);
@@ -135,7 +216,7 @@ void simulator::step(int nojump)
         if (funct3 != 7)
             sprintf(asmcode, "%s x%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
-    case 0b00001: // LOAD-FP
+    case 0b0000111: // LOAD-FP
         imm = SEXT(BITS(ir, 20, 31), 12);
         addr = rs1 + imm;
         if (funct3 == 0b010) // FLW
@@ -145,7 +226,7 @@ void simulator::step(int nojump)
         if (funct3 == 2 || funct3 == 3)
             sprintf(asmcode, "f%s f%d, %ld(x%d)", lnames[funct3], rda, imm, rs1a);
         break;
-    case 0b00011: // MISC-MEM
+    case 0b0001111: // MISC-MEM
         switch (funct3)
         {
         case 0b000: // FENCE
@@ -164,7 +245,7 @@ void simulator::step(int nojump)
             break;
         }
         break;
-    case 0b00100: // OP-IMM
+    case 0b0010011: // OP-IMM
         imm = SEXT(BITS(ir, 20, 31), 12);
         if (funct3 == 0b000) // ADDI
             rd = rs1 + imm;
@@ -193,11 +274,11 @@ void simulator::step(int nojump)
             sprintf(asmcode, "%s x%d, x%d, %ld",
                     funct3 == 5 && BIT(ir, 30) ? "srai" : iname[funct3], rda, rs1a, imm);
         break;
-    case 0b00101: // AUIPC
+    case 0b0010111: // AUIPC
         rd = pc + SEXT(BITS(ir, 12, 31) << 12, 32);
         sprintf(asmcode, "auipc x%d, 0x%lx", rda, BITS(ir, 12, 31));
         break;
-    case 0b00110: // OP-IMM-32
+    case 0b0011011: // OP-IMM-32
         imm = SEXT(BITS(ir, 20, 31), 12);
         if (funct3 == 0b000) // ADDIW
             rd = (int32_t)rs1 + (int32_t)imm;
@@ -212,8 +293,8 @@ void simulator::step(int nojump)
             sprintf(asmcode, "%sw x%d, x%d, %ld",
                     funct3 == 5 && BIT(ir, 30) ? "srai" : iname[funct3], rda, rs1a, imm);
         break;
-    case 0b01000: // STORE
-    case 0b01001: // STORE-FP
+    case 0b0100011: // STORE
+    case 0b0100111: // STORE-FP
         imm = SEXT(BITS(ir, 25, 31) << 5 | BITS(ir, 7, 11), 12);
         mwaddr = rs1 + imm;
         mwdata = BIT(ir, 2) ? *(uint64_t *)&ds2 : rs2;
@@ -228,7 +309,7 @@ void simulator::step(int nojump)
                     BIT(ir, 2) ? "f" : "", snames[funct3],
                     BIT(ir, 2) ? 'f' : 'x', rs2a, imm, rs1a);
         break;
-    case 0b01011: // AMO
+    case 0b0101111: // AMO
         switch (BITS(ir, 27, 31))
         {
         case 0b00010: // LR
@@ -303,7 +384,7 @@ void simulator::step(int nojump)
             break;
         }
         break;
-    case 0b01100: // OP
+    case 0b0110011: // OP
         static const char *oname[] = {
             "add", "sll", "slt", "sltu", "xor", "srl", "or", "and"};
         if (funct3 == 0 && BIT(ir, 30))
@@ -362,11 +443,11 @@ void simulator::step(int nojump)
         else if (funct3 == 0b111) // AND
             rd = rs1 & rs2;
         break;
-    case 0b01101: // LUI
+    case 0b0110111: // LUI
         rd = SEXT(BITS(ir, 12, 31) << 12, 32);
         sprintf(asmcode, "lui x%d, 0x%lx", rda, BITS(ir, 12, 31));
         break;
-    case 0b01110: // OP-32
+    case 0b0111011: // OP-32
         if (funct3 == 0 && BIT(ir, 30))
             sprintf(asmcode, "subw x%d, x%d, x%d", rda, rs1a, rs2a);
         else if (funct3 == 5 && BIT(ir, 30))
@@ -403,27 +484,27 @@ void simulator::step(int nojump)
             else // SRLW
                 rd = (int64_t)(int32_t)((uint32_t)rs1 >> (uint32_t)rs2);
         break;
-    case 0b10000: // MADD
+    case 0b1000011: // MADD
         BIT(ir, 25) ? (dd = ds1 * ds2 + ds3) : (sd = ss1 * ss2 + ss3, BNAN(&dd));
         sprintf(asmcode, "fmadd.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
                 rda, rs1a, rs2a, rs3a);
         break;
-    case 0b10001: // MSUB
+    case 0b1000111: // MSUB
         BIT(ir, 25) ? (dd = ds1 * ds2 - ds3) : (sd = ss1 * ss2 - ss3, BNAN(&dd));
         sprintf(asmcode, "fmsub.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
                 rda, rs1a, rs2a, rs3a);
         break;
-    case 0b10010: // NMSUB
+    case 0b1001011: // NMSUB
         BIT(ir, 25) ? (dd = -ds1 * ds2 + ds3) : (sd = -ss1 * ss2 + ss3, BNAN(&dd));
         sprintf(asmcode, "fnmsub.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
                 rda, rs1a, rs2a, rs3a);
         break;
-    case 0b10011: // NMADD
+    case 0b1001111: // NMADD
         BIT(ir, 25) ? (dd = -ds1 * ds2 - ds3) : (sd = -ss1 * ss2 - ss3, BNAN(&dd));
         sprintf(asmcode, "fnmadd.%c f%d, f%d, f%d, f%d", BIT(ir, 25) ? 'd' : 's',
                 rda, rs1a, rs2a, rs3a);
         break;
-    case 0b10100: // OP-FP
+    case 0b1010011: // OP-FP
         switch (BITS(ir, 27, 31))
         {
         case 0b00000: // FADD
@@ -614,7 +695,7 @@ void simulator::step(int nojump)
             break;
         }
         break;
-    case 0b11000: // BRANCH
+    case 0b1100011: // BRANCH
         imm = (BIT(ir, 31) << 12) | (BIT(ir, 7) << 11) |
               (BITS(ir, 25, 30) << 5) | (BITS(ir, 8, 11) << 1);
         imm = SEXT(imm, 13);
@@ -629,14 +710,14 @@ void simulator::step(int nojump)
         if (funct3 != 2 && funct3 != 3)
             sprintf(asmcode, "%s x%d, x%d, %ld(pc)", bnames[funct3], rs1a, rs2a, imm);
         break;
-    case 0b11001: // JALR
+    case 0b1100111: // JALR
         imm = SEXT(BITS(ir, 20, 31), 12);
         rd = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
         npc = rs1 + imm;
         jump = 1;
         sprintf(asmcode, "jalr x%d, %ld(x%d)", rda, imm, rs1a);
         break;
-    case 0b11011: // JAL
+    case 0b1101111: // JAL
         imm = (BIT(ir, 31) << 20) | (BITS(ir, 12, 19) << 12) |
               (BIT(ir, 20) << 11) | (BITS(ir, 21, 30) << 1);
         imm = SEXT(imm, 21);
@@ -645,7 +726,7 @@ void simulator::step(int nojump)
         jump = 1;
         sprintf(asmcode, "jal x%d, %ld(pc)", rda, imm);
         break;
-    case 0b11100: // SYSTEM
+    case 0b1110011: // SYSTEM
         static char csrname[4] = {0, 'w', 's', 'c'};
         if (BITS(ir, 12, 13))
         {
@@ -660,14 +741,21 @@ void simulator::step(int nojump)
             csrdata = csr[csraddr].val;
             sprintf(asmcode, "csrr%c%s x%d, %s, %s%d",
                     csrname[BITS(ir, 12, 13)], BIT(ir, 14) ? "i" : "",
-                    rda, csr[csraddr].name, BIT(ir, 14) ? "" : "x", rs1a);
+                    rda, get_csrname(csraddr), BIT(ir, 14) ? "" : "x", rs1a);
         }
-        else
+        else if ((ir & ~(1 << 20)) == 0x73)
+        {
+            csr[0x341].val = pc;
+            // csr[0x342].val = BIT(ir, 20) ? 3 : 11;
+            excp = 1;
             sprintf(asmcode, BIT(ir, 20) ? "ebreak" : "ecall");
+        }
         break;
     }
     if (!jump | nojump)
         npc = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
+    if (excp)
+        npc = csr[0x305].val;
     arregs[0] = 0;
 }
 
@@ -701,6 +789,13 @@ uint64_t simulator::get_mwaddr() { return mwaddr; }
 uint64_t simulator::get_mwdata() { return mwdata; }
 uint8_t simulator::get_mwwidth() { return mwwidth; }
 const char *simulator::get_asmcode() { return asmcode; }
-const char *simulator::get_csrname(uint64_t addr) { return csr[addr].name; }
+const char *simulator::get_csrname(uint64_t addr)
+{
+    static char defname[32] = {0};
+    sprintf(defname, "(csr0x%lx)", addr);
+    if (csr[addr].name)
+        return csr[addr].name;
+    return defname;
+}
 uint64_t simulator::get_csraddr() { return csraddr; }
 uint64_t simulator::get_csrdata() { return csrdata; }

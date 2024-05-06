@@ -14,7 +14,7 @@ private:
     uint64_t pc = 0, npc, ir, arregs[64] = {0};
     uint64_t mwaddr, mwdata, csraddr, csrdata;
     uint8_t mwwidth;
-    char asmcode[32];
+    char asmcode[64];
 
 public:
     std::map<uint64_t, csr_t> csr;

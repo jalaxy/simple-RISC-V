@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 458
+`define PTLEN 460
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -74,7 +74,9 @@
 `define EX_FENCE  6'd43
 `define EX_FENCEI 6'd44
 `define EX_CSR    6'd45
-`define EX_END    6'd46
+`define EX_ECALL  6'd46
+`define EX_EBREAK 6'd47
+`define EX_END    6'd48
 
 typedef struct packed { logic valid, b; logic [63:0] pc, bpc; } pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
@@ -150,7 +152,7 @@ module pipeline(
     logic [20:0] fpu_op; logic [63:0] fpu_a, fpu_b;
     logic [2:0] fpu_rm; logic fpu_double; logic [64:0] fpu_r;
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
-    logic [63:0] csr_rval, csr_wval;
+    logic [63:0] csr_rval, csr_wval; logic csr_excp;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -187,7 +189,7 @@ module pipeline(
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
         .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
-        .addr_done(addr_done), .addr_val(addr_val));
+        .addr_done(addr_done), .addr_val(addr_val), .tvec(csr_inst.tvec));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb), .ena_ex(get_id_ex),
         .raddr(raddr), .rvalue(rvalue), .cqid(cqid_new),
@@ -209,7 +211,7 @@ module pipeline(
         .late_done(late_done), .late_val(late_val),
         .addr_done(addr_done), .addr_val(addr_val),
         .csr_addr(csr_addr), .csr_wena(csr_wena), .csr_func(csr_func),
-        .csr_rval(csr_rval), .csr_wval(csr_wval),
+        .csr_rval(csr_rval), .csr_wval(csr_wval), .csr_excp(csr_excp),
         .dcache_rqst(dcache_rqst), .dcache_rsrv(dcache_rsrv), .dcache_wena(dcache_wena),
         .dcache_addr(dcache_addr), .dcache_bits(dcache_bits), .dcache_done(dcache_done),
         .dcache_rdat(dcache_rdat), .dcache_wdat(dcache_wdat), .dcache_flsh(dcache_flsh)
@@ -228,7 +230,7 @@ module pipeline(
         .rm(fpu_rm), .double(fpu_double),
         .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
-        .rval(csr_rval), .wval(csr_wval), .func(csr_func),
+        .rval(csr_rval), .wval(csr_wval), .func(csr_func), .excp(csr_excp),
         .nret(wb_stage_inst.cqpop2 ? 2 : (wb_stage_inst.cqpop1 ? 1 : 0)));
     arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
                           // or use dynamic priority?
@@ -395,6 +397,8 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         exop0[`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
         exop0[`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
         exop0[`EX_CSR] = op[`SYSTEM] & |ir[13:12];
+        exop0[`EX_ECALL] = ir == 32'h00000073;
+        exop0[`EX_EBREAK] = ir == 32'h00100073;
         if (ir[1:0] != 2'b11) exop0 = 0;
     end
     always_comb exop1 =
@@ -553,7 +557,8 @@ module ex_stage(input logic clk, input logic rst,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data,
     output logic pt_exc, input logic ena_arb,
-    output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val
+    output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val,
+    input logic [63:0] tvec
 );
     id_ex_t in;
     logic frompt;
@@ -687,10 +692,12 @@ module ex_stage(input logic clk, input logic rst,
             out_wb.mw <= op[`EX_STORE] | op[`EX_CSR];
             out_wb.pc <= in.pc;
         end else if (ena_wb) out_wb.valid <= 0;
-    always_comb if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
+    always_comb if (op[`EX_ECALL] | op[`EX_EBREAK]) jpc = tvec;
+        else if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
         else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
         else jpc = in.base[63:0] + in.offset;
-    always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
+    always_comb jump = op[`EX_ECALL] | op[`EX_EBREAK] |
+        in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
     always_comb excp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
     always_comb fencei = (fencei_r | op[`EX_FENCEI]) & ~lsu_empty;
     always_ff @(posedge clk) if (rst | ready & excp | lsu_empty) fencei_r <= 0;
@@ -868,7 +875,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     input logic [`lgCQSZ:0] addr_done, input logic [63:0] addr_val,
     output logic [11:0] csr_addr, output logic csr_wena, output logic [2:0] csr_func,
-    input logic [63:0] csr_rval, output logic [63:0] csr_wval,
+    input logic [63:0] csr_rval, output logic [63:0] csr_wval, input logic csr_excp,
     output logic [`lgCQSZ:0] dcache_rqst,
     output logic       [1:0] dcache_rsrv,
     output logic             dcache_wena,
@@ -970,7 +977,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
         fwd[`lgCQSZ] ? fwd : (ready & lsqcsr[front] ? lsqrqst[front] : 0));
     always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : (
         fwd[`lgCQSZ] ? fwdval : {1'b0, csr_rval});
-    always_comb excp = 0;
+    always_comb excp = csr_excp | 0;
     always_comb dcache_wdat = lsqdata[front][63:0];
     always_comb dcache_flsh = flush;
     always_comb csr_addr = lsqaddr[front][11:0];
@@ -1040,9 +1047,11 @@ Machine-level CSR:
 module csr(input logic clk, input logic rst,
     input logic [11:0] addr, output logic [63:0] rval,
     input logic wena, input logic [63:0] wval, input logic [2:0] func,
-    input logic [63:0] nret
+    input logic [63:0] nret, output logic excp
 );
     logic [63:0] wres;
+    logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
+    logic [63:0] mstatus, mtvec, medeleg, mideleg;
     logic [63:0] utvec, mcycle, minstret;
     always_comb case (func[1:0])
         2'b00: wres = 0;
@@ -1051,18 +1060,52 @@ module csr(input logic clk, input logic rst,
         2'b11: wres = ~wval & rval;
     endcase
     always_comb case (addr)
+        12'h301: rval = misa;    12'hf11: rval = mvendorid;
+        12'hf12: rval = marchid; 12'hf13: rval = mimpid;
+        12'hf14: rval = mhartid; 12'h300: rval = mstatus;
+        12'h305: rval = mtvec;   12'h302: rval = medeleg;
+        12'h303: rval = mideleg;
+
         12'h005: rval = utvec;
         12'hb00: rval = mcycle;
         12'hb02: rval = minstret;
         default: rval = 0;
     endcase
     always_ff @(posedge clk) begin
+        if (rst) misa <= {2'h2, 36'h0, 26'h112D}; if (wena & addr == 12'h301) begin
+            misa[0] <= wres[0]; misa[3:2] <= wres[3:2]; misa[4] <= ~wres[8];
+            misa[8:5] <= wres[8:5]; misa[13:12] <= wres[13:12]; misa[16] <= wres[16];
+            misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
+            if (wres[5]) {misa[3], misa[16]} <= 0;
+        end
+        if (rst) mvendorid <= 0; else if (wena & addr == 12'hf11) excp <= 1;
+        if (rst) marchid <= 0; else if (wena & addr == 12'hf12) excp <= 1;
+        if (rst) mimpid <= 0; else if (wena & addr == 12'hf13) excp <= 1;
+        if (rst) mhartid <= 0; else if (wena & addr == 12'hf13) excp <= 1;
+        if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
+        else if (wena & addr == 12'h300) begin
+            mstatus <= wres;
+            mstatus[63] <= mstatus[16:15] == 2'b11 | mstatus[14:13] == 2'b11;
+            {mstatus[62:36], mstatus[31:23]} <= 0;
+            {mstatus[10:9], mstatus[6], mstatus[2]} <= 0;
+        end
+        if (rst) mtvec <= 0; else if (wena & addr == 12'h305) begin
+            mtvec <= wres; mtvec[1] <= 0;
+        end
+        if (rst) medeleg <= 0; else if (wena & addr == 12'h302) begin
+            medeleg <= wres; medeleg[11] <= 0;
+        end
+        if (rst) mideleg <= 0; else if (wena & addr == 12'h303) mideleg <= wres;
+
         if (rst) mcycle <= 0; else mcycle <= mcycle + 64'd1;
         if (rst) minstret <= 0; else minstret <= minstret + nret;
         if (wena & addr == 12'h005) utvec    <= wres;
         if (wena & addr == 12'hb00) mcycle   <= wres;
         if (wena & addr == 12'hb02) minstret <= wres;
+        if (rst) excp <= 0;
     end
+    logic [63:0] tvec;
+    always_comb tvec = mtvec;
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
