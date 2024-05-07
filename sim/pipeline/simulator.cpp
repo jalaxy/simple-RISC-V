@@ -404,21 +404,29 @@ void simulator::step(int nojump)
             b[0] = BITS(rs2, 0, 31), b[1] = BITS(rs2, 32, 63);
             b[2] = b[3] = BIT(rs2, 63) && funct3 <= 1 ? 0xffffffffull : 0;
             uint64_t l = a[0] * b[0] + ((a[0] * b[1] + a[1] * b[0]) << 32);
-            uint64_t h = ((a[0] * b[1] + a[1] * b[0]) >> 32) +
-                         (a[0] * b[2] + a[1] * b[1] + a[2] * b[0]) +
-                         ((a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]) << 32);
+            uint64_t h =
+                ((a[0] * b[0] >> 32) + (a[0] * b[1] << 32 >> 32) + (a[1] * b[0] << 32 >> 32) >> 32) +
+                (a[0] * b[1] >> 32) + (a[1] * b[0] >> 32) +
+                (a[0] * b[2]) + (a[1] * b[1]) + (a[2] * b[0]) +
+                (a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0] << 32);
             if (funct3 == 0b000) // MUL
                 rd = l;
             else if (funct3 <= 0b011) // MULH[[S]U]
                 rd = h;
             else if (funct3 == 0b100) // DIV
-                rd = (int64_t)rs1 / (int64_t)rs2;
+                if (rs1 == 0x8000000000000000 && rs2 == -1)
+                    rd = rs1;
+                else
+                    rd = rs2 == 0 ? -1 : (int64_t)rs1 / (int64_t)rs2;
             else if (funct3 == 0b101) // DIVU
-                rd = rs1 / rs2;
+                rd = rs2 == 0 ? (uint64_t)-1 : rs1 / rs2;
             else if (funct3 == 0b110) // REM
-                rd = (int64_t)rs1 % (int64_t)rs2;
+                if (rs1 == 0x8000000000000000 && rs2 == -1)
+                    rd = 0;
+                else
+                    rd = rs2 == 0 ? (int64_t)rs1 : (int64_t)rs1 % (int64_t)rs2;
             else if (funct3 == 0b111) // REMU
-                rd = rs1 % rs2;
+                rd = rs2 == 0 ? rs1 : rs1 % rs2;
         }
         else if (funct3 == 0b000)
             if (BIT(ir, 30)) // SUB
@@ -463,13 +471,19 @@ void simulator::step(int nojump)
             if (funct3 == 0b000) // MULW
                 rd = SEXT(rs1 * rs2, 32);
             else if (funct3 == 0b100) // DIVW
-                rd = SEXT((int32_t)rs1 / (int32_t)rs2, 32);
+                if ((int32_t)rs1 == 0x80000000 && (int32_t)rs2 == -1)
+                    rd = rs1;
+                else
+                    rd = SEXT(rs2 == 0 ? -1 : (int32_t)rs1 / (int32_t)rs2, 32);
             else if (funct3 == 0b101) // DIVUW
-                rd = SEXT((uint32_t)rs1 / (uint32_t)rs2, 32);
+                rd = SEXT(rs2 == 0 ? -1 : (uint32_t)rs1 / (uint32_t)rs2, 32);
             else if (funct3 == 0b110) // REMW
-                rd = SEXT((int32_t)rs1 % (int32_t)rs2, 32);
+                if ((int32_t)rs1 == 0x80000000 && (int32_t)rs2 == -1)
+                    rd = 0;
+                else
+                    rd = SEXT(rs2 == 0 ? (int32_t)rs1 : (int32_t)rs1 % (int32_t)rs2, 32);
             else if (funct3 == 0b111) // REMUW
-                rd = SEXT((uint32_t)rs1 % (uint32_t)rs2, 32);
+                rd = SEXT(rs2 == 0 ? (uint32_t)rs1 : (uint32_t)rs1 % (uint32_t)rs2, 32);
         }
         else if (funct3 == 0b000)
             if (BIT(ir, 30)) // SUBW

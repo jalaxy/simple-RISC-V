@@ -121,15 +121,24 @@ module div(input logic clk, input logic rst, input logic flush,
     logic [31:0] res32;
     // op: 0 -> DIV   1 -> DIVU   2 -> REM   3 -> REMU
     //     4 -> DIVW  5 -> DIVUW  6 -> REMW  7 -> REMUW
-    always_comb res32 = {32{op[4]}} & $signed($signed(a[31:0]) / $signed(b[31:0])) |
-                        {32{op[5]}} & (a[31:0] / b[31:0]) |
-                        {32{op[6]}} & $signed($signed(a[31:0]) % $signed(b[31:0])) |
-                        {32{op[7]}} & (a[31:0] % b[31:0]);
-    always_comb res = {64{op[0]}} & $signed($signed(a) / $signed(b)) |
-                      {64{op[1]}} & (a / b) |
-                      {64{op[2]}} & $signed($signed(a) % $signed(b)) |
-                      {64{op[3]}} & (a % b) |
-                      {64{|op[7:4]}} & {{32{res32[31]}}, res32};
+    always_comb if (a[31:0] == 32'h80000000 & b[31:0] == 32'hffffffff & (op[4] | op[6]))
+            res32 = {32{op[4]}} & a[31:0];
+        else if (~|b) res32 = {32{op[4] | op[5]}} & -32'd1 |
+                              {32{op[6] | op[7]}} & a[31:0];
+        else res32 = {32{op[4]}} & $signed($signed(a[31:0]) / $signed(b[31:0])) |
+                     {32{op[5]}} & (a[31:0] / b[31:0]) |
+                     {32{op[6]}} & $signed($signed(a[31:0]) % $signed(b[31:0])) |
+                     {32{op[7]}} & (a[31:0] % b[31:0]);
+    always_comb if (a == 64'h8000000000000000 &
+                    b == 64'hffffffffffffffff & (op[0] | op[2]))
+            res = {64{op[0]}} & a;
+        else if (~|b & |op[3:0]) res = {64{op[0] | op[1]}} & -64'd1 |
+                                       {64{op[2] | op[3]}} & a;
+        else res = {64{op[0]}} & $signed($signed(a) / $signed(b)) |
+                {64{op[1]}} & (a / b) |
+                {64{op[2]}} & $signed($signed(a) % $signed(b)) |
+                {64{op[3]}} & (a % b) |
+                {64{|op[7:4]}} & {{32{res32[31]}}, res32};
     always_ff @(posedge clk)
         if (rst | flush) valid <= {`lgCQSZ+1{`divlatency'd0}};
         else if (ena | ~valid[0][`lgCQSZ]) begin
