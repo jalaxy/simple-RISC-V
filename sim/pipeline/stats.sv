@@ -279,3 +279,44 @@ module regfile #(parameter dwidth = 64,
         always_comb rvalue[i] = dupval[sel[raddr[i]]];
     end
 endmodule
+
+/********************************** CSR map ***********************************
+User-level CSR:
+    0x000 -- 0x005:
+        0x000 -> ustatus    0x001 -> fflags    0x002 -> frm    0x003 -> fcsr
+        0x004 -> uie        0x005 -> utvec
+    0x040 -- 0x044:
+        0x040 -> uscratch    0x041 -> uepc    0x042 -> ucause    0x043 -> utval
+        0x044 -> uip
+    0xc00 -- 0xc1f:
+        0xc00 -> cycle    0xc01 -> time    0xc02 -> instret
+        0xc03-0xc1f -> hpmcounter
+Supervisor-level CSR:
+    0x100 -- 0x106:
+        0x100 -> sstatus    0x102 -> sedeleg    0x103 -> sideleg    0x104 -> sie
+        0x105 -> stvec      0x106 -> scounteren
+    0x140 -- 0x144:
+        0x140 -> sscrach    0x141 -> sepc    0x142 -> scause    0x143 -> stval
+        0x144 -> sip
+    0x180 -- 0x180:
+        0x180 -> satp
+Machine-level CSR:
+    0x300 -- 0x306:
+        0x300 -> mstatus    0x301 -> misa     0x302 -> medeleg    0x303 -> mideleg
+        0x304 -> mie        0x305 -> mtvec    0x306 -> mcounteren
+    0x320 -- 0x33f:
+        0x320 -> mcountinhibit    0x323-0x33f -> mhpmevent
+    0x340 -- 0x344:
+        0x340 -> mscratch    0x341 -> mepc    0x342 -> mcause    0x343 -> mtval
+        0x344 -> mip
+    0x3a0 -- 0x3bf:
+        0x3a0,0x3a2 -> pmpcfg    0x3b0-0x3bf -> pmpaddr
+    0x7a0 -- 0x7a3:
+        0x7a0 -> tselect    0x7a1-0x7a3 -> tdata
+    0x7b0 -- 0x7b3:
+        0x7b0 -> dcsr       0x7b1 -> dpc    0x7b2-0x7b3 -> dscratch
+    0xb00 -- 0xb1f:
+        0xb00 -> mcycle    0xb02 -> minstret    0xb03-0xb1f -> mhpmcounter
+    0xf11 -- 0xf14:
+        0xf11 -> mvendorid    0xf12 -> marchid    0xf13 -> mimpid    0xf14 -> mhartid
+******************************************************************************/

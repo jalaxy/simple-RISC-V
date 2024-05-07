@@ -746,7 +746,7 @@ void simulator::step(int nojump)
         else if ((ir & ~(1 << 20)) == 0x73)
         {
             csr[0x341].val = pc;
-            // csr[0x342].val = BIT(ir, 20) ? 3 : 11;
+            csr[0x342].val = BIT(ir, 20) ? 3 : 11;
             excp = 1;
             sprintf(asmcode, BIT(ir, 20) ? "ebreak" : "ecall");
         }

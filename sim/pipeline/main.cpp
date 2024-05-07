@@ -225,7 +225,7 @@ int main(int argc, char **argv)
                         htif.lock = sym.st_value;
                 }
             }
-        if (htif.fromhost == 0 || htif.tohost == 0 || htif.lock == 0)
+        if (htif.fromhost == 0 || htif.tohost == 0)
         {
             htif = {0x100000, 0x100008, 0x100010}; // default htif addresses
             printf("HTIF address not specified, set to default.\n");
@@ -269,11 +269,14 @@ int main(int argc, char **argv)
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
     std::queue<csrcmt_t> csrs;
-    int i = 0;
+    int i = 0, tohost_exit = 0;
     uint64_t rsrv_val;
     while (i < cmd.simtime)
     {
-        if (commits.size() <= 1)
+        int cmt_check = commits.size() > 1 || tohost_exit;
+        if (commits.empty() && tohost_exit)
+            break;
+        if (commits.size() <= 1 && !tohost_exit)
         {
             // negedge clock
             dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
@@ -338,7 +341,7 @@ int main(int argc, char **argv)
             i++;
         }
         // simulator checker
-        if (cmd.debug && commits.size() > 1)
+        if (cmd.debug && cmt_check)
         {
             sim->step();
             commit_t curcommit = commits.front();
@@ -383,10 +386,19 @@ int main(int argc, char **argv)
                 getchar();
             }
         }
-        if (commits.size() > 1)
+        if (cmt_check)
             commits.pop();
+        // HTIF requests handler
+        uint64_t tohost_dev = DLE(memory, htif.tohost) >> 56;
+        uint64_t tohost_cmd = DLE(memory, htif.tohost) << 8 >> 56;
+        uint64_t tohost_dat = DLE(memory, htif.tohost) << 16 >> 16;
+        if (tohost_dev == 0 && tohost_cmd == 0)
+            if (tohost_dat & 1)
+                tohost_exit = 1;
     }
-    if (cmd.debug)
+    if (tohost_exit)
+        printf("Exit with code %lu.\n", DLE(memory, htif.tohost) >> 1);
+    else if (cmd.debug)
     {
         // final status check
         for (int i = sim->csr[0xb00].val; i < cmd.simtime; i++)

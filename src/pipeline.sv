@@ -1,7 +1,7 @@
 `define RST_PC 64'h400000 // reset pc
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
-`define PTLEN 460
+`define PTLEN 461
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
 `define LSQSZ 8 // store queue size
@@ -76,7 +76,8 @@
 `define EX_CSR    6'd45
 `define EX_ECALL  6'd46
 `define EX_EBREAK 6'd47
-`define EX_END    6'd48
+`define EX_RET    6'd48
+`define EX_END    6'd49
 
 typedef struct packed { logic valid, b; logic [63:0] pc, bpc; } pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
@@ -153,6 +154,7 @@ module pipeline(
     logic [2:0] fpu_rm; logic fpu_double; logic [64:0] fpu_r;
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
+    logic exception; logic [63:0] epc, cause;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(data_ex_pc.valid),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -189,7 +191,8 @@ module pipeline(
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
         .pt_done(pt_done), .pt_data(pt_data), .pt_exc(pt_exc), .ena_arb(pt_ena),
-        .addr_done(addr_done), .addr_val(addr_val), .tvec(csr_inst.tvec));
+        .addr_done(addr_done), .addr_val(addr_val),
+        .excp(exception), .tvec(csr_inst.tvec));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb), .ena_ex(get_id_ex),
         .raddr(raddr), .rvalue(rvalue), .cqid(cqid_new),
@@ -230,8 +233,12 @@ module pipeline(
         .rm(fpu_rm), .double(fpu_double),
         .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
-        .rval(csr_rval), .wval(csr_wval), .func(csr_func), .excp(csr_excp),
-        .nret(wb_stage_inst.cqpop2 ? 2 : (wb_stage_inst.cqpop1 ? 1 : 0)));
+        .rval(csr_rval), .wval(csr_wval), .func(csr_func), .eout(csr_excp),
+        .nret(wb_stage_inst.cqpop2 ? 2 : (wb_stage_inst.cqpop1 ? 1 : 0)),
+        .ein(exception), .epc(epc), .cause(cause));
+    egen egen_inst(.exc(exception), .epc(epc), .cause(cause),
+        .mecall(ex_stage_inst.op[`EX_ECALL]), .mebreak(ex_stage_inst.op[`EX_EBREAK]),
+        .pc_id(data_id_ex.pc));
     arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
                           // or use dynamic priority?
         .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
@@ -399,6 +406,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         exop0[`EX_CSR] = op[`SYSTEM] & |ir[13:12];
         exop0[`EX_ECALL] = ir == 32'h00000073;
         exop0[`EX_EBREAK] = ir == 32'h00100073;
+        exop0[`EX_RET] = (ir & ~(32'd3 << 28)) == 32'h00200073;
         if (ir[1:0] != 2'b11) exop0 = 0;
     end
     always_comb exop1 =
@@ -461,7 +469,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             out_ex_q[0].offset <= imm & {64{op[`JAL] | op[`JALR] | op[`BRANCH]}};
             out_ex_q[0].iword <= op[`OP_32] | op[`OP_IMM_32];
             out_ex_q[0].isign <= (op[`OP_32] | op[`OP_IMM_32]) & ir[30];
-            out_ex_q[0].funct3 <= ir[14:12];
+            out_ex_q[0].funct3 <= exop0[`EX_RET] ? {1'b0, ir[29:28]} : ir[14:12];
             out_ex_q[0].fdouble <= ir[25];
             out_ex_q[0].rsrv <= {op[`AMO] & |exop1, op[`AMO] & ~|exop1};
             out_ex_q[0].aqrl <= {op[`AMO] & ir[26], op[`AMO] & ir[25]};
@@ -558,7 +566,7 @@ module ex_stage(input logic clk, input logic rst,
     output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data,
     output logic pt_exc, input logic ena_arb,
     output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val,
-    input logic [63:0] tvec
+    input logic excp, input logic [63:0] tvec
 );
     id_ex_t in;
     logic frompt;
@@ -567,7 +575,7 @@ module ex_stage(input logic clk, input logic rst,
     always_comb in = frompt ? in_pt : in_id;
     logic [`EX_END-1:0] op;
     logic [63:0] a, b;
-    logic jump, excp;
+    logic jump, misp;
     logic [63:0] jpc;
     logic [64:0] sub, res;
     logic [63:0] add, sll, srl, sra;
@@ -582,6 +590,8 @@ module ex_stage(input logic clk, input logic rst,
         b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
         if (in.iword) {a, b} = {32'd0, a[31:0], 32'd0, b[31:0]};
         if (in.isign) {a, b} = {{32{a[31]}}, a[31:0], {32{b[31]}}, b[31:0]};
+        if (in.iword & (in.exop[`EX_SLL] | in.exop[`EX_SRL] | in.exop[`EX_SRA]))
+            b[5] = 0;
     end
     always_comb sub = {1'b0, a} - {1'b0, b};
     always_comb add = a + b;
@@ -678,7 +688,7 @@ module ex_stage(input logic clk, input logic rst,
     always_ff @(posedge clk) if (rst) pt_done <= 0;
         else if (frompt & ~lsu)
             if (res[64]) pt_done <= 0;
-            else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & excp};
+            else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & misp};
         else if (ena_arb) pt_done <= 0;
     always_ff @(posedge clk) if (rst) addr_done <= 0;
         else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};
@@ -692,21 +702,20 @@ module ex_stage(input logic clk, input logic rst,
             out_wb.mw <= op[`EX_STORE] | op[`EX_CSR];
             out_wb.pc <= in.pc;
         end else if (ena_wb) out_wb.valid <= 0;
-    always_comb if (op[`EX_ECALL] | op[`EX_EBREAK]) jpc = tvec;
+    always_comb if (excp) jpc = tvec;
         else if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
         else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
         else jpc = in.base[63:0] + in.offset;
-    always_comb jump = op[`EX_ECALL] | op[`EX_EBREAK] |
-        in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
-    always_comb excp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
+    always_comb jump = excp | in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
+    always_comb misp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
     always_comb fencei = (fencei_r | op[`EX_FENCEI]) & ~lsu_empty;
-    always_ff @(posedge clk) if (rst | ready & excp | lsu_empty) fencei_r <= 0;
+    always_ff @(posedge clk) if (rst | ready & misp | lsu_empty) fencei_r <= 0;
         else if (fencei) fencei_r <= 1;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
-        else if (ready & excp | fencei) begin
+        else if (ready & misp | fencei) begin
             out_pc.valid <= 1'b1;
-            if (ready & excp | in_id.valid) begin
+            if (ready & misp | in_id.valid) begin
                 out_pc.pc <= in.pc;
                 out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
             end
@@ -891,12 +900,16 @@ module lsu(input logic clk, input logic rst, input logic flush,
     logic [`LSQSZ-1:0][64:0] lsqdata;
     logic [`LSQSZ-1:0][2:0] lsqbits;
     logic [`LSQSZ-1:0][1:0] lsqrsrv;
-    logic [`LSQSZ-1:0] lsqsent, lsqcmt, lsqwena, lsqfwd, lsqraq, lsqcsr;
+    logic [`LSQSZ-1:0] lsqsent, lsqcmt, lsqmisa, lsqwena, lsqfwd, lsqraq, lsqcsr;
     logic [`lgLSQSZ-1:0] front, rear, frontp1, rearp1;
-    logic full, empty, push, pop, th, thr, ready;
+    logic full, empty, push, pop, th, thr, ready, misa;
     logic [`lgCQSZ:0] fwd; logic [64:0] fwddata, fwdval; logic [2:0] fwdbits;
     logic [`lgCQSZ:0] thrrqst; logic [1:0] thrrsrv; logic thrwena;
     logic [64:0] thraddr; logic [2:0] thrbits;
+    always_comb case (bits[1:0])
+        0: misa = 0;          1: misa = addr[0];
+        2: misa = |addr[1:0]; 3: misa = |addr[2:0];
+    endcase
     always_comb ready = ~empty & ~lsqsent[front] & ~lsqaddr[front][64] &
         (~lsqwena[front] | ~lsqdata[front][64] & (cmt | lsqcmt[front]));
     always_comb push = rqst[`lgCQSZ] & (~full | pop) &
@@ -906,9 +919,9 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_comb rearp1 = rear + 1;
     always_comb get = ~rqst[`lgCQSZ] | push;
     always_comb begin
-        th = rqst[`lgCQSZ] & ~wena & ~addr[64];
+        th = rqst[`lgCQSZ] & ~wena & ~addr[64] & ~misa;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
-            if (lsqaddr[i][64] | addr[63:3] == lsqaddr[i][63:3]) th = 0;
+            if (lsqaddr[i][64] | lsqmisa[i] | addr[63:3] == lsqaddr[i][63:3]) th = 0;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) th = 0;
         if (aqrl[0] | csr) th = 0;
     end
@@ -928,7 +941,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
                         addr[63:0] == lsqaddr[i][63:0] & bits[1:0] == lsqbits[i][1:0])
                         {fwd, fwdbits, fwddata} <= {rqst, bits, lsqdata[i]};
             for (int i = 0; i < `LSQSZ; i++)
-                if (lsqrqst[i][`lgCQSZ] & lsqraq[i]) fwd <= 0;
+                if (lsqrqst[i][`lgCQSZ] & (lsqraq[i] | lsqmisa[i])) fwd <= 0;
             if (aqrl[0] | csr) fwd <= 0;
         end else if (~dcache_done[`lgCQSZ]) {fwd, thr} <= 0; else thr <= 0;
     always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
@@ -940,7 +953,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
             if (pop) begin lsqrqst[front] <= 0; front <= frontp1; end
             if (push) begin
                 rear <= rearp1;
-                lsqsent[rear] <= th; lsqcmt[rear] <= cmt & empty;
+                lsqsent[rear] <= th; lsqcmt[rear] <= cmt & empty; lsqmisa[rear] <= misa;
                 lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1]; lsqcsr[rear] <= csr;
                 lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
                 lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
@@ -1004,72 +1017,53 @@ module arbiter(
     end
 endmodule
 
-/********************************** CSR map ***********************************
-User-level CSR:
-    0x000 -- 0x005:
-        0x000 -> ustatus    0x001 -> fflags    0x002 -> frm    0x003 -> fcsr
-        0x004 -> uie        0x005 -> utvec
-    0x040 -- 0x044:
-        0x040 -> uscratch    0x041 -> uepc    0x042 -> ucause    0x043 -> utval
-        0x044 -> uip
-    0xc00 -- 0xc1f:
-        0xc00 -> cycle    0xc01 -> time    0xc02 -> instret
-        0xc03-0xc1f -> hpmcounter
-Supervisor-level CSR:
-    0x100 -- 0x106:
-        0x100 -> sstatus    0x102 -> sedeleg    0x103 -> sideleg    0x104 -> sie
-        0x105 -> stvec      0x106 -> scounteren
-    0x140 -- 0x144:
-        0x140 -> sscrach    0x141 -> sepc    0x142 -> scause    0x143 -> stval
-        0x144 -> sip
-    0x180 -- 0x180:
-        0x180 -> satp
-Machine-level CSR:
-    0x300 -- 0x306:
-        0x300 -> mstatus    0x301 -> misa     0x302 -> medeleg    0x303 -> mideleg
-        0x304 -> mie        0x305 -> mtvec    0x306 -> mcounteren
-    0x320 -- 0x33f:
-        0x320 -> mcounterinhibit    0x323-0x33f -> mhpmevent
-    0x340 -- 0x344:
-        0x340 -> mscratch    0x341 -> mepc    0x342 -> mcause    0x343 -> mtval
-        0x344 -> mip
-    0x3a0 -- 0x3bf:
-        0x3a0,0x3a2 -> pmpcfg    0x3b0-0x3bf -> pmpaddr
-    0x7a0 -- 0x7a3:
-        0x7a0 -> tselect    0x7a1-0x7a3 -> tdata
-    0x7b0 -- 0x7b3:
-        0x7b0 -> dcsr       0x7b1 -> dpc    0x7b2-0x7b3 -> dscratch
-    0xb00 -- 0xb1f:
-        0xb00 -> mcycle    0xb02 -> minstret    0xb03-0xb1f -> mhpmcounter
-    0xf11 -- 0xf14:
-        0xf11 -> mvendorid    0xf12 -> marchid    0xf13 -> mimpid    0xf14 -> mhartid
-******************************************************************************/
+module egen(
+    input logic mecall, input logic mebreak,
+    input logic [63:0] pc_id,
+    output logic exc,
+    output logic [63:0] cause, output logic [63:0] epc);
+    always_comb if (mecall) {exc, cause, epc} = {1'b1, 64'd11, pc_id};
+    else if (mebreak) {exc, cause, epc} = {1'b1, 64'd3, pc_id};
+    else {exc, cause, epc} = 0;
+endmodule
+
 module csr(input logic clk, input logic rst,
     input logic [11:0] addr, output logic [63:0] rval,
     input logic wena, input logic [63:0] wval, input logic [2:0] func,
-    input logic [63:0] nret, output logic excp
+    input logic [63:0] nret, output logic eout,
+    input logic ein, input logic [63:0] epc, input logic [63:0] cause
 );
+    logic [1:0] level; // 00 -> U  01 -> S  11 -> M
     logic [63:0] wres;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
-    logic [63:0] mstatus, mtvec, medeleg, mideleg;
-    logic [63:0] utvec, mcycle, minstret;
+    logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, mie;
+    logic [63:0] mtime, mtimecmp; // memory mapped
+    logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
+    logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
+    logic [63:0] utvec;
     always_comb case (func[1:0])
         2'b00: wres = 0;
         2'b01: wres = wval;
         2'b10: wres = wval | rval;
         2'b11: wres = ~wval & rval;
     endcase
-    always_comb case (addr)
-        12'h301: rval = misa;    12'hf11: rval = mvendorid;
-        12'hf12: rval = marchid; 12'hf13: rval = mimpid;
-        12'hf14: rval = mhartid; 12'h300: rval = mstatus;
-        12'h305: rval = mtvec;   12'h302: rval = medeleg;
-        12'h303: rval = mideleg;
-
-        12'h005: rval = utvec;
-        12'hb00: rval = mcycle;
-        12'hb02: rval = minstret;
+    always_comb if (addr > 12'hb02 & addr < 12'hb20)
+        rval = mhpmcounter[addr[4:0]];
+    else if (addr > 12'h322 & addr < 12'h340)
+        rval = mhpmevent[addr[4:0]];
+    else case (addr)
+        12'h301: rval = misa;          12'hf11: rval = mvendorid;
+        12'hf12: rval = marchid;       12'hf13: rval = mimpid;
+        12'hf14: rval = mhartid;       12'h300: rval = mstatus;
+        12'h305: rval = mtvec;         12'h302: rval = medeleg;
+        12'h303: rval = mideleg;       12'h344: rval = mip;
+        12'h304: rval = mie;           12'hb00: rval = mcycle;
+        12'hb02: rval = minstret;      12'h306: rval = mcounteren;
+        12'h320: rval = mcountinhibit; 12'h340: rval = mscratch;
+        12'h341: rval = mepc;          12'h342: rval = mcause;
+        12'h343: rval = mtval;
         default: rval = 0;
+        12'h005: rval = utvec;
     endcase
     always_ff @(posedge clk) begin
         if (rst) misa <= {2'h2, 36'h0, 26'h112D}; if (wena & addr == 12'h301) begin
@@ -1078,10 +1072,10 @@ module csr(input logic clk, input logic rst,
             misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
             if (wres[5]) {misa[3], misa[16]} <= 0;
         end
-        if (rst) mvendorid <= 0; else if (wena & addr == 12'hf11) excp <= 1;
-        if (rst) marchid <= 0; else if (wena & addr == 12'hf12) excp <= 1;
-        if (rst) mimpid <= 0; else if (wena & addr == 12'hf13) excp <= 1;
-        if (rst) mhartid <= 0; else if (wena & addr == 12'hf13) excp <= 1;
+        if (rst) mvendorid <= 0; else if (wena & addr == 12'hf11) eout <= 1;
+        if (rst) marchid <= 0; else if (wena & addr == 12'hf12) eout <= 1;
+        if (rst) mimpid <= 0; else if (wena & addr == 12'hf13) eout <= 1;
+        if (rst) mhartid <= 0; else if (wena & addr == 12'hf13) eout <= 1;
         if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
         else if (wena & addr == 12'h300) begin
             mstatus <= wres;
@@ -1096,13 +1090,32 @@ module csr(input logic clk, input logic rst,
             medeleg <= wres; medeleg[11] <= 0;
         end
         if (rst) mideleg <= 0; else if (wena & addr == 12'h303) mideleg <= wres;
-
-        if (rst) mcycle <= 0; else mcycle <= mcycle + 64'd1;
-        if (rst) minstret <= 0; else minstret <= minstret + nret;
-        if (wena & addr == 12'h005) utvec    <= wres;
-        if (wena & addr == 12'hb00) mcycle   <= wres;
-        if (wena & addr == 12'hb02) minstret <= wres;
-        if (rst) excp <= 0;
+        if (rst) mip <= 0; else if (wena & addr == 12'h344) begin
+            mip <= wres; mip[63:12] <= 0; mip[10] <= 0; mip[6] <= 0; mip[2] <= 0;
+        end
+        if (rst) mie <= 0; else if (wena & addr == 12'h304) begin
+            mie <= wres; mie[63:12] <= 0; mie[10] <= 0; mie[6] <= 0; mie[2] <= 0;
+        end
+        if (rst) mcycle <= 0; else if (wena & addr == 12'hb00) mcycle <= wres;
+        else mcycle <= mcycle + 64'd1;
+        if (rst) minstret <= 0; else if (wena & addr == 12'hb02) minstret <= wres;
+        else if (~mcountinhibit[2]) minstret <= minstret + nret;
+        for (int i = 3; i < 32; i++) if (rst) mhpmcounter[i] <= 0;
+            else if (wena & addr[11:5] == 7'h58) mhpmcounter[i] <= wres;
+        for (int i = 3; i < 32; i++) if (rst) mhpmevent[i] <= 0;
+            else if (wena & addr[11:5] == 7'h58) mhpmevent[i] <= wres;
+        if (rst) mcounteren <= 0; else if (wena & addr == 12'h306) mcounteren <= wres;
+        if (rst) mcountinhibit <= 0;
+        else if (wena & addr == 12'h320) mcountinhibit <= wres;
+        if (rst) mscratch <= 0; else if (wena & addr == 12'h340) mscratch <= wres;
+        if (rst) mepc <= 0; else if (wena & addr == 12'h341) mepc <= wres;
+        else if (ein) mepc <= epc;
+        if (rst) mcause <= 0; else if (wena & addr == 12'h342) mcause <= wres;
+        else if (ein) mcause <= cause;
+        if (rst) mtval <= 0; else if (wena & addr == 12'h343) mtval <= wres;
+        if (rst) eout <= 0;
+        if (rst) level <= 2'b11;
+        if (wena & addr == 12'h005) utvec <= wres;
     end
     logic [63:0] tvec;
     always_comb tvec = mtvec;
