@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     htif_t htif;
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
-        return printf("Unable to open file %s.\n", cmd.filename), 0;
+        return printf("Unable to open file %s.\n", cmd.filename), 1;
     if (cmd.filetype == 0) // direct dumped hex code
     {
         int code;
@@ -176,11 +176,11 @@ int main(int argc, char **argv)
             exit((perror("fread"), 1));
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
             elf_h.e_ident[EI_CLASS] != ELFCLASS64)
-            return printf("Not 64-bit ELF format.\n"), 0;
+            return printf("Not 64-bit ELF format.\n"), 1;
         if (elf_h.e_type != ET_EXEC && elf_h.e_type != ET_DYN)
-            return printf("Not an executable file.\n"), 0;
+            return printf("Not an executable file.\n"), 1;
         if (elf_h.e_machine != EM_RISCV)
-            return printf("Not RISC-V architecture.\n"), 0;
+            return printf("Not RISC-V architecture.\n"), 1;
         // sections from ELF file
         Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
         fseek(fp, elf_h.e_shoff, SEEK_SET);
@@ -195,8 +195,7 @@ int main(int argc, char **argv)
                         exit((perror("fread"), 1));
             }
             else if (shdr[i].sh_type == SHT_NOBITS)
-                for (int j = 0; j < shdr[i].sh_size; j++)
-                    memory[shdr[i].sh_addr + j] = 0;
+                ;
             else if (shdr[i].sh_type == SHT_SYMTAB)
             {
                 // check section name
@@ -269,14 +268,13 @@ int main(int argc, char **argv)
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
     std::queue<csrcmt_t> csrs;
-    int i = 0, tohost_exit = 0;
-    uint64_t rsrv_val;
+    int i = 0, exitcall = 0, exitcode = 0;
     while (i < cmd.simtime)
     {
-        int cmt_check = commits.size() > 1 || tohost_exit;
-        if (commits.empty() && tohost_exit)
+        int cmt_check = commits.size() > 1 || exitcall;
+        if (commits.empty() && exitcall)
             break;
-        if (commits.size() <= 1 && !tohost_exit)
+        if (commits.size() <= 1 && !exitcall)
         {
             // negedge clock
             dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
@@ -302,7 +300,7 @@ int main(int argc, char **argv)
             if (i_delay.front().rqst)
                 dut->icache_data = DLE(memory, i_delay.front().addr);
             dut->dcache_done = d_delay.front().rqst;
-            if (d_delay.front().rqst && !d_delay.front().wena)
+            if (d_delay.front().rqst)
                 dut->dcache_rdat = DLE(memory, d_delay.front().addr);
             if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv)
                 reserved[d_delay.front().addr] = 1;
@@ -312,24 +310,20 @@ int main(int argc, char **argv)
             dut->dcache_rdat &= mask;
             if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
                 dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
-            if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv == 2)
-                rsrv_val = dut->dcache_rdat;
             if (d_delay.front().rqst && d_delay.front().wena)
             {
-                if (!d_delay.front().rsrv || reserved[d_delay.front().addr])
+                if (d_delay.front().rsrv != 1 || reserved[d_delay.front().addr])
                 {
                     uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
                     uint8_t width = 1 << (d_delay.front().bits & 3);
                     for (int j = 0; j < width; j++)
                         memory[addr + j] = DTOB(data, j);
                     stores.push({addr, data, width});
-                    if (d_delay.front().rsrv)
+                    if (d_delay.front().rsrv == 1)
                         reserved[addr] = dut->dcache_rdat = 0;
                 }
                 else
                     dut->dcache_rdat = 1;
-                if (d_delay.front().rsrv == 2) // hard reservation should return values again
-                    dut->dcache_rdat = rsrv_val;
             }
             i_delay.pop(), d_delay.pop();
             dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
@@ -393,11 +387,20 @@ int main(int argc, char **argv)
         uint64_t tohost_cmd = DLE(memory, htif.tohost) << 8 >> 56;
         uint64_t tohost_dat = DLE(memory, htif.tohost) << 16 >> 16;
         if (tohost_dev == 0 && tohost_cmd == 0)
+        {
             if (tohost_dat & 1)
-                tohost_exit = 1;
+                exitcall = 1, exitcode = DLE(memory, htif.tohost) >> 1;
+        }
+        else if (tohost_dev == 1 && tohost_cmd == 1)
+            putchar(tohost_dat);
+        else if (cmd.debug)
+            printf("Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
+                   tohost_dev, tohost_cmd, tohost_dat);
+        for (int i = 0; i < 8; i++)
+            memory[htif.tohost + i] = 0;
     }
-    if (tohost_exit)
-        printf("Exit with code %lu.\n", DLE(memory, htif.tohost) >> 1);
+    if (cmd.debug && exitcall)
+        printf("Exit with code %d.\n", exitcode);
     else if (cmd.debug)
     {
         // final status check
@@ -419,5 +422,5 @@ int main(int argc, char **argv)
     delete (trace ? trace->close(), trace : NULL);
     delete (cmd.debug ? sim : NULL);
     delete dut;
-    return 0;
+    return exitcode;
 }

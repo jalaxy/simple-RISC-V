@@ -588,8 +588,8 @@ module ex_stage(input logic clk, input logic rst,
         if (frompt & in_pt.j) a = in.pc; // JALR in PT
         else a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
         b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
-        if (in.iword) {a, b} = {32'd0, a[31:0], 32'd0, b[31:0]};
-        if (in.isign) {a, b} = {{32{a[31]}}, a[31:0], {32{b[31]}}, b[31:0]};
+        if (in.iword) a = {{32{a[31] & in.isign}}, a[31:0]};
+        if (in.iword) b = {{32{b[31] & in.isign}}, b[31:0]};
         if (in.iword & (in.exop[`EX_SLL] | in.exop[`EX_SRL] | in.exop[`EX_SRA]))
             b[5] = 0;
     end
@@ -678,8 +678,8 @@ module ex_stage(input logic clk, input logic rst,
                 {65{op[`EX_XOR]}}  & {1'b0, a ^ b} |
                 {65{op[`EX_OR]}}   & {1'b0, a | b} |
                 {65{op[`EX_AND]}}  & {1'b0, a & b} |
-                {65{op[`EX_MIN]}}  & {1'b0, sub[63] ? a : b} |
-                {65{op[`EX_MAX]}}  & {1'b0, sub[63] ? b : a} |
+                {65{op[`EX_MIN]}}  & {1'b0, (in.isign ? sub[63] : sub[64]) ? a : b} |
+                {65{op[`EX_MAX]}}  & {1'b0, (in.isign ? sub[63] : sub[64]) ? b : a} |
                 {65{|mul_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
                 {65{|div_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid} |
                 {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
@@ -934,7 +934,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_ff @(posedge clk)
         if (push) begin
             {fwd, fwddata} <= 0; thr <= th;
-            if (rqst[`lgCQSZ] & ~wena)
+            if (rqst[`lgCQSZ] & ~wena & ~|rsrv)
                 for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
                     if (~lsqaddr[i][64] & ~lsqdata[i][64] &
                         lsqfwd[i] & lsqwena[i] & ~|lsqrsrv[i] &
