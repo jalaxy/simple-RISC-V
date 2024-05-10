@@ -26,7 +26,8 @@ module stats(
     output logic [31:0] cqocc,
     output logic [31:0] ptocc,
     output logic [31:0] lsqocc,
-    output logic ifetch
+    output logic ifetch,
+    output logic misp
 );
     // instantiate
     pipeline pipeline_inst(clk, rst,
@@ -70,6 +71,7 @@ module stats(
 
     always_comb ifetch = pipeline_inst.id_stage_inst.get_if &
         pipeline_inst.data_if_id.valid;
+    always_comb misp = pipeline_inst.ex_stage_inst.misp;
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,

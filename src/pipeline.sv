@@ -206,8 +206,7 @@ module pipeline(
         .rda_id(data_id_ex.valid ? data_id_ex.rda : 0),
         .rda_ex(data_ex_wb.valid ? data_ex_wb.rda : 0));
     lsu lsu_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover),
-        .ena(lsu_ena), .get(lsu_free),
-        .cmt(wb_stage_inst.lsu_cmt), .cmtp1(wb_stage_inst.lsu_cmtp1),
+        .ena(lsu_ena), .get(lsu_free), .cmt(wb_stage_inst.lsu_cmt),
         .fence(lsu_fence), .rsrv(lsu_rsrv), .aqrl(lsu_aqrl), .csr(lsu_csr),
         .rqst(lsu_rqst), .wena(lsu_wena), .addr(lsu_addr), .bits(lsu_bits),
         .done(lsu_done), .excp(lsu_exc), .rdata(lsu_rdat), .wdata(lsu_wdat),
@@ -741,7 +740,7 @@ module wb_stage(input logic clk, input logic rst,
     logic [64:0] cqfrontval, cqfrontp1val;
     logic [1:0][`lgCQSZ-1:0] cqraddr;
     logic [1:0][64:0] cqrvalue;
-    logic recover, lsu_cmt, lsu_cmtp1;
+    logic recover, lsu_cmt;
     regfile #(.dwidth(64), .rports(2), .wports(2), .awidth(7), .depth(65))
         regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
             .waddr({cqrdap1, cqrda}), .wvalue({cqfrontp1val[63:0], cqfrontval[63:0]}),
@@ -770,10 +769,9 @@ module wb_stage(input logic clk, input logic rst,
     always_comb cqpush = in_ex.valid & (~cqfull | cqpop1);
     always_comb cqpop1 = ~cqfrontval[64] & ~cqempty;
     always_comb cqpop2 = ~cqfrontp1val[64] & ~cqexc[cqfrontp1] &
-        cqfrontp1 != cqrear & ~cqexc[cqfront] & cqpop1 & ~cqmw[cqfront];
+        cqfrontp1 != cqrear & ~cqexc[cqfront] & cqpop1;
     always_comb recover = ~cqempty & cqexc[cqfront];
-    always_comb lsu_cmt = cqmw[cqfront] | cqmw[cqfrontp1];
-    always_comb lsu_cmtp1 = cqmw[cqfront] & cqmw[cqfrontp1];
+    always_comb lsu_cmt = cqmw[cqfront];
     always_ff @(posedge clk)
         if (rst | recover) {cqexc, cqfront, cqrear, cqfull, cqempty} <= 1;
         else begin
@@ -788,8 +786,6 @@ module wb_stage(input logic clk, input logic rst,
             if (cqpush) cqexc[cqrear] <= 0;
             if (late_done[`lgCQSZ]) cqexc[late_done[`lgCQSZ-1:0]] <= late_exc;
             if (cqpush) cqmw[cqrear] <= in_ex.mw;
-            if (lsu_cmt) cqmw[cqfront] <= 0;
-            if (lsu_cmtp1) cqmw[cqfrontp1] <= 0;
             assert((cqempty | cqfull) == (cqfront == cqrear));
             if (cqpush & in_ex.rd[64]) assert(in_ex.rd[`lgCQSZ-1:0] == cqrear);
         end
@@ -874,8 +870,7 @@ module pending_table(input logic clk, input logic rst, input logic flush,
 endmodule
 
 module lsu(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic cmt, input logic cmtp1,
+    input logic ena, output logic get, input logic cmt,
     input logic [11:0] fence, input logic [1:0] rsrv, input logic [1:0] aqrl,
     input logic [`lgCQSZ:0] rqst, input logic wena, input logic csr,
     input logic [64:0] addr, input logic [2:0] bits,
@@ -951,21 +946,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
             if (push) empty <= 0;
             if (pop & ~push) full <= 0;
             if (pop) begin lsqrqst[front] <= 0; front <= frontp1; end
-            if (push) begin
-                rear <= rearp1;
-                lsqsent[rear] <= th; lsqcmt[rear] <= cmt & empty; lsqmisa[rear] <= misa;
-                lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1]; lsqcsr[rear] <= csr;
-                lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
-                lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
-                thrrqst <= rqst; thrrsrv <= rsrv; thrwena <= wena;
-                thraddr <= addr; thrbits <= bits;
-                if (addr[64] & addr_done == addr[`lgCQSZ:0])
-                    lsqaddr[rear] <= {1'b0, addr_val};
-                if (wdata[64] & late_done == wdata[`lgCQSZ:0])
-                    lsqdata[rear] <= late_val;
-            end
             if (cmt) lsqcmt[front] <= 1;
-            if (cmtp1) lsqcmt[frontp1] <= 1;
             if (~thr & ready) lsqsent[front] <= 1;
             for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ]) begin
                 if (push & (addr[64] | addr[64:3] == lsqaddr[i][64:3])) lsqfwd[i] <= 0;
@@ -979,6 +960,19 @@ module lsu(input logic clk, input logic rst, input logic flush,
                 if (lsqwena[i] &  fence[1] & fence[4] |
                     ~lsqwena[i] & (fence[1] & fence[5] | fence[11]))
                     lsqraq[i] <= 1;
+            if (push) begin
+                rear <= rearp1;
+                lsqsent[rear] <= th; lsqcmt[rear] <= cmt & empty; lsqmisa[rear] <= misa;
+                lsqfwd[rear] <= ~addr[64]; lsqraq[rear] <= aqrl[1]; lsqcsr[rear] <= csr;
+                lsqrqst[rear] <= rqst; lsqrsrv[rear] <= rsrv; lsqwena[rear] <= wena;
+                lsqaddr[rear] <= addr; lsqdata[rear] <= wdata; lsqbits[rear] <= bits;
+                thrrqst <= rqst; thrrsrv <= rsrv; thrwena <= wena;
+                thraddr <= addr; thrbits <= bits;
+                if (addr[64] & addr_done == addr[`lgCQSZ:0])
+                    lsqaddr[rear] <= {1'b0, addr_val};
+                if (wdata[64] & late_done == wdata[`lgCQSZ:0])
+                    lsqdata[rear] <= late_val;
+            end
         end
     always_comb dcache_rqst = thr ? thrrqst :
         (ready & ~lsqcsr[front] ? lsqrqst[front] : 0);
@@ -1164,7 +1158,7 @@ module ci2i(input logic [31:0] ci, output logic [31:0] i);
                     i = {{{3{ci[12]}}, ci[4:3], ci[5], ci[2], ci[6], 4'd0},
                          5'd2, 3'b000, 5'd2, 7'h13};
                 else // C.LUI ==> LUI rd, nzimm
-                    i = {{{3{ci[12]}}, ci[6:2], 12'd0}, ci[11:7], 7'h37};
+                    i = {{{15{ci[12]}}, ci[6:2]}, ci[11:7], 7'h37};
             5'b10001:
                 if (ci[11] == 1'd0) // C.SRLI/C.SRAI ==> SRLI/SRAI rd', rd', shamt
                     i = {ci[11:10], 4'd0, {ci[12], ci[6:2]},

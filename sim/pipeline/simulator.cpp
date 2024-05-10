@@ -12,7 +12,7 @@
                             (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
 #define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
 #define BIT(dw, i) BITS(dw, i, i)
-#define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)-1 << (width) : 0) | (dw) & ~((uint64_t)-1 << (width)))
+#define SEXT(dw, width) ((BIT(dw, width - 1) ? (uint64_t)(-1) << (width) : 0) | (dw) & ~((uint64_t)(-1) << (width)))
 #define CNAN64(x) (BITS(x, 52, 62) == 0x7ff && BITS(x, 0, 51) ? 0x7ff8'0000'0000'0000ul : (x))
 #define CNAN32(x) (BITS(x, 23, 30) == 0x0ff && BITS(x, 0, 22) ? 0xffff'ffff'7fc0'0000ul : (x))
 #define BNAN(p) *((uint32_t *)(p) + 1) = 0xffff'ffffu

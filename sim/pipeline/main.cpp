@@ -167,6 +167,7 @@ int main(int argc, char **argv)
         int code;
         while (fscanf(fp, "%x", &code) > 0)
             ini_code.push_back(code);
+        htif = {0x100000, 0x100008, 0x100010};
     }
     else if (cmd.filetype == 1) // code in ELF file
     {
@@ -388,16 +389,36 @@ int main(int argc, char **argv)
         uint64_t tohost_dat = DLE(memory, htif.tohost) << 16 >> 16;
         if (tohost_dev == 0 && tohost_cmd == 0)
         {
-            if (tohost_dat & 1)
+            if (tohost_dat & 1) // exit
                 exitcall = 1, exitcode = DLE(memory, htif.tohost) >> 1;
+            else if (tohost_dat != 0) // proxied ststem call
+            {
+                uint64_t magic_mem = tohost_dat, which = DLE(memory, magic_mem);
+                if (which == 0x40) // syswrite
+                {
+                    uint64_t arg0, arg1, arg2;
+                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // memory address
+                    arg2 = DLE(memory, magic_mem + 24); // write size
+                    for (int i = 0; i < arg2; i++)
+                        putchar(memory[arg1 + i]);
+                    for (int i = 0; i < 8; i++)
+                        memory[magic_mem + i] = 0; // return value at magic_mem[0]
+                }
+                else if (which == 0x5d) // exit
+                    exitcall = 1, exitcode = (DLE(memory, magic_mem + 8) << 1) | 1;
+                else
+                    printf("Unhandled proxied system call:\n    which: 0x%lx\n", which);
+            }
         }
-        else if (tohost_dev == 1 && tohost_cmd == 1)
+        else if (tohost_dev == 1 && tohost_cmd == 1) // console write
             putchar(tohost_dat);
         else if (cmd.debug)
             printf("Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                    tohost_dev, tohost_cmd, tohost_dat);
         for (int i = 0; i < 8; i++)
-            memory[htif.tohost + i] = 0;
+            memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
+        memory[htif.fromhost] = 1;
     }
     if (cmd.debug && exitcall)
         printf("Exit with code %d.\n", exitcode);
