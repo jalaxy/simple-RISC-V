@@ -171,7 +171,7 @@ module pipeline(
         .in_if(data_if_id), .get_if(get_if_id),
         .out_ex(data_id_ex), .ena_ex(get_id_ex & ~|wb_stage_inst.cqexc),
         .raddr(raddr));
-    ex_stage ex_stage_inst(.clk(clk), .rst(rst),
+    ex_stage ex_stage_inst(.clk(clk), .rst(rst), .flush(wb_stage_inst.recover),
         .in_id(data_id_ex), .get_id(get_id_ex),
         .in_pt(data_pt_ex), .get_pt(get_pt_ex),
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
@@ -542,7 +542,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
         else raddr[1] = 0;
 endmodule
 
-module ex_stage(input logic clk, input logic rst,
+module ex_stage(input logic clk, input logic rst, input logic flush,
     input id_ex_t in_id, output logic get_id,
     input id_ex_t in_pt, output logic get_pt,
     output ex_wb_t out_wb, input logic ena_wb,
@@ -685,7 +685,7 @@ module ex_stage(input logic clk, input logic rst,
                 {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
             if (in.iword) res[63:0] = {{32{res[31]}}, res[31:0]};
         end
-    always_ff @(posedge clk) if (rst) pt_done <= 0;
+    always_ff @(posedge clk) if (rst | flush) pt_done <= 0;
         else if (frompt & ~lsu)
             if (res[64]) pt_done <= 0;
             else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & misp};
