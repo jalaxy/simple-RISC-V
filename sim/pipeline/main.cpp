@@ -438,6 +438,12 @@ int main(int argc, char **argv)
             }
         printf("Maximum cycle %d reached.\n", cmd.simtime);
     }
+    if (cmd.debug)
+    {
+        printf("Statistics:\n");
+        printf("    Cycle: %lu    Instructions: %lu    Mispredictions: %lu\n",
+               dut->cycle, dut->instret, dut->misp);
+    }
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);

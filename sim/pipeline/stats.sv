@@ -27,7 +27,9 @@ module stats(
     output logic [31:0] ptocc,
     output logic [31:0] lsqocc,
     output logic ifetch,
-    output logic misp
+    output logic [63:0] cycle,
+    output logic [63:0] instret,
+    output logic [63:0] misp
 );
     // instantiate
     pipeline pipeline_inst(clk, rst,
@@ -69,9 +71,13 @@ module stats(
             if (pipeline_inst.pending_table_inst.id[i][`lgCQSZ]) ptocc++;
     end
 
+    // other stats
     always_comb ifetch = pipeline_inst.id_stage_inst.get_if &
         pipeline_inst.data_if_id.valid;
-    always_comb misp = pipeline_inst.ex_stage_inst.misp;
+    always_comb cycle = pipeline_inst.csr_inst.mcycle;
+    always_comb instret = pipeline_inst.csr_inst.minstret;
+    always_ff @(posedge clk) if (rst) misp <= 0;
+        else if (pipeline_inst.ex_stage_inst.misp) misp <= misp + 1;
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,

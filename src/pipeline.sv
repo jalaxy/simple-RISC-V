@@ -773,8 +773,10 @@ module wb_stage(input logic clk, input logic rst,
     always_comb recover = ~cqempty & cqexc[cqfront];
     always_comb lsu_cmt = cqmw[cqfront];
     always_ff @(posedge clk)
-        if (rst | recover) {cqexc, cqfront, cqrear, cqfull, cqempty} <= 1;
-        else begin
+        if (rst) {cqexc, cqfront, cqrear, cqfull, cqempty} <= 1;
+        else if (recover) begin
+            {cqexc, cqfull, cqempty} <= 1; cqfront <= cqrear;
+        end else begin
             if (cqpop1 & ~cqpush & cqrear == cqfrontp1 |
                 cqpop2 & ~cqpush & cqrear == cqfrontp2)
                 cqempty <= 1;
