@@ -452,7 +452,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
             {out_ex_q[0].valid, out_ex_q[1].valid, out_ex_q[2].valid} <= 0;
         else if (get_if & in_if.valid) begin
             out_ex_q[0].valid <= 1'b1;
-            out_ex_q[0].branch <= in_if.b;
+            out_ex_q[0].branch <= ~|exop1 & in_if.b;
             out_ex_q[0].c <= in_if.c;
             out_ex_q[0].pc <= in_if.pc;
             out_ex_q[0].bpc <= in_if.bpc;
@@ -486,7 +486,7 @@ module id_stage(input logic clk, input logic rst, input logic flush,
 
             out_ex_q[1].valid <= |exop1 & (
                 op[`AMO] | op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]);
-            out_ex_q[1].branch <= in_if.b;
+            out_ex_q[1].branch <= ~|exop2 & in_if.b;
             out_ex_q[1].c <= in_if.c;
             out_ex_q[1].pc <= in_if.pc;
             out_ex_q[1].bpc <= in_if.bpc;
@@ -568,9 +568,10 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
     input logic excp, input logic [63:0] tvec
 );
     id_ex_t in;
-    logic frompt;
+    logic frompt, fromid;
     always_comb frompt = in_pt.valid &
         (ena_arb | in_pt.exop[`EX_LOAD] | in_pt.exop[`EX_STORE]);
+    always_comb fromid = in_id.valid & get_id;
     always_comb in = frompt ? in_pt : in_id;
     logic [`EX_END-1:0] op;
     logic [63:0] a, b;
@@ -613,7 +614,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
         ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free) &
         ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
-    always_comb ready = (get_id & in_id.valid | frompt) & ~out_pt.valid;
+    always_comb ready = (fromid | frompt) & ~out_pt.valid;
     always_comb cqid = frompt ? cqid_pt : cqid_id;
     always_comb mul_valid = ~rst & ready & |mul_op;
     always_comb mul_rqst = {`lgCQSZ+1{mul_valid}} & cqid;
@@ -639,7 +640,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
     always_comb {fpu_a, fpu_b} = {a, b};
     always_comb {fpu_rm, fpu_double} = {in.funct3, in.fdouble};
     always_comb lsu = op[`EX_LOAD] | op[`EX_STORE] | op[`EX_FENCE] | op[`EX_CSR];
-    always_comb lsu_valid = ~rst & (get_id & in_id.valid) & lsu;
+    always_comb lsu_valid = ~rst & fromid & lsu;
     always_ff @(posedge clk) begin
         if (lsu_wdat[64] & late_done == lsu_wdat[`lgCQSZ:0])
             lsu_wdat <= late_val;
@@ -687,14 +688,14 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
     always_ff @(posedge clk) if (rst | flush) pt_done <= 0;
         else if (frompt & ~lsu)
             if (res[64]) pt_done <= 0;
-            else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, ready & misp};
+            else {pt_done, pt_data, pt_exc} <= {cqid_pt, res, misp};
         else if (ena_arb) pt_done <= 0;
     always_ff @(posedge clk) if (rst) addr_done <= 0;
         else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};
         else addr_done <= 0;
     always_ff @(posedge clk)
         if (rst) out_wb.valid <= 0;
-        else if (get_id & in_id.valid) begin
+        else if (fromid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
@@ -706,15 +707,16 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
         else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
         else jpc = in.base[63:0] + in.offset;
     always_comb jump = excp | in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
-    always_comb misp = jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch;
+    always_comb misp = (jump & ~(in.branch & in.bpc == jpc) | ~jump & in.branch) &
+        ((in.j | |in.bmask) & ready | ~(in.j | |in.bmask) & fromid | excp);
     always_comb fencei = (fencei_r | op[`EX_FENCEI]) & ~lsu_empty;
-    always_ff @(posedge clk) if (rst | ready & misp | lsu_empty) fencei_r <= 0;
+    always_ff @(posedge clk) if (rst | misp | lsu_empty) fencei_r <= 0;
         else if (fencei) fencei_r <= 1;
     always_ff @(posedge clk)
         if (rst) out_pc.valid <= 1'b0;
-        else if (ready & misp | fencei) begin
+        else if (misp | fencei) begin
             out_pc.valid <= 1'b1;
-            if (ready & misp | in_id.valid) begin
+            if (misp | in_id.valid) begin
                 out_pc.pc <= in.pc;
                 out_pc.npc <= jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4);
             end
