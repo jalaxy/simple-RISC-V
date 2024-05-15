@@ -23,7 +23,7 @@ typedef struct struct_cmd
     const char *filename = 0, *vcd = 0;
     std::vector<const char *> args;
     uint8_t help = 0, filetype = 0, debug = 0, step = 0;
-    int simtime = INT32_MAX;
+    int maxtime = INT32_MAX, mintime = 0;
 } cmd_t;
 
 typedef struct struct_htif
@@ -114,10 +114,14 @@ int main(int argc, char **argv)
             else if (strcmp(argv[i] + j, "t") == 0)
             {
                 if (i + 1 < argc)
-                    cmd.simtime = atoi(argv[i + 1]);
-                if (cmd.simtime <= 0)
-                    cmd.simtime = 1024;
-                i++;
+                    cmd.mintime = atoi(argv[i + 1]);
+                if (i + 2 < argc)
+                    cmd.maxtime = atoi(argv[i + 2]);
+                if (cmd.mintime <= 0)
+                    cmd.mintime = 0;
+                if (cmd.maxtime <= 0)
+                    cmd.maxtime = INT32_MAX;
+                i += 2;
             }
             else if (strcmp(argv[i] + j, "d") == 0)
                 cmd.debug = 1;
@@ -139,7 +143,7 @@ int main(int argc, char **argv)
         printf("    -dump: (default) input file as hex hump\n");
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
         printf("    -w `waveform`: output waveform to `waveform`\n");
-        printf("    -t `time`: maximum simulation time of `time`\n");
+        printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
         printf("    -d: debug mode\n");
         printf("    -d -s: debug mode with step\n");
         return 0;
@@ -270,7 +274,7 @@ int main(int argc, char **argv)
     std::queue<store_t> stores;
     std::queue<csrcmt_t> csrs;
     int i = 0, exitcall = 0, exitcode = 0;
-    while (i < cmd.simtime)
+    while (i < cmd.maxtime)
     {
         int cmt_check = commits.size() > 1 || exitcall;
         if (commits.empty() && exitcall)
@@ -278,7 +282,7 @@ int main(int argc, char **argv)
         if (commits.size() <= 1 && !exitcall)
         {
             // negedge clock
-            dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+            dut->clk = 0, dut->eval(), trace && i >= cmd.mintime ? trace->dump(st++), 0 : 0;
             // posedge clock
             if (dut->icache_rqst) // record stats before posedge
             {
@@ -327,7 +331,7 @@ int main(int argc, char **argv)
                     dut->dcache_rdat = 1;
             }
             i_delay.pop(), d_delay.pop();
-            dut->eval(), trace ? trace->dump(st++), 0 : 0; // evaluate again
+            dut->eval(), (trace && i >= cmd.mintime) ? trace->dump(st++), 0 : 0; // evaluate again
             for (int j = 0; j < sizeof(dut->cmtpc) / sizeof(dut->cmtpc[0]); j++)
                 if (dut->cmtpc[j])
                     commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j]});
@@ -353,7 +357,7 @@ int main(int argc, char **argv)
             int check = sim->check(curcommit.pc, curcommit.addr, curcommit.data,
                                    curstore.addr, curstore.data, curstore.width,
                                    curcsr.addr, curcsr.data);
-            if (!check || cmd.step)
+            if ((!check || cmd.step) && curcommit.cycle >= cmd.mintime)
             {
                 printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", curcommit.cycle);
                 printf("DUT:\n    pc: 0x%016lx\n", curcommit.pc);
@@ -419,13 +423,14 @@ int main(int argc, char **argv)
         for (int i = 0; i < 8; i++)
             memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
         memory[htif.fromhost] = 1;
+        cmd.debug ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
     if (cmd.debug && exitcall)
         printf("Exit with code %d.\n", exitcode);
     else if (cmd.debug)
     {
         // final status check
-        for (int i = sim->csr[0xb00].val; i < cmd.simtime; i++)
+        for (int i = sim->csr[0xb00].val; i < cmd.maxtime; i++)
             sim->step();
         for (int i = 0; i < 64; i++)
             if (sim->get_arreg()[i] != dut->arregs[i])
@@ -436,7 +441,7 @@ int main(int argc, char **argv)
                 printf("Press Enter to continue...\n");
                 getchar();
             }
-        printf("Maximum cycle %d reached.\n", cmd.simtime);
+        printf("Maximum cycle %d reached.\n", cmd.maxtime);
     }
     if (cmd.debug)
     {

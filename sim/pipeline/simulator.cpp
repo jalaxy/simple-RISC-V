@@ -123,50 +123,298 @@ void simulator::step(int nojump)
     switch ((BITS(idata, 13, 15) << 2) | BITS(idata, 0, 1))
     {
     case 0b00000:
+        if (BITS(idata, 5, 12)) // C.ADDI4SPN
+        {
+            ir |= BITS(idata, 7, 10) << 26;
+            ir |= BITS(idata, 11, 12) << 24;
+            ir |= BIT(idata, 5) << 23;
+            ir |= BIT(idata, 6) << 22;
+            ir |= 2 << 15;
+            ir |= (BITS(idata, 2, 4) + 8) << 7;
+            ir |= 0x13;
+        }
         break;
-    case 0b00100:
+    case 0b00100: // C.FLD
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BITS(idata, 10, 12) << 23;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 3 << 12;
+        ir |= (BITS(idata, 2, 4) + 8) << 7;
+        ir |= 7;
         break;
-    case 0b01000:
+    case 0b01000: // C.LW
+        ir |= BIT(idata, 5) << 26;
+        ir |= BITS(idata, 10, 12) << 23;
+        ir |= BIT(idata, 6) << 22;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 2 << 12;
+        ir |= (BITS(idata, 2, 4) + 8) << 7;
+        ir |= 3;
         break;
-    case 0b01100:
+    case 0b01100: // C.LD
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BITS(idata, 10, 12) << 23;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 3 << 12;
+        ir |= (BITS(idata, 2, 4) + 8) << 7;
+        ir |= 3;
         break;
-    case 0b10100:
+    case 0b10100: // C.FSD
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= (BITS(idata, 2, 4) + 8) << 20;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= 0x27;
         break;
-    case 0b11000:
+    case 0b11000: // C.SW
+        ir |= BIT(idata, 5) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= (BITS(idata, 2, 4) + 8) << 20;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 2 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= BIT(idata, 6) << 9;
+        ir |= 0x23;
         break;
-    case 0b11100:
+    case 0b11100: // C.SD
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= (BITS(idata, 2, 4) + 8) << 20;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= 0x23;
         break;
-    case 0b00001:
+    case 0b00001: // C.ADDI / C.NOP
+        ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= BITS(idata, 7, 11) << 15;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 0x13;
         break;
-    case 0b00101:
+    case 0b00101: // ADDIW
+        ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= BITS(idata, 7, 11) << 15;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 0x1b;
         break;
-    case 0b01001:
+    case 0b01001: // C.LI
+        ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 0x13;
         break;
     case 0b01101:
+        if (BITS(idata, 7, 11) == 2) // C.ADDI16SP
+        {
+            ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 29;
+            ir |= BITS(idata, 3, 4) << 27;
+            ir |= BIT(idata, 5) << 26;
+            ir |= BIT(idata, 2) << 25;
+            ir |= BIT(idata, 6) << 24;
+            ir |= 2 << 15;
+            ir |= 2 << 7;
+            ir |= 0x13;
+        }
+        else if (BITS(idata, 2, 6) || BIT(idata, 12)) // C.LUI
+        {
+            ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 17;
+            ir |= BITS(idata, 2, 6) << 12;
+            ir |= BITS(idata, 7, 11) << 7;
+            ir |= 0x37;
+        }
         break;
     case 0b10001:
+        if (BIT(idata, 11) == 0) // C.SRLI / C.SRAI
+        {
+            ir |= BITS(idata, 10, 11) << 30;
+            ir |= BIT(idata, 12) << 25;
+            ir |= BITS(idata, 2, 6) << 20;
+            ir |= (BITS(idata, 7, 9) + 8) << 15;
+            ir |= 5 << 12;
+            ir |= (BITS(idata, 7, 9) + 8) << 7;
+            ir |= 0x13;
+        }
+        else if (BIT(idata, 10) == 0) // C.ANDI
+        {
+            ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 25;
+            ir |= BITS(idata, 2, 6) << 20;
+            ir |= (BITS(idata, 7, 9) + 8) << 15;
+            ir |= 7 << 12;
+            ir |= (BITS(idata, 7, 9) + 8) << 7;
+            ir |= 0x13;
+        }
+        else
+            switch ((BIT(idata, 12) << 2) | BITS(idata, 5, 6))
+            {
+            case 0b000: // C.SUB
+                ir |= 0b0100000 << 25;
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x33;
+                break;
+            case 0b001: // C.XOR
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= 4 << 12;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x33;
+                break;
+            case 0b010: // C.OR
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= 6 << 12;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x33;
+                break;
+            case 0b011: // C.AND
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= 7 << 12;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x33;
+                break;
+            case 0b100: // C.SUBW
+                ir |= 0b0100000 << 25;
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x3b;
+                break;
+            case 0b101: // C.ADDW
+                ir |= (BITS(idata, 2, 4) + 8) << 20;
+                ir |= (BITS(idata, 7, 9) + 8) << 15;
+                ir |= (BITS(idata, 7, 9) + 8) << 7;
+                ir |= 0x3b;
+                break;
+            }
         break;
-    case 0b10101:
+    case 0b10101: // C.J
+        ir |= BIT(idata, 12) << 31;
+        ir |= BIT(idata, 8) << 30;
+        ir |= BITS(idata, 9, 10) << 28;
+        ir |= BIT(idata, 6) << 27;
+        ir |= BIT(idata, 7) << 26;
+        ir |= BIT(idata, 2) << 25;
+        ir |= BIT(idata, 11) << 24;
+        ir |= BITS(idata, 3, 5) << 21;
+        ir |= (BIT(idata, 12) ? (1 << 9) - 1 : 0) << 12;
+        ir |= 0x6f;
         break;
-    case 0b11001:
+    case 0b11001: // C.BEQZ
+        ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 28;
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BIT(idata, 2) << 25;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= BITS(idata, 3, 4) << 8;
+        ir |= BIT(idata, 12) << 7;
+        ir |= 0x63;
         break;
-    case 0b11101:
+    case 0b11101: // C.BNEZ
+        ir |= (BIT(idata, 12) ? (uint64_t)(-1) : 0) << 28;
+        ir |= BITS(idata, 5, 6) << 26;
+        ir |= BIT(idata, 2) << 25;
+        ir |= (BITS(idata, 7, 9) + 8) << 15;
+        ir |= 1 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= BITS(idata, 3, 4) << 8;
+        ir |= BIT(idata, 12) << 7;
+        ir |= 0x63;
         break;
     case 0b00010:
+        if (BIT(idata, 12) || BITS(idata, 2, 6)) // C.SLLI
+        {
+            ir |= BIT(idata, 12) << 25;
+            ir |= BITS(idata, 2, 6) << 20;
+            ir |= BITS(idata, 7, 11) << 15;
+            ir |= 1 << 12;
+            ir |= BITS(idata, 7, 11) << 7;
+            ir |= 0x13;
+        }
         break;
-    case 0b00110:
+    case 0b00110: // C.FLDSP
+        ir |= BITS(idata, 2, 4) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 5, 6) << 23;
+        ir |= 2 << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 7;
         break;
-    case 0b01010:
+    case 0b01010: // C.LWSP
+        ir |= BITS(idata, 2, 3) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 4, 6) << 22;
+        ir |= 2 << 15;
+        ir |= 2 << 12;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 3;
         break;
-    case 0b01110:
+    case 0b01110: // C.LDSP
+        ir |= BITS(idata, 2, 4) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 5, 6) << 23;
+        ir |= 2 << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 7, 11) << 7;
+        ir |= 3;
         break;
     case 0b10010:
+        if (!BIT(idata, 12) && !BITS(idata, 2, 6) && BITS(idata, 7, 11)) // C.JR
+            ir |= (BITS(idata, 7, 11) << 15) | 0x67;
+        if (!BIT(idata, 12) && BITS(idata, 2, 6)) // C.MV
+        {
+            ir |= BITS(idata, 2, 6) << 20;
+            ir |= BITS(idata, 7, 11) << 7;
+            ir |= 0x33;
+        }
+        if (BIT(idata, 12) && !BITS(idata, 2, 6) && BITS(idata, 7, 11) == 0) // C.EBREAK
+            ir = (1 << 20) | 0x73;
+        if (BIT(idata, 12) && !BITS(idata, 2, 6) && BITS(idata, 7, 11)) // C.JALR
+        {
+            ir |= BITS(idata, 7, 11) << 15;
+            ir |= 1 << 7;
+            ir |= 0x67;
+        }
+        if (BIT(idata, 12) && BITS(idata, 2, 6))
+        {
+            ir |= BITS(idata, 2, 6) << 20;
+            ir |= BITS(idata, 7, 11) << 15;
+            ir |= BITS(idata, 7, 11) << 7;
+            ir |= 0x33;
+        }
         break;
-    case 0b10110:
+    case 0b10110: // C.FSDSP
+        ir |= BITS(idata, 7, 9) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= 2 << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= 0x27;
         break;
-    case 0b11010:
+    case 0b11010: // C.SWSP
+        ir |= BITS(idata, 7, 8) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= 2 << 15;
+        ir |= 2 << 12;
+        ir |= BITS(idata, 9, 11) << 9;
+        ir |= 0x23;
         break;
-    case 0b11110:
+    case 0b11110: // C.SDSP
+        ir |= BITS(idata, 7, 9) << 26;
+        ir |= BIT(idata, 12) << 25;
+        ir |= BITS(idata, 2, 6) << 20;
+        ir |= 2 << 15;
+        ir |= 3 << 12;
+        ir |= BITS(idata, 10, 11) << 10;
+        ir |= 0x23;
         break;
     default:
         ir = idata;
