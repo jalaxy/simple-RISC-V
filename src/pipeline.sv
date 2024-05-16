@@ -237,8 +237,8 @@ module pipeline(
         .nret(wb_stage_inst.cqpop2 ? 2 : (wb_stage_inst.cqpop1 ? 1 : 0)),
         .ein(cqmisp & ~wb_stage_inst.cqcause[6]),
         .epc(wb_stage_inst.cqpc), .cause(wb_stage_inst.cqcause[5:0]));
-    arbiter arbiter_inst( // PT should have lowest priority to avoid deadlock,
-                          // or use dynamic priority?
+    arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
+                             or use dynamic priority? */
         .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
         .val_in({pt_data, fpu_r, div_r, mul_r, lsu_rdat}),
         .exc_in({pt_exc, fpu_exc, div_exc, mul_exc, lsu_exc}),
@@ -650,7 +650,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
                 else begin
                     {lsu_rqst, lsu_fence} <= {cqid, 12'd0};
                     lsu_wena <= op[`EX_STORE] | op[`EX_CSR];
-                    // maybe using LSQ id instead of CQ id as index is better
+                    /* maybe using LSQ id instead of CQ id as index is better */
                     lsu_addr <= out_pt.valid ? res : {1'b0, add};
                     lsu_bits <= in.funct3;
                     lsu_wdat <= rvalue[1];
@@ -689,6 +689,8 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
             if (res[64]) pt_done <= 0;
             else {pt_done, pt_data, pt_exc, pt_npc} <=
                 {cqid_pt, res, misp, jump ? jpc : in.pc + (in.c ? 64'd2 : 64'd4)};
+        /* execution from ID stage may use `pt_done` wires to handle
+           superscalar dependency by push latter instructions to PT */
         else if (ena_arb) pt_done <= 0;
     always_ff @(posedge clk) if (rst) addr_done <= 0;
         else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};
