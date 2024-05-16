@@ -191,7 +191,7 @@ module pipeline(
         .lsu_addr(lsu_addr), .lsu_bits(lsu_bits), .lsu_wdat(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
         .pt_done(pt_done), .pt_data(pt_data),
-        .pt_exc(pt_exc), .pt_npc(pt_npc), .pt_cause(pt_cause), .ena_arb(pt_ena),
+        .pt_exc(pt_exc), .pt_npc(pt_npc), .ena_arb(pt_ena),
         .addr_done(addr_done), .addr_val(addr_val));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst), .cqmisp(cqmisp),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
@@ -564,7 +564,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data, output logic pt_exc,
-    output logic [63:0] pt_npc, logic [6:0] pt_cause, input logic ena_arb,
+    output logic [63:0] pt_npc, input logic ena_arb,
     output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val
 );
     id_ex_t in;
