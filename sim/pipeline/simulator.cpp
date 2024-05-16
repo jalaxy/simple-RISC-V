@@ -113,6 +113,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 void simulator::step(int nojump)
 {
     csr[0xb00].val++;
+    csr[0xb02].val++;
 
     // instruction fetch
     pc = npc;
