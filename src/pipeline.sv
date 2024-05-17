@@ -268,16 +268,16 @@ module pc_stage(input logic clk, input logic rst, input logic flush,
     always_comb get_if = 1'b1;
     always_comb get_wb = 1'b1;
     // branch predictor
-    logic [1:0] pht[1023:0];
-    logic [63:0] btb[31:0];
-    logic [9:0] index;
+    logic [1:0] pht[4095:0];
+    logic [63:0] btb[4095:0];
+    logic [11:0] index;
     always_ff @(posedge clk) if (in_wb.valid)
         if (b & pht[index] != 0) pht[index] <= pht[index] - 1;
         else if (~b & pht[index] != 3) pht[index] <= pht[index] + 1;
-    always_ff @(posedge clk) if (in_wb.valid) btb[pc[4:0]] <= in_wb.npc;
-    always_comb index = (in_wb.valid ? in_wb.pc[9:0] : pc[9:0]);
+    always_ff @(posedge clk) if (in_wb.valid) btb[index] <= in_wb.npc;
+    always_comb index = (in_wb.valid ? in_wb.pc[11:0] : pc[11:0]);
     always_comb b = pht[index][1];
-    always_comb bpc = btb[pc[4:0]];
+    always_comb bpc = btb[index];
 endmodule
 
 module if_stage(input logic clk, input logic rst, input logic flush,
@@ -669,6 +669,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
                     if (op[`EX_CSR]) lsu_wdat <= in.a[64] ? rvalue[0] : in.a;
                 end
             else {lsu_rqst, lsu_fence} <= 0;
+        if (rst | flush) lsu_rqst <= 0;
     end
     always_comb if (out_pt.valid) res = {1'b1, {63-`lgCQSZ{1'd0}}, cqid};
         else if (in.valid & lsu & ~op[`EX_FENCE])
@@ -700,11 +701,11 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
         /* execution from ID stage may use `pt_done` wires to handle
            superscalar dependency by push latter instructions to PT */
         else if (ena_arb) pt_done <= 0;
-    always_ff @(posedge clk) if (rst) addr_done <= 0;
+    always_ff @(posedge clk) if (rst | flush) addr_done <= 0;
         else if (frompt & lsu) {addr_done, addr_val} <= {cqid_pt, add[63:0]};
         else addr_done <= 0;
     always_ff @(posedge clk)
-        if (rst) out_wb.valid <= 0;
+        if (rst | flush) out_wb.valid <= 0;
         else if (fromid) begin
             out_wb.valid <= 1'b1;
             out_wb.rda <= in.rda;
@@ -957,8 +958,10 @@ module lsu(input logic clk, input logic rst, input logic flush,
                 if (lsqrqst[i][`lgCQSZ] & (lsqraq[i] | lsqmisa[i])) fwd <= 0;
             if (aqrl[0] | csr) fwd <= 0;
         end else if (~dcache_done[`lgCQSZ]) {fwd, thr} <= 0; else thr <= 0;
-    always_ff @(posedge clk) if (rst | flush) {front, rear, full, empty} <= 1;
-        else begin
+    always_ff @(posedge clk) if (rst | flush) begin
+            {front, rear, full, empty} <= 1;
+            for (int i = 0; i< `LSQSZ; i++) lsqrqst[i] <= 0;
+        end else begin
             if (pop & ~push & frontp1 == rear) empty <= 1;
             if (push & ~pop & rearp1 == front) full <= 1;
             if (push) empty <= 0;

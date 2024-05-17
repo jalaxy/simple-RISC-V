@@ -77,7 +77,7 @@ module stats(
     always_comb cycle = pipeline_inst.csr_inst.mcycle;
     always_comb instret = pipeline_inst.csr_inst.minstret;
     always_ff @(posedge clk) if (rst) misp <= 0;
-        else if (pipeline_inst.ex_stage_inst.misp) misp <= misp + 1;
+        else if (pipeline_inst.data_wb_pc.valid) misp <= misp + 1;
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
