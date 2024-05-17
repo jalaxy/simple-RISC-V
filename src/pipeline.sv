@@ -268,8 +268,16 @@ module pc_stage(input logic clk, input logic rst, input logic flush,
     always_comb get_if = 1'b1;
     always_comb get_wb = 1'b1;
     // branch predictor
-    always_comb b = 0;
-    always_comb bpc = 0;
+    logic [1:0] pht[1023:0];
+    logic [63:0] btb[31:0];
+    logic [9:0] index;
+    always_ff @(posedge clk) if (in_wb.valid)
+        if (b & pht[index] != 0) pht[index] <= pht[index] - 1;
+        else if (~b & pht[index] != 3) pht[index] <= pht[index] + 1;
+    always_ff @(posedge clk) if (in_wb.valid) btb[pc[4:0]] <= in_wb.npc;
+    always_comb index = (in_wb.valid ? in_wb.pc[9:0] : pc[9:0]);
+    always_comb b = pht[index][1];
+    always_comb bpc = btb[pc[4:0]];
 endmodule
 
 module if_stage(input logic clk, input logic rst, input logic flush,
