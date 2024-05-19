@@ -1018,7 +1018,7 @@ void simulator::step(int nojump)
     if (!jump | nojump)
         npc = pc + (BITS(idata, 0, 1) == 3 ? 4 : 2);
     if (excp)
-        npc = csr[0x305].val;
+        npc = csr[0x305].val, step();
     arregs[0] = 0;
 }
 

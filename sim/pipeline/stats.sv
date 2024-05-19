@@ -39,15 +39,17 @@ module stats(
 
     // monitor registers change
     always_comb {cmtpc[0], cmtaddr[0], cmtdata[0]} =
-        pipeline_inst.wb_stage_inst.cqpop1 & ~pipeline_inst.wb_stage_inst.cqrda[6] ?
-            {pipeline_inst.wb_stage_inst.cqpc,
-             pipeline_inst.wb_stage_inst.cqrda,
-             pipeline_inst.wb_stage_inst.cqfrontval[63:0]} : 0;
+        pipeline_inst.wb_stage_inst.cqpop[0] &
+            ~pipeline_inst.wb_stage_inst.cqinfo[0].rda[6] ?
+            {pipeline_inst.wb_stage_inst.cqinfo[0].pc,
+             pipeline_inst.wb_stage_inst.cqinfo[0].rda,
+             pipeline_inst.wb_stage_inst.cqdata[0][63:0]} : 0;
     always_comb {cmtpc[1], cmtaddr[1], cmtdata[1]} =
-        pipeline_inst.wb_stage_inst.cqpop2 & ~pipeline_inst.wb_stage_inst.cqrdap1[6] ?
-            {pipeline_inst.wb_stage_inst.cqpcp1,
-             pipeline_inst.wb_stage_inst.cqrdap1,
-             pipeline_inst.wb_stage_inst.cqfrontp1val[63:0]} : 0;
+        pipeline_inst.wb_stage_inst.cqpop[1] &
+            ~pipeline_inst.wb_stage_inst.cqinfo[1].rda[6] ?
+            {pipeline_inst.wb_stage_inst.cqinfo[1].pc,
+             pipeline_inst.wb_stage_inst.cqinfo[1].rda,
+             pipeline_inst.wb_stage_inst.cqdata[1][63:0]} : 0;
     always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
         pipeline_inst.csr_inst.addr, pipeline_inst.csr_inst.wres};
 
@@ -77,7 +79,7 @@ module stats(
     always_comb cycle = pipeline_inst.csr_inst.mcycle;
     always_comb instret = pipeline_inst.csr_inst.minstret;
     always_ff @(posedge clk) if (rst) misp <= 0;
-        else if (pipeline_inst.data_wb_pc.valid) misp <= misp + 1;
+        else if (pipeline_inst.redir) misp <= misp + 1;
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
