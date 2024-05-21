@@ -5,7 +5,7 @@ module stats(
     output logic [63:0] icache_addr,
     output logic        icache_flsh,
     input  logic        icache_done,
-    input  logic [31:0] icache_data,
+    input  logic [63:0] icache_data,
     output logic [`lgCQSZ:0] dcache_rqst,
     output logic       [1:0] dcache_rsrv,
     output logic             dcache_wena,

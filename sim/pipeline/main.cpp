@@ -443,7 +443,7 @@ int main(int argc, char **argv)
             }
         printf("Maximum cycle %d reached.\n", cmd.maxtime);
     }
-    if (cmd.debug)
+    // if (cmd.debug)
     {
         printf("Statistics:\n");
         printf("    Cycle: %lu    Instructions: %lu    Mispredictions: %lu\n",

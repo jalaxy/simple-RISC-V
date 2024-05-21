@@ -1,12 +1,12 @@
 `define RST_PC 64'h400000 // reset pc
-`define PHTSZ 4096
-`define lgPHTSZ 12
+`define PHTSZ 256
+`define lgPHTSZ 8
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
 `define PTLEN 400
 `define CQSZ 16 // commit queue size
 `define lgCQSZ 4
-`define CQLEN 74
+`define CQLEN 76
 `define LSQSZ 8 // store queue size
 `define lgLSQSZ 3
 `define LATENUM 5 // number of late components
@@ -82,7 +82,12 @@
 `define EX_RET    6'd48
 `define EX_END    6'd49
 
-typedef struct packed { logic valid; logic [63:0] pc; logic [1:0] pat; } pc_if_t;
+typedef struct packed {
+    logic valid, branch;
+    logic [63:0] pc;
+    logic [2:0] num;
+    logic [3:0][1:0] pat;
+} pc_if_t;
 typedef struct packed { logic valid, c; } if_pc_t;
 typedef struct packed {
     logic valid, redir;
@@ -116,12 +121,14 @@ typedef struct packed {
     logic [64:0] rd;
     logic [63:0] npc, pc;
     logic mw;
+    logic [1:0] delta;
     logic [6:0] rda;
     logic [1:0] pat;
 } ex_wb_t;
 typedef struct packed {
     logic [63:0] pc;
     logic mw;
+    logic [1:0] delta;
     logic [6:0] rda;
     logic [1:0] pat;
 } cqinfo_t;
@@ -134,7 +141,7 @@ module pipeline(
     output logic [63:0] icache_addr,
     output logic        icache_flsh,
     input  logic        icache_done,
-    input  logic [31:0] icache_data,
+    input  logic [63:0] icache_data,
 
     output logic [`lgCQSZ:0] dcache_rqst,
     output logic       [1:0] dcache_rsrv,
@@ -268,29 +275,32 @@ module pc_stage(input logic clk, input logic rst,
     input  wb_pc_t [1:0] in_wb, output  logic get_wb,
     output pc_if_t out_if, input  logic ena_if
 );
-    logic [63:0] pc, pc2, pc4, bpc;
-    logic b;
-    always_comb out_if.valid = ~in_wb[0].redir & ~in_wb[1].redir;
-    always_comb out_if.pc = pc;
-    always_comb pc = in_if.valid & in_if.c ? pc2 : pc4;
-    always_ff @(posedge clk)
-        if (rst) {pc2, pc4} <= {`RST_PC, `RST_PC};
-        else if (in_wb[0].redir) {pc2, pc4} <= {in_wb[0].npc, in_wb[0].npc};
-        else if (in_wb[1].redir) {pc2, pc4} <= {in_wb[1].npc, in_wb[1].npc};
-        else if (ena_if) {pc2, pc4} <= b ? {bpc, bpc} : {pc + 64'd2, pc + 64'd4};
-    always_comb get_if = 1'b1;
-    always_comb get_wb = 1'b1;
-    // branch predictor
-    logic [1:0] pht[`PHTSZ-1:0];
-    logic [63:0] btb[`PHTSZ-1:0];
+    logic [63:0] pc; logic [2:0] num; // in half-word
+    logic [1:0] pht[`PHTSZ-1:0]; logic [63:0] btb[`PHTSZ-1:0];
+    logic [3:0][`lgPHTSZ-1:0] index;
+    always_comb for (int i = 0; i < 4; i++)
+        index[i] = pc[`lgPHTSZ:1] + i[`lgPHTSZ-1:0];
+    always_comb begin num = 4; for (int i = 3; i >= 0; i--)
+        if (pht[index[i]][1]) num = i[2:0] + 3'd1; end
+    always_ff @(posedge clk) if (rst) pc <= `RST_PC; else begin
+        if (ena_if) pc <= pc + {60'd0, num, 1'b0};
+        if (ena_if) for (int i = 3; i >= 0; i--)
+            if (pht[index[i]][1]) pc <= btb[index[i]];
+        for (int i = 1; i >= 0; i--) if (in_wb[i].redir) pc <= in_wb[i].npc;
+    end
     always_ff @(posedge clk) for (int i = 0; i < 2; i++) if (in_wb[i].valid)
         if (in_wb[i].redir) begin
-            pht[in_wb[i].pc[`lgPHTSZ-1:0]] <= in_wb[i].pat[0] ? 2'b10 : 2'b01;
-            btb[in_wb[i].pc[`lgPHTSZ-1:0]] <= in_wb[i].npc;
-        end else pht[in_wb[i].pc[`lgPHTSZ-1:0]] <= in_wb[i].pat[1] ? 2'b11 : 2'b00;
-    always_comb b = pht[pc[`lgPHTSZ-1:0]][1];
-    always_comb bpc = btb[pc[`lgPHTSZ-1:0]];
-    always_comb out_if.pat = pht[pc[`lgPHTSZ-1:0]];
+            pht[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].pat[0] ? 2'b10 : 2'b01;
+            btb[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].npc;
+        end else pht[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].pat[1] ? 2'b11 : 2'b00;
+    always_comb get_if = 1'b1;
+    always_comb get_wb = 1'b1;
+    always_comb out_if.valid = ~in_wb[0].redir & ~in_wb[1].redir;
+    always_comb begin out_if.branch = 0; for (int i = 3; i >= 0; i--)
+        if (pht[index[i]][1]) out_if.branch = 1; end
+    always_comb out_if.pc = pc;
+    always_comb out_if.num = num;
+    always_comb for (int i = 0; i < 4; i++) out_if.pat[i] = pht[index[i]];
 endmodule
 
 module if_stage(input logic clk, input logic rst, input logic flush,
@@ -301,25 +311,60 @@ module if_stage(input logic clk, input logic rst, input logic flush,
     output logic [63:0] icache_addr,
     output logic        icache_flsh,
     input  logic        icache_done,
-    input  logic [31:0] icache_data
+    input  logic [63:0] icache_data
 );
-    pc_if_t in_pc_r;
-    logic sent, hold_data;
-    always_comb get_pc = ~in_pc.valid | ena_id & ~(sent & ~icache_done);
+    logic [7:0][15:0] remdat, isdat; logic [3:0] remnum, isnum, irnum, getnum;
+    logic [7:0][63:0] rempc, ispc; logic [7:0][1:0] rempat, ispat;
+    logic [3:0][15:0] icdat; logic [3:0][63:0] icpc;
+    logic [3:0][1:0] icpat; logic [2:0] icnum; logic icbranch;
+    logic [7:0] isnc; logic [3:0][2:0] irpos; logic [3:0] irvalid;
+    always_comb isdat = ({64'd0, icache_data} << {remnum, 4'b0}) | remdat;
+    always_comb ispc = ({256'd0, icpc} << {remnum, 6'd0}) | rempc;
+    always_comb ispat = ({8'd0, icpat} << {remnum, 1'b0}) | rempat;
+    always_comb isnum = remnum + {1'b0, icnum};
+    always_comb for (int i = 0; i < 8; i++) isnc[i] = &isdat[i][1:0];
+    always_comb for (int i = 0; i < 4; i++)
+        irvalid[i] = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum;
+    always_comb begin irnum = 0; for (int i = 0; i < 4; i++) if (irvalid[i])
+        irnum = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1); end
+    always_comb begin
+        irpos[0] = 0;
+        if (~isnc[0]) irpos[1] = 1; else irpos[1] = 2;
+        if (~isnc[0] & ~isnc[1]) irpos[2] = 2;
+        else if (~isnc[0] & isnc[1] | isnc[0] & ~isnc[2]) irpos[2] = 3;
+        else irpos[2] = 4;
+        if (~isnc[0] & ~isnc[1] & ~isnc[2]) irpos[3] = 3;
+        else if (~isnc[0] & ~isnc[1] & isnc[2] | ~isnc[0] & isnc[1] & ~isnc[3] |
+            isnc[0] & ~isnc[2] & ~isnc[3]) irpos[3] = 4;
+        else if (~isnc[0] & isnc[1] & isnc[3] | isnc[0] & ~isnc[2] & isnc[3] |
+            isnc[0] & isnc[2] & ~isnc[4]) irpos[3] = 5;
+        else irpos[3] = 6;
+    end
+    always_comb getnum = ena_id & irvalid[0] ? (isnc[0] ? 2 : 1) : 0;
+    always_comb get_pc = ~in_pc.valid | ena_id & ~irvalid[1];
+    always_comb out_id.valid = ~flush & irvalid[0];
+    always_comb out_id.pc = ispc[0] + {60'd0, irpos[0], 1'b0};
+    always_comb out_id.pat = isnc[0] ? ispat[1] : ispat[0];
+    always_comb out_id.ir = isdat[irpos[0]+1-:2];
+    always_ff @(posedge clk) if (rst | flush) remnum <= 0; else
+        remnum <= (icbranch ? irnum : isnum) - getnum;
+    always_ff @(posedge clk)
+        remdat <= (~(-128'd1 << {isnum, 4'd0}) & isdat) >> {getnum, 4'd0};
+    always_ff @(posedge clk)
+        rempc <= (~(-512'd1 << {isnum, 6'd0}) & ispc) >> {getnum, 6'd0};
+    always_ff @(posedge clk)
+        rempat <= (~(-16'd1 << {isnum, 1'd0}) & ispat) >> {getnum, 1'd0};
+    always_ff @(posedge clk) if (icache_rqst) icnum <= in_pc.num;
+        else if (icache_done) icnum <= 0;
+    always_ff @(posedge clk) if (icache_rqst) icbranch <= in_pc.branch;
+        else if (icache_done) icbranch <= 0;
+    always_ff @(posedge clk) if (icache_rqst) icpat <= in_pc.pat;
+    always_ff @(posedge clk) for (int i = 0; i < 4; i++) if (icache_rqst)
+        icpc[i] <= in_pc.pc + {31'd0, i, 1'b0};
+    always_comb icdat = icache_data;
     always_comb icache_rqst = ~rst & get_pc & in_pc.valid;
-    always_ff @(posedge clk)
-        sent <= rst | flush ? 1'b0 : icache_rqst | sent & ~icache_done;
-    always_ff @(posedge clk)
-        hold_data <= rst | flush ? 1'b0 : (ena_id ? 1'b0 : icache_done | hold_data);
     always_comb icache_addr = in_pc.pc;
     always_comb icache_flsh = flush;
-    always_comb out_id.valid = ~flush & (sent & icache_done | hold_data);
-    always_comb out_id.pc = in_pc_r.pc;
-    always_comb out_id.pat = in_pc_r.pat;
-    always_comb out_id.ir = icache_data;
-    always_comb out_pc.valid = ~flush & (sent & icache_done | hold_data);
-    always_comb out_pc.c = icache_data[1:0] != 2'b11;
-    always_ff @(posedge clk) in_pc_r <= icache_rqst ? in_pc : in_pc_r;
 endmodule
 
 module id_stage(input logic clk, input logic rst, input logic flush,
@@ -721,6 +766,7 @@ module ex_stage(input logic clk, input logic rst, input logic flush,
             out_wb.rda <= in.rda;
             out_wb.rd <= res;
             out_wb.mw <= op[`EX_STORE] | op[`EX_CSR];
+            out_wb.delta <= in.delta[2] ? 2'd2 : 2'd0;
             out_wb.pc <= in.pc;
             out_wb.pat <= in.pat;
             out_wb.npc <= jump ? jpc : in.pc + {61'd0, in.delta};
@@ -797,14 +843,16 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb cqpop[0] = cqready[0];
     always_comb cqpop[1] = cqready[0] & cqready[1];
     always_comb redir = |cqredir;
-    always_comb epc = cqcause[0][6] ? lastpc[63:0] : cqinfo[0].pc[63:0];
-    always_comb cause = cqcause[0][6] ? cqcause[0] : cqcause[1];
+    always_comb epc = cqcause[0][6] ? cqinfo[0].pc : cqinfo[0].pc;
+    always_comb if (cqvalid[0] & cqcause[0][6]) cause = cqcause[0];
+        else if (cqvalid[1] & cqcause[1][6]) cause = cqcause[1]; else cause = 0;
     always_comb lsu_cmt = ~redir & cqinfo[0].mw;
     always_ff @(posedge clk) if (redir) lastpc <= 0;
-        else if (cqpop[1]) lastpc <= {1'b1, cqinfo[1].pc};
-        else if (cqpop[0]) lastpc <= {1'b1, cqinfo[0].pc};
+        else if (cqpop[1]) lastpc <= {1'b1, cqinfo[1].pc + {62'd0, cqinfo[1].delta}};
+        else if (cqpop[0]) lastpc <= {1'b1, cqinfo[0].pc + {62'd0, cqinfo[0].delta}};
     always_ff @(posedge clk) if (rst) lastnpc <= `RST_PC;
-        else if (cqcause[0][6] | cqcause[1][6]) lastnpc <= mtvec;
+        else if (cqvalid[0] & cqcause[0][6] | cqvalid[1] & cqcause[1][6])
+            lastnpc <= mtvec;
         else if (cqpop[1]) {lastnpc, lastpat} <= {cqnpc[1], cqinfo[1].pat};
         else if (cqpop[0]) {lastnpc, lastpat} <= {cqnpc[0], cqinfo[0].pat};
     always_ff @(posedge clk)
@@ -857,7 +905,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb out_pc[0].pat = lastpat;
     always_comb out_pc[1].valid = cqpop[1] | cqredir[1];
     always_comb out_pc[1].redir = cqredir[1];
-    always_comb out_pc[1].pc = cqinfo[0].pc;
+    always_comb out_pc[1].pc = cqinfo[0].pc + {62'd0, cqinfo[0].delta};
     always_comb out_pc[1].npc = cqcause[1][6] ? mtvec : cqnpc[0];
     always_comb out_pc[1].pat = cqinfo[0].pat;
 endmodule
