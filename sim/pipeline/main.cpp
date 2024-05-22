@@ -91,7 +91,13 @@ void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
     while (sim.get_pc() < addr + size)
     {
         sim.step(1);
-        printf("    0x%016lx: %s\n", sim.get_pc(), sim.get_asmcode());
+        char s[16];
+        uint32_t code = DLE(mem, sim.get_pc());
+        if ((code & 3) != 3)
+            sprintf(s, "    %04x", code & 0xffff);
+        else
+            sprintf(s, "%08x", code);
+        printf("    0x%016lx:  %s  %s\n", sim.get_pc(), s, sim.get_asmcode());
     }
 }
 

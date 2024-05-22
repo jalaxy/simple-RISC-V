@@ -339,15 +339,19 @@ module if_stage(input logic clk, input logic rst, input logic flush,
     logic [3:0][1:0] icpat; logic [2:0] icnum; logic icbranch;
     logic incomp, incomp_r; logic [63:0] incomp_pc;
     logic [7:0] isnc; logic [3:0][2:0] irpos; logic [3:0] irvalid;
+    logic busy;
     always_comb isdat = ({64'd0, icache_data} << {remnum, 4'b0}) | remdat;
     always_comb ispc = ({256'd0, icpc} << {remnum, 6'd0}) | rempc;
     always_comb ispat = ({8'd0, icpat} << {remnum, 1'b0}) | rempat;
-    always_comb isnum = remnum + {1'b0, icnum};
+    always_comb isnum = remnum + (icache_done ? {1'b0, icnum} : 4'd0);
     always_comb for (int i = 0; i < 8; i++) isnc[i] = &isdat[i][1:0];
     always_comb for (int i = 0; i < 4; i++)
         irvalid[i] = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum;
-    always_comb begin incomp = |isnum; for (int i = 0; i < 4; i++) if (irvalid[i])
-        incomp = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) != isnum; end
+    always_comb if (icache_done) begin
+        incomp = |isnum;
+        for (int i = 0; i < 4; i++) if (irvalid[i])
+            incomp = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) != isnum;
+    end else incomp = 0;
     always_comb begin
         irpos[0] = 0;
         if (~isnc[0]) irpos[1] = 1; else irpos[1] = 2;
@@ -362,8 +366,9 @@ module if_stage(input logic clk, input logic rst, input logic flush,
         else irpos[3] = 6;
     end
     always_comb getnum = ena_id & irvalid[0] ? (isnc[0] ? 2 : 1) : 0;
-    always_comb get_pc = ~in_pc.valid |
-        ena_id & ~irvalid[1] & ~(incomp & icbranch | incomp_r);
+    always_comb busy = |icnum & ~icache_done;
+    always_comb get_pc = ~in_pc.valid | ena_id & ~busy &
+        ~irvalid[1] & ~(incomp & icbranch | incomp_r);
     always_comb out_id.valid = ~flush & irvalid[0];
     always_comb out_id.pc = ispc[0] + {60'd0, irpos[0], 1'b0};
     always_comb out_id.pat = isnc[0] ? ispat[1] : ispat[0];
@@ -378,16 +383,19 @@ module if_stage(input logic clk, input logic rst, input logic flush,
         rempc <= (~(-512'd1 << {isnum, 6'd0}) & ispc) >> {getnum, 6'd0};
     always_ff @(posedge clk)
         rempat <= (~(-16'd1 << {isnum, 1'd0}) & ispat) >> {getnum, 1'd0};
-    always_ff @(posedge clk) if (incomp_r & isnum != 8) icnum <= 1;
+    always_ff @(posedge clk) if (rst | flush) icnum <= 0;
+        else if (incomp_r & isnum != 8) icnum <= 1;
         else if (icache_rqst) icnum <= in_pc.num;
         else if (icache_done) icnum <= 0;
-    always_ff @(posedge clk) if (icache_rqst) icbranch <= in_pc.branch;
+    always_ff @(posedge clk) if (rst | flush) icbranch <= 0;
+        else if (icache_rqst) icbranch <= in_pc.branch;
         else if (icache_done) icbranch <= 0;
     always_ff @(posedge clk) if (icache_rqst) icpat <= in_pc.pat;
     always_ff @(posedge clk) if (icache_rqst) for (int i = 0; i < 4; i++)
         icpc[i] <= in_pc.pc + {31'd0, i, 1'b0};
     always_comb icdat = icache_data;
-    always_comb icache_rqst = ~rst & (get_pc & in_pc.valid | incomp_r & isnum != 8);
+    always_comb icache_rqst = ~rst & ~busy &
+        (get_pc & in_pc.valid | incomp_r & isnum != 8);
     always_comb icache_addr = incomp_r & isnum != 8 ? incomp_pc : in_pc.pc;
     always_comb icache_flsh = flush;
 endmodule
