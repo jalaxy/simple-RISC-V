@@ -1,6 +1,8 @@
 `define RST_PC 64'h400000 // reset pc
 `define PHTSZ 4096
 `define lgPHTSZ 12
+`define BTBSZ 4096
+`define lgBTBSZ 12
 `define PTSZ 8 // pending table size
 `define lgPTSZ 3
 `define PTLEN 400
@@ -181,7 +183,7 @@ module pipeline(
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
     logic redir; logic [6:0] cause; logic [63:0] epc;
 
-    pc_stage pc_stage_inst(.clk(clk), .rst(rst),
+    pc_stage pc_stage_inst(.clk(clk), .rst(rst), .flush(redir),
         .in_if(data_if_pc), .get_if(get_if_pc),
         .in_wb(data_wb_pc), .get_wb(get_wb_pc),
         .out_if(data_pc_if), .ena_if(get_pc_if));
@@ -268,47 +270,57 @@ module pipeline(
         .npc_out(late_npc), .cause_out(late_cause));
 endmodule
 
-module pc_stage(input logic clk, input logic rst,
+module pc_stage(input logic clk, input logic rst, input logic flush, // redundant
     input  if_pc_t in_if, output  logic get_if,
     input  wb_pc_t [1:0] in_wb, output  logic get_wb,
     output pc_if_t out_if, input  logic ena_if
 );
-    logic [63:0] pc; logic [2:0] num; // in half-word
-    logic [1:0] pht[`PHTSZ-1:0]; logic [63:0] btb[`PHTSZ-1:0];
-    logic [3:0][`lgPHTSZ-1:0] index;
+    logic [63:0] pc; logic branch; logic [2:0] num; // in half-word
+    logic [3:0]     [`lgPHTSZ-1:0] phtra; logic [3:0]     [1:0] phtrv;
+    logic [1:0][1:0][`lgPHTSZ-1:0] phtwa; logic [1:0][1:0][1:0] phtwv;
+    logic [1:0][1:0] phtwe;
+    logic [3:0][`lgBTBSZ-1:0] btbra; logic [3:0][63:0] btbrv;
+    logic      [`lgBTBSZ-1:0] btbwa; logic [63:0]      btbwv; logic btbwe;
     always_comb for (int i = 0; i < 4; i++)
-        index[i] = pc[`lgPHTSZ:1] + i[`lgPHTSZ-1:0];
-    always_comb begin num = 4; for (int i = 3; i >= 0; i--)
-        if (pht[index[i]][1]) num = i[2:0] + 3'd1; end
+        phtra[i] = pc[`lgPHTSZ:1] + i[`lgPHTSZ-1:0];
+    always_comb for (int i = 0; i < 2; i++) begin
+        phtwa[i] = {in_wb[i].pc[`lgPHTSZ:1] + `lgPHTSZ'd1, in_wb[i].pc[`lgPHTSZ:1]};
+        phtwe[i] = {~in_wb[i].c, 1'b1};
+        case ({in_wb[i].redir, in_wb[i].c})
+            2'b00: phtwv[i] = {in_wb[i].pat[1] ? 2'b11 : 2'b00, 2'b00};
+            2'b01: phtwv[i] = {2'b00, in_wb[i].pat[1] ? 2'b11 : 2'b00};
+            2'b10: phtwv[i] = {in_wb[i].pat[0] ? 2'b10 : 2'b01, 2'b00};
+            2'b11: phtwv[i] = {2'b00, in_wb[i].pat[0] ? 2'b10 : 2'b01};
+        endcase
+    end
+    always_comb for (int i = 0; i < 4; i++)
+        btbra[i] = pc[`lgBTBSZ:1] + i[`lgBTBSZ-1:0];
+    always_comb begin {btbwe, btbwa, btbwv} = 0;
+        for (int i = 1; i >= 0; i--) if (in_wb[i].redir) begin
+            btbwe = 1; btbwv = in_wb[i].npc;
+            btbwa = in_wb[i].pc[`lgBTBSZ:1] + (in_wb[i].c ? `lgBTBSZ'd0 : `lgBTBSZ'd1);
+        end end
+    regfile #(.dwidth(2), .rports(4), .wports(4), .awidth(`lgPHTSZ), .depth(`PHTSZ))
+        pht_inst(.clk(clk), .rst(rst), .raddr(phtra), .rvalue(phtrv),
+            .waddr(phtwa), .wvalue(phtwv), .wena(phtwe));
+    regfile #(.dwidth(64), .rports(4), .wports(1), .awidth(`lgBTBSZ), .depth(`BTBSZ))
+        btb_inst(.clk(clk), .rst(rst), .raddr(btbra), .rvalue(btbrv),
+            .waddr(btbwa), .wvalue(btbwv), .wena(btbwe));
     always_ff @(posedge clk) if (rst) pc <= `RST_PC; else begin
         if (ena_if) pc <= pc + {60'd0, num, 1'b0};
         if (ena_if) for (int i = 3; i >= 0; i--)
-            if (pht[index[i]][1]) pc <= btb[index[i]];
+            if (phtrv[i][1]) pc <= btbrv[i];
         for (int i = 1; i >= 0; i--) if (in_wb[i].redir) pc <= in_wb[i].npc;
     end
-    always_ff @(posedge clk) for (int i = 0; i < 2; i++) if (in_wb[i].valid)
-        if (in_wb[i].redir)
-            if (in_wb[i].c) begin
-                pht[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].pat[0] ? 2'b10 : 2'b01;
-                btb[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].npc;
-            end else begin
-                pht[in_wb[i].pc[`lgPHTSZ:1]] <= 2'b00;
-                pht[in_wb[i].pc[`lgPHTSZ:1]+`lgPHTSZ'd1] <=
-                    in_wb[i].pat[0] ? 2'b10 : 2'b01;
-                btb[in_wb[i].pc[`lgPHTSZ:1]+`lgPHTSZ'd1] <= in_wb[i].npc;
-            end
-        else if (in_wb[i].c)
-            pht[in_wb[i].pc[`lgPHTSZ:1]] <= in_wb[i].pat[1] ? 2'b11 : 2'b00;
-        else
-            pht[in_wb[i].pc[`lgPHTSZ:1]+`lgPHTSZ'd1] <= in_wb[i].pat[1] ? 2'b11 : 2'b00;
+    always_comb begin {branch, num} = 4; for (int i = 3; i >= 0; i--)
+        if (phtrv[i][1]) {branch, num} = {1'b1, i[2:0] + 3'd1}; end
     always_comb get_if = 1'b1;
     always_comb get_wb = 1'b1;
-    always_comb out_if.valid = ~in_wb[0].redir & ~in_wb[1].redir;
-    always_comb begin out_if.branch = 0; for (int i = 3; i >= 0; i--)
-        if (pht[index[i]][1]) out_if.branch = 1; end
+    always_comb out_if.valid = ~flush;
     always_comb out_if.pc = pc;
     always_comb out_if.num = num;
-    always_comb for (int i = 0; i < 4; i++) out_if.pat[i] = pht[index[i]];
+    always_comb out_if.branch = branch;
+    always_comb out_if.pat = phtrv;
 endmodule
 
 module if_stage(input logic clk, input logic rst, input logic flush,
