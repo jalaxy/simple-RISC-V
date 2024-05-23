@@ -276,6 +276,7 @@ module pc_stage(input logic clk, input logic rst, input logic flush, // redundan
     output pc_if_t out_if, input  logic ena_if
 );
     logic [63:0] pc; logic branch; logic [2:0] num; // in half-word
+    logic [1:0] pht[`PHTSZ-1:0]; logic [63:0] btb[`BTBSZ-1:0];
     logic [3:0]     [`lgPHTSZ-1:0] phtra; logic [3:0]     [1:0] phtrv;
     logic [1:0][1:0][`lgPHTSZ-1:0] phtwa; logic [1:0][1:0][1:0] phtwv;
     logic [1:0][1:0] phtwe;
@@ -285,7 +286,7 @@ module pc_stage(input logic clk, input logic rst, input logic flush, // redundan
         phtra[i] = pc[`lgPHTSZ:1] + i[`lgPHTSZ-1:0];
     always_comb for (int i = 0; i < 2; i++) begin
         phtwa[i] = {in_wb[i].pc[`lgPHTSZ:1] + `lgPHTSZ'd1, in_wb[i].pc[`lgPHTSZ:1]};
-        phtwe[i] = {~in_wb[i].c, 1'b1};
+        phtwe[i] = in_wb[i].valid ? {~in_wb[i].c, 1'b1} : 0;
         case ({in_wb[i].redir, in_wb[i].c})
             2'b00: phtwv[i] = {in_wb[i].pat[1] ? 2'b11 : 2'b00, 2'b00};
             2'b01: phtwv[i] = {2'b00, in_wb[i].pat[1] ? 2'b11 : 2'b00};
@@ -300,12 +301,11 @@ module pc_stage(input logic clk, input logic rst, input logic flush, // redundan
             btbwe = 1; btbwv = in_wb[i].npc;
             btbwa = in_wb[i].pc[`lgBTBSZ:1] + (in_wb[i].c ? `lgBTBSZ'd0 : `lgBTBSZ'd1);
         end end
-    regfile #(.dwidth(2), .rports(4), .wports(4), .awidth(`lgPHTSZ), .depth(`PHTSZ))
-        pht_inst(.clk(clk), .rst(rst), .raddr(phtra), .rvalue(phtrv),
-            .waddr(phtwa), .wvalue(phtwv), .wena(phtwe));
-    regfile #(.dwidth(64), .rports(4), .wports(1), .awidth(`lgBTBSZ), .depth(`BTBSZ))
-        btb_inst(.clk(clk), .rst(rst), .raddr(btbra), .rvalue(btbrv),
-            .waddr(btbwa), .wvalue(btbwv), .wena(btbwe));
+    always_comb for (int i = 0; i < 4; i++) phtrv[i] = pht[phtra[i]];
+    always_comb for (int i = 0; i < 4; i++) btbrv[i] = btb[btbra[i]];
+    always_ff @(posedge clk) for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++)
+        if (phtwe[i][j]) pht[phtwa[i][j]] <= phtwv[i][j];
+    always_ff @(posedge clk) if (btbwe) btb[btbwa] <= btbwv;
     always_ff @(posedge clk) if (rst) pc <= `RST_PC; else begin
         if (ena_if) pc <= pc + {60'd0, num, 1'b0};
         if (ena_if) for (int i = 3; i >= 0; i--)
@@ -345,8 +345,8 @@ module if_stage(input logic clk, input logic rst, input logic flush,
     always_comb ispat = ({8'd0, icpat} << {remnum, 1'b0}) | rempat;
     always_comb isnum = remnum + (icache_done ? {1'b0, icnum} : 4'd0);
     always_comb for (int i = 0; i < 8; i++) isnc[i] = &isdat[i][1:0];
-    always_comb for (int i = 0; i < 4; i++)
-        irvalid[i] = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum;
+    always_comb for (int i = 0; i < 4; i++) irvalid[i] =
+        |isnum & ({1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum);
     always_comb if (icache_done) begin
         incomp = |isnum;
         for (int i = 0; i < 4; i++) if (irvalid[i])
