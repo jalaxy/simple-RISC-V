@@ -879,7 +879,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
             cqpop_accum = cqpop[i];
             cqpatup_ena &= ~cqpatup[i];
         end end
-    always_comb redir = |cqredir & ena_pc;
+    always_comb redir = out_pc.redir & ena_pc;
     always_comb begin {cause, epc} = 0; for (int i = 1; i >= 0; i--)
         if (cqexcep[i]) {cause, epc} = {cqcause[i], cqinfo[i].pc}; end
     always_comb lsu_cmt = ~redir & cqinfo[0].mw;
