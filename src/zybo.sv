@@ -37,7 +37,7 @@ module wrapper(input logic clk, input logic rst, output logic [3:0] pos);
         dmem_done, dmem_rdat, dmem_wdat, dmem_flsh);
     always_ff @(posedge clk) for (int i = 0; i < 2; i++)
         if (pipeline_inst.wb_stage_inst.cqpop[i])
-            pos <= pipeline_inst.wb_stage_inst.cqinfo[i].pc[5:2] + 3;
+            pos <= pipeline_inst.wb_stage_inst.cqinfo[i].pc[6:3];
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
