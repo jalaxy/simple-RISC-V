@@ -1,16 +1,16 @@
 `define RST_PC 64'h400000 // reset pc
-`define PHTSZ 4096
-`define lgPHTSZ 12
-`define BTBSZ 4096
-`define lgBTBSZ 12
-`define PTSZ 8 // pending table size
-`define lgPTSZ 3
+`define PHTSZ 4096 // patter history table
+`define BTBSZ 512 // branch target table
+`define PTSZ  8    // pending table
+`define CQSZ  16   // commit queue
+`define LSQSZ 8    // load store queue
+`define lgPHTSZ $clog2(`PHTSZ)
+`define lgBTBSZ $clog2(`BTBSZ)
+`define lgPTSZ  $clog2(`PTSZ)
+`define lgCQSZ  $clog2(`CQSZ)
+`define lgLSQSZ $clog2(`LSQSZ)
 `define PTLEN 416
-`define CQSZ 16 // commit queue size
-`define lgCQSZ 4
 `define CQLEN 93
-`define LSQSZ 8 // store queue size
-`define lgLSQSZ 3
 `define LATENUM 5 // number of late components
 `define LOAD      5'b00000 // opcode map
 `define LOAD_FP   5'b00001
@@ -154,12 +154,12 @@ module pipeline(
     output logic             dcache_flsh
 );
     pc_if_t data_pc_if; logic get_pc_if;
-    xx_pc_t data_if_pc; logic get_if_pc;
     if_id_t data_if_id; logic get_if_id;
     id_ex_t data_id_ex; logic get_id_ex;
     ex_wb_t data_ex_wb; logic get_ex_wb;
     id_ex_t data_ex_pt; logic get_ex_pt;
     id_ex_t data_pt_ex; logic get_pt_ex;
+    xx_pc_t data_if_pc; logic get_if_pc;
     xx_pc_t data_wb_pc; logic get_wb_pc;
     logic [1:0][6:0] raddr; logic [1:0][64:0] rvalue;
     logic [`lgCQSZ:0] cqid_new, cqid_old;
@@ -271,9 +271,9 @@ module pipeline(
 endmodule
 
 module pc_stage(input logic clk, input logic rst,
-    input  xx_pc_t in_if, output  logic get_if,
-    input  xx_pc_t in_wb, output  logic get_wb,
-    output pc_if_t out_if, input  logic ena_if
+    input  xx_pc_t in_if, output logic get_if,
+    input  xx_pc_t in_wb, output logic get_wb,
+    output pc_if_t out_if, input logic ena_if
 );
     logic [63:0] pc; logic branch; logic [2:0] num; // in half-word
     logic [1:0] pht[`PHTSZ-1:0]; logic [63:0] btb[`BTBSZ-1:0];
@@ -282,9 +282,10 @@ module pc_stage(input logic clk, input logic rst,
     logic [`lgPHTSZ-1:0] phtwa; logic  [1:0] phtwv; logic phtwe;
     logic [`lgBTBSZ-1:0] btbwa; logic [63:0] btbwv; logic btbwe;
     xx_pc_t in_upd;
-    always_comb if (in_if.redir) in_upd = in_if; else in_upd = in_wb;
-    always_comb get_if = 1'b1;
-    always_comb get_wb = ~in_if.redir;
+    always_comb if (in_wb.redir) in_upd = in_wb;
+        else    if (in_if.redir) in_upd = in_if;
+        else                     in_upd = in_wb;
+    always_comb get_wb = ~in_if.redir; // to control branch reinforcement
     always_comb for (int i = 0; i < 4; i++) phtra[i] = pc[`lgPHTSZ:1] + i[`lgPHTSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) btbra[i] = pc[`lgBTBSZ:1] + i[`lgBTBSZ-1:0];
     always_comb phtwe = in_upd.reinf | in_upd.redir;
