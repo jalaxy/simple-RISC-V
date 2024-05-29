@@ -70,7 +70,7 @@ module stats(
         if (lsqocc > `LSQSZ | pipeline_inst.lsu_inst.empty) lsqocc -= `LSQSZ;
         ptocc = 0;
         for (int i = 0; i < `PTSZ; i++)
-            if (pipeline_inst.pending_table_inst.id[i][`lgCQSZ]) ptocc++;
+            if (pipeline_inst.pending_table_inst.valid[i]) ptocc++;
     end
 
     // other stats
