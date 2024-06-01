@@ -9,8 +9,8 @@
 `define lgPTSZ  $clog2(`PTSZ)
 `define lgCQSZ  $clog2(`CQSZ)
 `define lgLSQSZ $clog2(`LSQSZ)
-`define PTLEN 417+`lgCQSZ
-`define CQLEN 93
+`define PTLEN $bits(id_ex_t)
+`define CQLEN $bits(cqinfo_t)
 `define IDNUM 2
 `define EXNUM 2
 `define LATENUM 5 // number of late components
@@ -326,25 +326,21 @@ module if_stage(input logic clk, input logic rst, input logic redir,
 );
     logic [3:0] remnum, isnum, getnum; logic [2:0] getinstnum;
     logic [7:0][15:0] remdat, isdat; logic [7:0][63:0] rempc, ispc;
-    logic [7:0][1:0]  rempat, ispat;
-    logic [2:0] icnum; logic icbranch;
+    logic [7:0][1:0] rempat, ispat; logic [7:0] remb, isb;
+    logic [2:0] icnum; logic [3:0] icb;
     logic [3:0][15:0] icdat; logic [3:0][63:0] icpc; logic [3:0][1:0] icpat;
     logic [3:0][2:0] irpos; logic [3:0] irvalid, irb;
     logic [3:0][63:0] irpc; logic [3:0][31:0] irdat;
     logic [3:0][1:0] irpat; logic [3:0][15:0] irgh;
-    logic [7:0] isnc; logic busy, incomp; logic [15:0] ghr, ghnew;
+    logic [7:0] isnc; logic busy; logic [15:0] ghr, ghnew; logic [1:0] incomp;
     always_comb isdat = ({64'd0, icache_data} << {remnum, 4'b0}) | remdat;
     always_comb ispc = ({256'd0, icpc} << {remnum, 6'd0}) | rempc;
     always_comb ispat = ({8'd0, icpat} << {remnum, 1'b0}) | rempat;
+    always_comb isb = ({4'd0, icb} << {remnum}) | remb;
     always_comb isnum = remnum + (icache_done ? {1'b0, icnum} : 4'd0);
     always_comb for (int i = 0; i < 8; i++) isnc[i] = &isdat[i][1:0];
     always_comb for (int i = 0; i < 4; i++) irvalid[i] =
-        |isnum & ({1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum);
-    always_comb if (icache_done) begin
-        incomp = |isnum;
-        for (int i = 0; i < 4; i++) if (irvalid[i])
-            incomp = {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) != isnum;
-    end else incomp = 0;
+        |isnum & {1'b0, irpos[i]} + (isnc[irpos[i]] ? 4'd2 : 4'd1) <= isnum;
     always_comb for (int i = 0; i < 4; i++) irpc[i] = ispc[irpos[i]];
     always_comb for (int i = 0; i < 4; i++) irdat[i] = isdat[irpos[i]+1-:2];
     always_comb for (int i = 0; i < 4; i++) irb[i] = irvalid[i] &(
@@ -372,39 +368,45 @@ module if_stage(input logic clk, input logic rst, input logic redir,
         else irpos[3] = 6;
     end
     always_comb getinstnum = ena_id & irvalid[0] ? 1 : 0;
-    always_comb getnum = ena_id & irvalid[0] ? (isnc[0] ? 2 : 1) : 0;
+    always_comb getnum = ena_id & out_id.valid ? (isnc[0] ? 2 : 1) : 0;
     always_comb busy = |icnum & ~icache_done;
-    always_comb get_pc = ~in_pc.valid | ena_id & ~busy & ~irvalid[1];
-    always_ff @(posedge clk) remnum <= rst | redir ? 4'd0 : isnum - getnum;
-    always_ff @(posedge clk)
+    always_comb get_pc = ~in_pc.valid | ~busy & isnum - getnum <= 4;
+    always_ff @(posedge clk) begin
+        if (rst | redir) remnum <= 0;
+        else if (out_pc.redir) remnum <= irpos[incomp] + 1 - getnum;
+        else remnum <= isnum - getnum;
         remdat <= (~(-128'd1 << {isnum, 4'd0}) & isdat) >> {getnum, 4'd0};
-    always_ff @(posedge clk)
         rempc <= (~(-512'd1 << {isnum, 6'd0}) & ispc) >> {getnum, 6'd0};
-    always_ff @(posedge clk)
         rempat <= (~(-16'd1 << {isnum, 1'd0}) & ispat) >> {getnum, 1'd0};
+        remb <= (~(-8'd1 << isnum) & isb) >> getnum;
+        if (out_pc.redir) remb <= 0; // signal b is only used for incomplete instruction
+    end
     always_ff @(posedge clk) if (rst | redir) icnum <= 0;
         else if (icache_rqst) icnum <= in_pc.num;
         else if (icache_done) icnum <= 0;
-    always_ff @(posedge clk) if (rst | redir) icbranch <= 0;
-        else if (icache_rqst) icbranch <= in_pc.branch;
-        else if (icache_done) icbranch <= 0;
+    always_ff @(posedge clk) if (icache_rqst) begin icb <= 0;
+        if (in_pc.branch) icb[in_pc.num - 1] <= 1; end
     always_ff @(posedge clk) if (icache_rqst) icpat <= in_pc.pat;
     always_ff @(posedge clk) if (icache_rqst) for (int i = 0; i < 4; i++)
         icpc[i] <= in_pc.pc + {31'd0, i, 1'b0};
     always_ff @(posedge clk) if (rst) ghr <= 0;
         else if (redir_wb.redir) ghr <= redir_wb.gh;
         else if (|getinstnum) ghr <= irgh[{29'd0, getinstnum} - 1];
-    always_comb out_id.valid = ~redir & irvalid[0];
+    always_comb out_id.valid = ~redir & irvalid[0] & ~(out_pc.redir & 0 >= incomp);
     always_comb out_id.pc = irpc[0];
     always_comb out_id.pat = {irgh[0], irpat[0]};
     always_comb out_id.ir = irdat[0];
-    always_comb out_pc.reinf = 0;
-    always_comb out_pc.redir = incomp & icbranch;
-    always_comb out_pc.c = 1;
-    always_comb out_pc.pc = ispc[{28'd0, isnum} - 1];
-    always_comb out_pc.npc = ispc[{28'd0, isnum} - 1] + 2;
-    always_comb out_pc.pat = 2'b10;
-    always_comb out_pc.gh = ghnew;
+    always_comb begin {out_pc, incomp} = 0; for (int i = 3; i>= 0; i--)
+        if (irvalid[i] & isnc[irpos[i]] & isb[irpos[i]]) begin
+            incomp = i[1:0];
+            out_pc.reinf = 0;
+            out_pc.redir = 1;
+            out_pc.c = 1;
+            out_pc.pc = ispc[irpos[i]];
+            out_pc.npc = ispc[irpos[i]] + 2;
+            out_pc.pat = 2'b10;
+            out_pc.gh = ghnew;
+        end end
     always_comb icdat = icache_data;
     always_comb icache_rqst = ~rst & get_pc & in_pc.valid;
     always_comb icache_addr = in_pc.pc;
@@ -692,13 +694,6 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     logic [2:0] bflag;
     logic ready, lsu, mul_valid, div_valid, fpu_valid, lsu_valid;
     logic [`CQSZ-1:0] cqidocc;
-    always_ff @(posedge clk) if (rst | redir) cqidocc <= 0; else begin
-        if (get_id & (out_pt.valid | lsu_valid & ~op[`EX_FENCE] |
-                      mul_valid | div_valid | fpu_valid))
-            cqidocc[in.cqid[`lgCQSZ-1:0]] <= 1;
-        if (late_done[`lgCQSZ] & ~late_val[64])
-            cqidocc[late_done[`lgCQSZ-1:0]] <= 0;
-    end
     always_comb op = in.valid ? in.exop : 0;
     always_comb begin
         if (frompt & in_pt.j) a = in.pc; // JALR in PT
@@ -801,6 +796,13 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
                 {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
             if (in.iword) res[63:0] = {{32{res[31]}}, res[31:0]};
         end
+    always_ff @(posedge clk) if (rst | redir) cqidocc <= 0; else begin
+        if (get_id & (out_pt.valid | lsu_valid & ~op[`EX_FENCE] |
+                      mul_valid | div_valid | fpu_valid))
+            cqidocc[in.cqid[`lgCQSZ-1:0]] <= 1;
+        if (late_done[`lgCQSZ] & ~late_val[64])
+            cqidocc[late_done[`lgCQSZ-1:0]] <= 0;
+    end
     always_ff @(posedge clk) if (rst | redir) pt_done <= 0;
         else if (frompt & ~lsu)
             if (res[64]) pt_done <= 0;
