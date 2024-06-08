@@ -182,7 +182,7 @@ module pipeline(
     logic [2:0] fpu_rm; logic fpu_double; logic [64:0] fpu_r;
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
-    logic redir; logic [6:0] cause; logic [63:0] epc;
+    logic redir; logic [6:0] cause; logic [63:0] epc, nret;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -222,7 +222,8 @@ module pipeline(
         .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .raddr(raddr), .rvalue(rvalue), .mtvec(csr_inst.mtvec),
         .late_done(late_done), .late_val(late_val),
-        .late_npc(late_npc), .late_cause(late_cause), .epc(epc), .cause(cause));
+        .late_npc(late_npc), .late_cause(late_cause),
+        .nret(nret), .epc(epc), .cause(cause));
     pending_table pending_table_inst(.clk(clk), .rst(rst), .flush(redir),
         .in_ex(data_ex_pt), .get_ex(get_ex_pt),
         .out_ex(data_pt_ex), .ena_ex(get_pt_ex),
@@ -255,8 +256,7 @@ module pipeline(
         .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
         .rval(csr_rval), .wval(csr_wval), .func(csr_func), .eout(csr_excp),
-        .nret(wb_stage_inst.cqpop[1] ? 2 : (wb_stage_inst.cqpop[0] ? 1 : 0)),
-        .ein(redir & cause[6]), .epc(epc), .cause(cause[5:0]));
+        .nret(nret), .ein(redir & cause[6]), .epc(epc), .cause(cause[5:0]));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
                              or use dynamic priority? */
         .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
@@ -893,7 +893,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     input logic [64:0] late_npc, input logic [6:0] late_cause,
-    input logic [63:0] mtvec, output logic [63:0] epc, output logic [6:0] cause
+    input logic [63:0] mtvec, output logic [63:0] nret,
+    output logic [63:0] epc, output logic [6:0] cause
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
     logic [64:0][`lgCQSZ:0] regscqid;
@@ -955,6 +956,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb redir = out_pc.redir;
     always_comb begin {cause, epc} = 0; for (int i = 1; i >= 0; i--)
         if (cqexcep[i]) {cause, epc} = {cqcause[i], cqinfo[i].pc}; end
+    always_comb begin nret = 0; for (int i = 0; i < 2; i++)
+        if (cqpop[i] & ~cqinfo[i].rda[6]) nret++; end
     always_comb lsu_cmt = ~redir & cqinfo[0].mw;
     always_ff @(posedge clk) if (redir) lastvalid <= 0;
         else for (int i = 0; i < 2; i++)
