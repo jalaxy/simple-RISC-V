@@ -11,8 +11,6 @@
 `define lgLSQSZ $clog2(`LSQSZ)
 `define PTLEN $bits(id_ex_t)
 `define CQLEN $bits(cqinfo_t)
-`define IDNUM 2
-`define EXNUM 2
 `define LATENUM 5 // number of late components
 `define LOAD      5'b00000 // opcode map
 `define LOAD_FP   5'b00001
@@ -105,6 +103,7 @@ typedef struct packed {
     logic [63:0] pc;
     logic [17:0] pat;
     logic [`EX_END-1:0] exop;
+    logic [1:0][6:0] rsa;
     logic iword, isign;
     logic [2:0] funct3, bmask;
     logic fdouble, bneg, j;
@@ -157,7 +156,7 @@ module pipeline(
     output logic             dcache_flsh
 );
     pc_if_t data_pc_if; logic get_pc_if;
-    if_id_t data_if_id; logic get_if_id;
+    if_id_t [3:0] data_if_id; logic [3:0] get_if_id;
     id_ex_t data_id_ex; logic get_id_ex;
     ex_wb_t data_ex_wb; logic get_ex_wb;
     id_ex_t data_ex_pt; logic get_ex_pt;
@@ -198,12 +197,13 @@ module pipeline(
         .icache_done(icache_done), .icache_data(icache_data));
     id_stage id_stage_inst(.clk(clk), .rst(rst), .redir(redir),
         .in_if(data_if_id), .get_if(get_if_id),
-        .out_ex(data_id_ex), .ena_ex(get_id_ex), .raddr(raddr));
+        .out_ex(data_id_ex), .ena_ex(get_id_ex));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst), .redir(redir),
         .in_id(data_id_ex), .get_id(get_id_ex),
         .in_pt(data_pt_ex), .get_pt(get_pt_ex),
         .out_wb(data_ex_wb), .ena_wb(get_ex_wb),
-        .out_pt(data_ex_pt), .ena_pt(get_ex_pt), .rvalue(rvalue),
+        .out_pt(data_ex_pt), .ena_pt(get_ex_pt),
+        .raddr(raddr), .rvalue(rvalue),
         .mul_free(mul_free), .mul_rqst(mul_rqst),
         .mul_op(mul_op), .mul_a(mul_a), .mul_b(mul_b),
         .div_free(div_free), .div_rqst(div_rqst),
@@ -219,16 +219,14 @@ module pipeline(
         .addr_done(addr_done), .addr_val(addr_val));
     wb_stage wb_stage_inst(.clk(clk), .rst(rst), .redir(redir),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
-        .out_pc(data_wb_pc), .ena_pc(get_wb_pc), .ena_ex(get_id_ex),
+        .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .raddr(raddr), .rvalue(rvalue), .mtvec(csr_inst.mtvec),
         .late_done(late_done), .late_val(late_val),
         .late_npc(late_npc), .late_cause(late_cause), .epc(epc), .cause(cause));
     pending_table pending_table_inst(.clk(clk), .rst(rst), .flush(redir),
         .in_ex(data_ex_pt), .get_ex(get_ex_pt),
         .out_ex(data_pt_ex), .ena_ex(get_pt_ex),
-        .late_done(late_done), .late_val(late_val),
-        .rda_id(data_id_ex.valid ? data_id_ex.rda : 0),
-        .rda_ex(data_ex_wb.valid ? data_ex_wb.rda : 0));
+        .late_done(late_done), .late_val(late_val));
     lsu lsu_inst(.clk(clk), .rst(rst), .flush(redir),
         .ena(lsu_ena), .get(lsu_free), .cmt(wb_stage_inst.lsu_cmt),
         .fence(lsu_fence), .rsrv(lsu_rsrv), .aqrl(lsu_aqrl), .csr(lsu_csr),
@@ -317,14 +315,14 @@ endmodule
 module if_stage(input logic clk, input logic rst, input logic redir,
     input  pc_if_t in_pc,  output logic get_pc, input xx_pc_t redir_wb,
     output xx_pc_t out_pc, input  logic ena_pc, // always enabled
-    output if_id_t out_id, input  logic ena_id,
+    output if_id_t [3:0] out_id, input  logic [3:0] ena_id,
     output logic        icache_rqst,
     output logic [63:0] icache_addr,
     output logic        icache_flsh,
     input  logic        icache_done,
     input  logic [63:0] icache_data
 );
-    logic [3:0] remnum, isnum, getnum; logic [2:0] getinstnum;
+    logic [3:0] remnum, isnum, getnum; logic [2:0] getinstnum, instnum;
     logic [7:0][15:0] remdat, isdat; logic [7:0][63:0] rempc, ispc;
     logic [7:0][1:0] rempat, ispat; logic [7:0] remb, isb;
     logic [2:0] icnum; logic [3:0] icb;
@@ -367,10 +365,6 @@ module if_stage(input logic clk, input logic rst, input logic redir,
             isnc[0] & isnc[2] & ~isnc[4]) irpos[3] = 5;
         else irpos[3] = 6;
     end
-    always_comb getinstnum = ena_id & irvalid[0] ? 1 : 0;
-    always_comb getnum = ena_id & out_id.valid ? (isnc[0] ? 2 : 1) : 0;
-    always_comb busy = |icnum & ~icache_done;
-    always_comb get_pc = ~in_pc.valid | ~busy & isnum - getnum <= 4;
     always_ff @(posedge clk) begin
         if (rst | redir) remnum <= 0;
         else if (out_pc.redir) remnum <= irpos[incomp] + 1 - getnum;
@@ -392,10 +386,23 @@ module if_stage(input logic clk, input logic rst, input logic redir,
     always_ff @(posedge clk) if (rst) ghr <= 0;
         else if (redir_wb.redir) ghr <= redir_wb.gh;
         else if (|getinstnum) ghr <= irgh[{29'd0, getinstnum} - 1];
-    always_comb out_id.valid = ~redir & irvalid[0] & ~(out_pc.redir & 0 >= incomp);
-    always_comb out_id.pc = irpc[0];
-    always_comb out_id.pat = {irgh[0], irpat[0]};
-    always_comb out_id.ir = irdat[0];
+    always_comb busy = |icnum & ~icache_done;
+    always_comb begin
+        {instnum, getinstnum, getnum} = 0;
+        for (int i = 0; i < 4; i++) if (irvalid[i]) instnum++;
+        for (int i = 0; i < 4; i++) if (ena_id[i]) getinstnum++; else break;
+        if (getinstnum > instnum) getinstnum = instnum;
+        for (int i = 0; i < getinstnum; i++)
+            if (isnc[irpos[i]]) getnum += 2; else getnum += 1;
+    end
+    always_comb get_pc = ~in_pc.valid | ~busy & isnum - getnum <= 4;
+    for (genvar i = 0; i < 4; i++) begin
+        always_comb out_id[i].valid =
+            ~redir & irvalid[i] & ~(out_pc.redir & i >= incomp);
+        always_comb out_id[i].pc = irpc[i];
+        always_comb out_id[i].pat = {irgh[i], irpat[i]};
+        always_comb out_id[i].ir = irdat[i];
+    end
     always_comb begin {out_pc, incomp} = 0; for (int i = 3; i>= 0; i--)
         if (irvalid[i] & isnc[irpos[i]] & isb[irpos[i]]) begin
             incomp = i[1:0];
@@ -414,254 +421,293 @@ module if_stage(input logic clk, input logic rst, input logic redir,
 endmodule
 
 module id_stage(input logic clk, input logic rst, input logic redir,
-    input  if_id_t in_if, output logic get_if,
-    output id_ex_t out_ex, input logic ena_ex,
-    output logic [1:0][6:0] raddr
+    input  if_id_t [3:0] in_if, output logic [3:0] get_if,
+    output id_ex_t out_ex, input logic ena_ex
 );
-    logic [31:0] ir, op;
-    logic [63:0] imm;
-    id_ex_t [2:0] out_ex_q;
-    logic [`EX_END-1:0] exop0, exop1, exop2;
-    logic [64:0] a0, b0;
-    logic [2:0] delta;
+    id_ex_t [3:0] out_reg, res4; logic [2:0] iter4;
+    id_ex_t [3:0][2:0] res;
+    logic [1:0] front; logic [2:0] num, numin, numout, numena;
     logic [`lgCQSZ-1:0] cqid;
-    ci2i ci2i_inst(.ci(in_if.ir), .i(ir));
-    always_comb for (int i = 0; i < 32; i++)
-        op[i] = ir[6:2] == i[4:0];
-    always_comb delta = &in_if.ir[1:0] ? 4 : 2;
-    always_comb imm =
-        {{53{ir[31]}}, ir[30:20]} & {64{
-            op[`LOAD] | op[`LOAD_FP] | op[`MISC_MEM] | op[`OP_IMM] |
-            op[`OP_IMM_32] | op[`JALR] | op[`SYSTEM]}} | // I type
-        {{32{ir[31]}}, ir[31:12], 12'd0} & {64{
-            op[`AUIPC] | op[`LUI]}} | // U type
-        {{53{ir[31]}}, ir[30:25], ir[11:7]} & {64{
-            op[`STORE] | op[`STORE_FP]}} | // S type
-        {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} & {64{op[`BRANCH]}} | // B type
-        {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} & {64{op[`JAL]}}; // J type
-    always_comb begin
-        exop0 = 0;
-        exop0[`EX_ADD] =
-            op[`JALR] | op[`AUIPC] | op[`LUI] | op[`JAL] |
-            (op[`OP_IMM] | op[`OP_IMM_32]) & ir[14:12] == 3'b000 |
-            (op[`OP] | op[`OP_32]) & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
-        exop0[`EX_SUB] = op[`BRANCH] |
-            (op[`OP] | op[`OP_32]) & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
-        exop0[`EX_SLL] =
-            op[`OP_IMM] & ir[14:12] == 3'b001 & ir[31:26] == 6'd0 |
-            (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
-                ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
-        exop0[`EX_SLT] =
-            op[`OP_IMM] & ir[14:12] == 3'b010 |
-            op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'd0;
-        exop0[`EX_SLTU] =
-            op[`OP_IMM] & ir[14:12] == 3'b011 |
-            op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'd0;
-        exop0[`EX_XOR] =
-            op[`OP_IMM] & ir[14:12] == 3'b100 |
-            op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'd0;
-        exop0[`EX_SRL] =
-            op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'd0 |
-            (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
-                ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
-        exop0[`EX_SRA] =
-            op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'b010000 |
-            (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
-                ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
-        exop0[`EX_OR] =
-            op[`OP_IMM] & ir[14:12] == 3'b110 |
-            op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'd0;
-        exop0[`EX_AND] =
-            op[`OP_IMM] & ir[14:12] == 3'b111 |
-            op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'd0;
-        exop0[`EX_MUL] = (op[`OP] | op[`OP_32]) &
-            ir[14:12] == 3'b000 & ir[31:25] == 7'b1;
-        exop0[`EX_MULH] = op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'b1;
-        exop0[`EX_MULHSU] = op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'b1;
-        exop0[`EX_MULHU] = op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'b1;
-        exop0[`EX_DIV] = (op[`OP] | op[`OP_32]) &
-            ir[14:12] == 3'b100 & ir[31:25] == 7'b1;
-        exop0[`EX_DIVU] = (op[`OP] | op[`OP_32]) &
-            ir[14:12] == 3'b101 & ir[31:25] == 7'b1;
-        exop0[`EX_REM] = (op[`OP] | op[`OP_32]) &
-            ir[14:12] == 3'b110 & ir[31:25] == 7'b1;
-        exop0[`EX_REMU] = (op[`OP] | op[`OP_32]) &
-            ir[14:12] == 3'b111 & ir[31:25] == 7'b1;
-        exop0[`EX_FADD] = op[`OP_FP] & ir[31:26] == 6'b000000;
-        exop0[`EX_FSUB] = op[`OP_FP] & ir[31:26] == 6'b000010;
-        exop0[`EX_FMUL] = op[`OP_FP] & ir[31:26] == 6'b000100 | op[`MADD] | op[`MSUB];
-        exop0[`EX_FNMUL] = op[`NMADD] | op[`NMSUB];
-        exop0[`EX_FDIV] = op[`OP_FP] & ir[31:26] == 6'b000110;
-        exop0[`EX_FSQRT] = op[`OP_FP] & ir[31:26] == 6'b010110 & ir[24:20] == 5'd0;
-        exop0[`EX_FSGNJ] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b000;
-        exop0[`EX_FSGNJN] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b001;
-        exop0[`EX_FSGNJX] = op[`OP_FP] & ir[31:26] == 6'b001000 & ir[14:12] == 3'b010;
-        exop0[`EX_FMIN] = op[`OP_FP] & ir[31:26] == 6'b001010 & ir[14:12] == 3'b000;
-        exop0[`EX_FMAX] = op[`OP_FP] & ir[31:26] == 6'b001010 & ir[14:12] == 3'b001;
-        exop0[`EX_FEQ] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b010;
-        exop0[`EX_FLT] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b001;
-        exop0[`EX_FLE] = op[`OP_FP] & ir[31:26] == 6'b101000 & ir[14:12] == 3'b000;
-        exop0[`EX_FMVXF] = op[`OP_FP] & ir[31:26] == 6'b111000 &
-            ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
-        exop0[`EX_FCLASS] = op[`OP_FP] & ir[31:26] == 6'b111000 &
-            ir[14:12] == 3'b001 & ir[24:20] == 5'd0;
-        exop0[`EX_FMVFX] = op[`OP_FP] & ir[31:26] == 6'b111100 &
-            ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
-        exop0[`EX_FCVTIF] = op[`OP_FP] & ir[31:26] == 6'b110000;
-        exop0[`EX_FCVTFI] = op[`OP_FP] & ir[31:26] == 6'b110100;
-        exop0[`EX_FCVTSD] = op[`OP_FP] & ir[31:25] == 7'b0100000 & ir[24:20] == 5'd1;
-        exop0[`EX_FCVTDS] = op[`OP_FP] & ir[31:25] == 7'b0100001 & ir[24:20] == 5'd0;
-        exop0[`EX_LOAD] = op[`LOAD] | op[`LOAD_FP] |
-            op[`AMO] & (ir[31:27] == 5'b00010 | |exop1);
-        exop0[`EX_STORE] = op[`STORE] | op[`STORE_FP] |
-            op[`AMO] & ir[31:27] == 5'b00011;
-        exop0[`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
-        exop0[`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
-        exop0[`EX_CSR] = op[`SYSTEM] & |ir[13:12];
-        exop0[`EX_ECALL] = ir == 32'h00000073;
-        exop0[`EX_EBREAK] = ir == 32'h00100073;
-        exop0[`EX_RET] = (ir & ~(32'd3 << 28)) == 32'h00200073;
-        if (ir[1:0] != 2'b11) exop0 = 0;
-    end
-    always_comb exop1 =
-        (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00001}} |
-        (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00000}} |
-        (1 << `EX_XOR)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00100}} |
-        (1 << `EX_AND)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b01100}} |
-        (1 << `EX_OR)   & {`EX_END{op[`AMO] & ir[31:27] == 5'b01000}} |
-        (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10000}} |
-        (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11000}} |
-        (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10100}} |
-        (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11100}} |
-        (1 << `EX_FADD) & {`EX_END{op[`MADD] | op[`NMSUB]}} |
-        (1 << `EX_FSUB) & {`EX_END{op[`MSUB] | op[`NMADD]}};
-    always_comb exop2 = (1 << `EX_STORE) & {`EX_END{op[`AMO] & |exop1}};
-    always_comb if (exop0[`EX_FCVTFI] | exop0[`EX_FMVFX])
-            a0 = {1'd1, 59'd0, ir[19:15]};
-        else a0 = {~(op[`SYSTEM] & ir[14]), 59'd0, ir[19:15]} & {65{
-                      op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
-                      op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
-                      op[`BRANCH] | op[`AMO]      | op[`SYSTEM]}} |
-                  {1'd1, 59'd1, ir[19:15]} & {{65{
-                      op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                      op[`OP_FP]}}} |
-                  {1'd0, in_if.pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
-    always_comb if (exop0[`EX_FCVTIF] | exop0[`EX_FCVTFI])
-            b0 = {60'd0, ir[24:20]};
-        else if (exop0[`EX_FSQRT] | exop0[`EX_FCVTDS] | exop0[`EX_FCVTSD] |
-            exop0[`EX_FMVFX] | exop0[`EX_FMVXF])
-            b0 = 65'd0;
-        else b0 = {1'd1, 59'd0, ir[24:20]} & {65{
-                      op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
-                  {1'd1, 59'd1, ir[24:20]} & {{65{
-                      op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                      op[`OP_FP]}}} |
-                  {1'd0, imm} & {65{              op[`SYSTEM] | op[`MISC_MEM]  |
-                      op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
-                      op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
-                  {62'd0, delta} & {65{op[`JAL] | op[`JALR]}};
-    always_comb get_if = ena_ex & ~out_ex_q[1].valid | ~in_if.valid;
-    always_comb begin out_ex = out_ex_q[0]; out_ex.valid &= ~redir; end
-    always_ff @(posedge clk) if (rst | redir) cqid <= 0;
-        else if (get_if & in_if.valid) cqid <= cqid + (|exop2 ? 3 : (|exop1 ? 2 : 1));
-    always_ff @(posedge clk)
-        if (rst | redir)
-            {out_ex_q[0].valid, out_ex_q[1].valid, out_ex_q[2].valid} <= 0;
-        else if (get_if & in_if.valid) begin
-            out_ex_q[0].valid <= |exop0;
-            out_ex_q[0].cqid <= {1'b1, cqid};
-            out_ex_q[0].delta <= |exop1 ? 3'd0 : delta;
-            out_ex_q[0].pc <= in_if.pc;
-            out_ex_q[0].pat <= in_if.pat;
-            out_ex_q[0].a <= a0;
-            out_ex_q[0].b <= b0;
-            out_ex_q[0].exop <= exop0;
-            out_ex_q[0].bmask <= {3{op[`BRANCH]}} &
+    logic [3:0][2:0] numval;
+    for (genvar g = 0; g < 3; g++) begin : decoder
+        logic [2:0][`EX_END-1:0] exop;
+        logic [31:0] ir, op; logic [63:0] imm;
+        logic [2:0][64:0] a, b; logic [2:0] delta;
+        ci2i ci2i_inst(.ci(in_if[g].ir), .i(ir));
+        always_comb for (int i = 0; i < 32; i++)
+            op[i] = ir[6:2] == i[4:0];
+        always_comb delta = &in_if[g].ir[1:0] ? 4 : 2;
+        always_comb imm =
+            {{53{ir[31]}}, ir[30:20]} & {64{
+                op[`LOAD] | op[`LOAD_FP] | op[`MISC_MEM] | op[`OP_IMM] |
+                op[`OP_IMM_32] | op[`JALR] | op[`SYSTEM]}} | // I type
+            {{32{ir[31]}}, ir[31:12], 12'd0} & {64{
+                op[`AUIPC] | op[`LUI]}} | // U type
+            {{53{ir[31]}}, ir[30:25], ir[11:7]} & {64{
+                op[`STORE] | op[`STORE_FP]}} | // S type
+            {{52{ir[31]}}, ir[7], ir[30:25], ir[11:8], 1'b0} & {64{
+                op[`BRANCH]}} | // B type
+            {{44{ir[31]}}, ir[19:12], ir[20], ir[30:21], 1'b0} & {64{
+                op[`JAL]}}; // J type
+        always_comb begin
+            exop[1] =
+                (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00001}} |
+                (1 << `EX_ADD)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00000}} |
+                (1 << `EX_XOR)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b00100}} |
+                (1 << `EX_AND)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b01100}} |
+                (1 << `EX_OR)   & {`EX_END{op[`AMO] & ir[31:27] == 5'b01000}} |
+                (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10000}} |
+                (1 << `EX_MIN)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11000}} |
+                (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b10100}} |
+                (1 << `EX_MAX)  & {`EX_END{op[`AMO] & ir[31:27] == 5'b11100}} |
+                (1 << `EX_FADD) & {`EX_END{op[`MADD] | op[`NMSUB]}} |
+                (1 << `EX_FSUB) & {`EX_END{op[`MSUB] | op[`NMADD]}};
+            exop[2] = (1 << `EX_STORE) & {`EX_END{op[`AMO] & |exop[1]}};
+            exop[0] = 0;
+            exop[0][`EX_ADD] =
+                op[`JALR] | op[`AUIPC] | op[`LUI] | op[`JAL] |
+                (op[`OP_IMM] | op[`OP_IMM_32]) & ir[14:12] == 3'b000 |
+                (op[`OP] | op[`OP_32]) & ir[14:12] == 3'b000 & ir[31:25] == 7'd0;
+            exop[0][`EX_SUB] = op[`BRANCH] |
+                (op[`OP] | op[`OP_32]) & ir[14:12] == 3'b000 & ir[31:25] == 7'b0100000;
+            exop[0][`EX_SLL] =
+                op[`OP_IMM] & ir[14:12] == 3'b001 & ir[31:26] == 6'd0 |
+                (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
+                    ir[14:12] == 3'b001 & ir[31:25] == 7'd0;
+            exop[0][`EX_SLT] =
+                op[`OP_IMM] & ir[14:12] == 3'b010 |
+                op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'd0;
+            exop[0][`EX_SLTU] =
+                op[`OP_IMM] & ir[14:12] == 3'b011 |
+                op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'd0;
+            exop[0][`EX_XOR] =
+                op[`OP_IMM] & ir[14:12] == 3'b100 |
+                op[`OP] & ir[14:12] == 3'b100 & ir[31:25] == 7'd0;
+            exop[0][`EX_SRL] =
+                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'd0 |
+                (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
+                    ir[14:12] == 3'b101 & ir[31:25] == 7'd0;
+            exop[0][`EX_SRA] =
+                op[`OP_IMM] & ir[14:12] == 3'b101 & ir[31:26] == 6'b010000 |
+                (op[`OP] | op[`OP_IMM_32] | op[`OP_32]) &
+                    ir[14:12] == 3'b101 & ir[31:25] == 7'b0100000;
+            exop[0][`EX_OR] =
+                op[`OP_IMM] & ir[14:12] == 3'b110 |
+                op[`OP] & ir[14:12] == 3'b110 & ir[31:25] == 7'd0;
+            exop[0][`EX_AND] =
+                op[`OP_IMM] & ir[14:12] == 3'b111 |
+                op[`OP] & ir[14:12] == 3'b111 & ir[31:25] == 7'd0;
+            exop[0][`EX_MUL] = (op[`OP] | op[`OP_32]) &
+                ir[14:12] == 3'b000 & ir[31:25] == 7'b1;
+            exop[0][`EX_MULH] = op[`OP] & ir[14:12] == 3'b001 & ir[31:25] == 7'b1;
+            exop[0][`EX_MULHSU] = op[`OP] & ir[14:12] == 3'b010 & ir[31:25] == 7'b1;
+            exop[0][`EX_MULHU] = op[`OP] & ir[14:12] == 3'b011 & ir[31:25] == 7'b1;
+            exop[0][`EX_DIV] = (op[`OP] | op[`OP_32]) &
+                ir[14:12] == 3'b100 & ir[31:25] == 7'b1;
+            exop[0][`EX_DIVU] = (op[`OP] | op[`OP_32]) &
+                ir[14:12] == 3'b101 & ir[31:25] == 7'b1;
+            exop[0][`EX_REM] = (op[`OP] | op[`OP_32]) &
+                ir[14:12] == 3'b110 & ir[31:25] == 7'b1;
+            exop[0][`EX_REMU] = (op[`OP] | op[`OP_32]) &
+                ir[14:12] == 3'b111 & ir[31:25] == 7'b1;
+            exop[0][`EX_FADD] = op[`OP_FP] & ir[31:26] == 6'b000000;
+            exop[0][`EX_FSUB] = op[`OP_FP] & ir[31:26] == 6'b000010;
+            exop[0][`EX_FMUL] = op[`OP_FP] & ir[31:26] == 6'b000100 |
+                op[`MADD] | op[`MSUB];
+            exop[0][`EX_FNMUL] = op[`NMADD] | op[`NMSUB];
+            exop[0][`EX_FDIV] = op[`OP_FP] & ir[31:26] == 6'b000110;
+            exop[0][`EX_FSQRT] = op[`OP_FP] & ir[31:26] == 6'b010110 &
+                ir[24:20] == 5'd0;
+            exop[0][`EX_FSGNJ] = op[`OP_FP] & ir[31:26] == 6'b001000 &
+                ir[14:12] == 3'b000;
+            exop[0][`EX_FSGNJN] = op[`OP_FP] & ir[31:26] == 6'b001000 &
+                ir[14:12] == 3'b001;
+            exop[0][`EX_FSGNJX] = op[`OP_FP] & ir[31:26] == 6'b001000 &
+                ir[14:12] == 3'b010;
+            exop[0][`EX_FMIN] = op[`OP_FP] & ir[31:26] == 6'b001010 &
+                ir[14:12] == 3'b000;
+            exop[0][`EX_FMAX] = op[`OP_FP] & ir[31:26] == 6'b001010 &
+                ir[14:12] == 3'b001;
+            exop[0][`EX_FEQ] = op[`OP_FP] & ir[31:26] == 6'b101000 &
+                ir[14:12] == 3'b010;
+            exop[0][`EX_FLT] = op[`OP_FP] & ir[31:26] == 6'b101000 &
+                ir[14:12] == 3'b001;
+            exop[0][`EX_FLE] = op[`OP_FP] & ir[31:26] == 6'b101000 &
+                ir[14:12] == 3'b000;
+            exop[0][`EX_FMVXF] = op[`OP_FP] & ir[31:26] == 6'b111000 &
+                ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
+            exop[0][`EX_FCLASS] = op[`OP_FP] & ir[31:26] == 6'b111000 &
+                ir[14:12] == 3'b001 & ir[24:20] == 5'd0;
+            exop[0][`EX_FMVFX] = op[`OP_FP] & ir[31:26] == 6'b111100 &
+                ir[14:12] == 3'b000 & ir[24:20] == 5'd0;
+            exop[0][`EX_FCVTIF] = op[`OP_FP] & ir[31:26] == 6'b110000;
+            exop[0][`EX_FCVTFI] = op[`OP_FP] & ir[31:26] == 6'b110100;
+            exop[0][`EX_FCVTSD] = op[`OP_FP] & ir[31:25] == 7'b0100000 &
+                ir[24:20] == 5'd1;
+            exop[0][`EX_FCVTDS] = op[`OP_FP] & ir[31:25] == 7'b0100001 &
+                ir[24:20] == 5'd0;
+            exop[0][`EX_LOAD] = op[`LOAD] | op[`LOAD_FP] |
+                op[`AMO] & (ir[31:27] == 5'b00010 | |exop[1]);
+            exop[0][`EX_STORE] = op[`STORE] | op[`STORE_FP] |
+                op[`AMO] & ir[31:27] == 5'b00011;
+            exop[0][`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
+            exop[0][`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
+            exop[0][`EX_CSR] = op[`SYSTEM] & |ir[13:12];
+            exop[0][`EX_ECALL] = ir == 32'h00000073;
+            exop[0][`EX_EBREAK] = ir == 32'h00100073;
+            exop[0][`EX_RET] = (ir & ~(32'd3 << 28)) == 32'h00200073;
+            if (ir[1:0] != 2'b11) exop[0] = 0;
+        end
+        always_comb numval[g] = |exop[2] ? 3 : (|exop[1] ? 2 : (|exop[0] ? 1 : 0));
+        always_comb if (exop[0][`EX_FCVTFI] | exop[0][`EX_FMVFX])
+                a[0] = {1'd1, 59'd0, ir[19:15]};
+            else a[0] = {~(op[`SYSTEM] & ir[14]), 59'd0, ir[19:15]} & {65{
+                        op[`LOAD]   | op[`LOAD_FP]  | op[`OP_IMM] | op[`OP_IMM_32] |
+                        op[`STORE]  | op[`STORE_FP] | op[`OP]     | op[`OP_32]     |
+                        op[`BRANCH] | op[`AMO]      | op[`SYSTEM]}} |
+                    {1'd1, 59'd1, ir[19:15]} & {{65{
+                        op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                        op[`OP_FP]}}} |
+                    {1'd0, in_if[g].pc} & {65{op[`JALR] | op[`JAL] | op[`AUIPC]}};
+        always_comb a[1] = {1'd1, 59'd2, 5'd0} & {65{
+            ~(op[`AMO] & ir[31:27] == 5'b00001)}};
+        always_comb a[2] = {1'd1, 59'd0, ir[19:15]} & {65{op[`AMO]}};
+        always_comb if (exop[0][`EX_FCVTIF] | exop[0][`EX_FCVTFI])
+                b[0] = {60'd0, ir[24:20]};
+            else if (exop[0][`EX_FSQRT] | exop[0][`EX_FCVTDS] | exop[0][`EX_FCVTSD] |
+                exop[0][`EX_FMVFX] | exop[0][`EX_FMVXF])
+                b[0] = 65'd0;
+            else b[0] = {1'd1, 59'd0, ir[24:20]} & {65{
+                        op[`OP] | op[`OP_32] | op[`OP_FP] | op[`BRANCH]}} |
+                    {1'd1, 59'd1, ir[24:20]} & {{65{
+                        op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
+                        op[`OP_FP]}}} |
+                    {1'd0, imm} & {65{              op[`SYSTEM] | op[`MISC_MEM]  |
+                        op[`LOAD]  | op[`LOAD_FP] | op[`OP_IMM] | op[`OP_IMM_32] |
+                        op[`AUIPC] | op[`LUI]     | op[`STORE]  | op[`STORE_FP]}} |
+                    {62'd0, delta} & {65{op[`JAL] | op[`JALR]}};
+        always_comb b[1] = {1'd1, 59'd0, ir[24:20]} & {65{op[`AMO]}} |
+                        {1'd1, 59'd1, ir[31:27]} & {65{
+                            op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
+        always_comb b[2] = {1'd0, imm} & {65{op[`AMO]}};
+        always_comb begin
+            res[g][0].valid = |exop[0];
+            res[g][0].delta = |exop[1] ? 3'd0 : delta;
+            res[g][0].pc = in_if[g].pc;
+            res[g][0].pat = in_if[g].pat;
+            res[g][0].a = a[0];
+            res[g][0].b = b[0];
+            res[g][0].exop = exop[0];
+            res[g][0].bmask = {3{op[`BRANCH]}} &
                 {ir[14:13] == 2'b00, ir[14:13] == 2'b10, ir[14:13] == 2'b11};
-            out_ex_q[0].bneg <= ir[12];
-            out_ex_q[0].j <= op[`JAL] | op[`JALR];
-            out_ex_q[0].base <= {1'b0, in_if.pc} & {65{op[`JAL] | op[`BRANCH]}}|
+            res[g][0].bneg = ir[12];
+            res[g][0].j = op[`JAL] | op[`JALR];
+            res[g][0].base = {1'b0, in_if[g].pc} & {65{op[`JAL] | op[`BRANCH]}}|
                                 {1'b1, 59'd0, ir[19:15]} & {65{op[`JALR]}};
-            out_ex_q[0].offset <= imm & {64{op[`JAL] | op[`JALR] | op[`BRANCH]}};
-            out_ex_q[0].iword <= op[`OP_32] | op[`OP_IMM_32];
-            out_ex_q[0].isign <= (op[`OP_32] | op[`OP_IMM_32]) & ir[30];
-            out_ex_q[0].funct3 <= exop0[`EX_RET] ? {1'b0, ir[29:28]} : ir[14:12];
-            out_ex_q[0].fdouble <= ir[25];
-            out_ex_q[0].rsrv <= {op[`AMO] & |exop1, op[`AMO] & ~|exop1};
-            out_ex_q[0].aqrl <= {op[`AMO] & ir[26], op[`AMO] & ir[25]};
-            if (exop0[`EX_FEQ] | exop0[`EX_FLT] | exop0[`EX_FLE] |
-                exop0[`EX_FMVXF] | exop0[`EX_FCLASS] | exop0[`EX_FCVTIF])
-                out_ex_q[0].rda <= {2'd0, ir[11:7]};
-            else out_ex_q[0].rda <=
+            res[g][0].offset = imm & {64{op[`JAL] | op[`JALR] | op[`BRANCH]}};
+            res[g][0].iword = op[`OP_32] | op[`OP_IMM_32];
+            res[g][0].isign = (op[`OP_32] | op[`OP_IMM_32]) & ir[30];
+            res[g][0].funct3 = exop[0][`EX_RET] ? {1'b0, ir[29:28]} : ir[14:12];
+            res[g][0].fdouble = ir[25];
+            res[g][0].rsrv = {op[`AMO] & |exop[1], op[`AMO] & ~|exop[1]};
+            res[g][0].aqrl = {op[`AMO] & ir[26], op[`AMO] & ir[25]};
+            if (a[0][64]) res[g][0].rsa[0] = a[0][6:0];
+                else if (op[`JALR]) res[g][0].rsa[0] = {2'd0, ir[19:15]};
+                else res[g][0].rsa[0] = 0;
+            if (b[0][64]) res[g][0].rsa[1] = b[0][6:0];
+                else if (op[`STORE]) res[g][0].rsa[1] = {2'b0, ir[24:20]};
+                else if (op[`STORE_FP]) res[g][0].rsa[1] = {2'b1, ir[24:20]};
+                else if (op[`AMO] & ir[31:27] == 5'b00011)
+                    res[g][0].rsa[1] = {2'b0, ir[24:20]};
+                else res[g][0].rsa[1] = 0;
+            if (exop[0][`EX_FEQ] | exop[0][`EX_FLT] | exop[0][`EX_FLE] |
+                exop[0][`EX_FMVXF] | exop[0][`EX_FCLASS] | exop[0][`EX_FCVTIF])
+                res[g][0].rda = {2'd0, ir[11:7]};
+            else res[g][0].rda =
                 {2'd0, ir[11:7]} & {7{
                     op[`LOAD] | op[`OP_IMM] | op[`AUIPC] | op[`OP_IMM_32] |
                     op[`OP]   | op[`LUI]    | op[`OP_32] | op[`JALR]      |
-                    op[`JAL]  | op[`SYSTEM] | op[`AMO] & ~|exop1}} |
+                    op[`JAL]  | op[`SYSTEM] | op[`AMO] & ~|exop[1]}} |
                 {2'd1, ir[11:7]} & {7{op[`LOAD_FP] | op[`OP_FP]}} |
                 {2'd2, 5'd0} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD] |
-                                  op[`AMO] & |exop1}};
-
-            out_ex_q[1].valid <= |exop1;
-            out_ex_q[1].cqid <= {1'b1, cqid + {{`lgCQSZ-2{1'b0}}, 2'd1}};
-            out_ex_q[1].delta <= |exop2 ? 3'd0 : delta;
-            out_ex_q[1].pc <= in_if.pc;
-            out_ex_q[1].pat <= in_if.pat;
-            out_ex_q[1].a <= {1'd1, 59'd2, 5'd0} & {65{
-                ~(op[`AMO] & ir[31:27] == 5'b00001)}}; // AMOSWAP
-            out_ex_q[1].b <=
-                {1'd1, 59'd0, ir[24:20]} & {65{op[`AMO]}} |
-                {1'd1, 59'd1, ir[31:27]} & {65{
-                    op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
-            out_ex_q[1].exop <= exop1;
-            out_ex_q[1].iword <= op[`AMO] & ir[14:12] == 3'b010;
-            out_ex_q[1].isign <= op[`AMO] & ~ir[30];
-            out_ex_q[1].rsrv <= 0;
-            out_ex_q[1].bmask <= 0;
-            out_ex_q[1].j <= 0;
-            out_ex_q[1].funct3 <= ir[14:12];
-            out_ex_q[1].fdouble <= ir[25];
-            out_ex_q[1].rda <=
+                                    op[`AMO] & |exop[1]}};
+            res[g][1].valid = |exop[1];
+            res[g][1].delta = |exop[2] ? 3'd0 : delta;
+            res[g][1].pc = in_if[g].pc;
+            res[g][1].pat = in_if[g].pat;
+            res[g][1].a = a[1];
+            res[g][1].b = b[1];
+            res[g][1].exop = exop[1];
+            res[g][1].iword = op[`AMO] & ir[14:12] == 3'b010;
+            res[g][1].isign = op[`AMO] & ~ir[30];
+            res[g][1].rsrv = 0;
+            res[g][1].bmask = 0;
+            res[g][1].j = 0;
+            res[g][1].funct3 = ir[14:12];
+            res[g][1].fdouble = ir[25];
+            res[g][1].rsa[0] = a[1][6:0];
+            res[g][1].rsa[1] = b[1][6:0];
+            res[g][1].rda =
                 {2'd2, 5'd0} & {7{op[`AMO]}} |
                 {2'd1, ir[11:7]} & {7{op[`MADD] | op[`MSUB] | op[`NMSUB] | op[`NMADD]}};
-
-            out_ex_q[2].valid <= |exop2;
-            out_ex_q[2].cqid <= {1'b1, cqid + {{`lgCQSZ-2{1'b0}}, 2'd2}};
-            out_ex_q[2].delta <= delta;
-            out_ex_q[2].pc <= in_if.pc;
-            out_ex_q[2].pat <= in_if.pat;
-            out_ex_q[2].a <= {1'd1, 59'd0, ir[19:15]} & {65{op[`AMO]}};
-            out_ex_q[2].b <= {1'd0, imm} & {65{op[`AMO]}};
-            out_ex_q[2].exop <= exop2;
-            out_ex_q[2].rsrv <= {op[`AMO] & |exop1, 1'b0};
-            out_ex_q[2].bmask <= 0;
-            out_ex_q[2].j <= 0;
-            out_ex_q[2].funct3 <= ir[14:12];
-            out_ex_q[2].rda <= {2'd0, ir[11:7]};
-        end else if (ena_ex) begin
-            out_ex_q[1:0] <= {out_ex_q[2], out_ex_q[1]};
-            out_ex_q[2].valid <= 0;
+            res[g][2].valid = |exop[2];
+            res[g][2].delta = delta;
+            res[g][2].pc = in_if[g].pc;
+            res[g][2].pat = in_if[g].pat;
+            res[g][2].a = a[2];
+            res[g][2].b = b[2];
+            res[g][2].exop = exop[2];
+            res[g][2].rsrv = {op[`AMO] & |exop[1], 1'b0};
+            res[g][2].bmask = 0;
+            res[g][2].j = 0;
+            res[g][2].funct3 = ir[14:12];
+            res[g][2].rsa[0] = a[2][6:0];
+            res[g][2].rsa[1] = {2'd2, 5'd0};
+            res[g][2].rda = {2'd0, ir[11:7]};
         end
-    always_comb if (out_ex_q[1].valid & out_ex_q[1].a[64])
-            raddr[0] = out_ex_q[1].a[6:0];
-        else if (a0[64]) raddr[0] = a0[6:0];
-        else if (op[`JALR]) raddr[0] = {2'd0, ir[19:15]};
-        else raddr[0] = 0;
-    always_comb if (out_ex_q[1].valid & out_ex_q[1].b[64])
-            raddr[1] = out_ex_q[1].b[6:0];
-        else if (out_ex_q[1].valid & out_ex_q[1].exop[`EX_STORE])
-            raddr[1] = {2'd2, 5'd0};
-        else if (b0[64]) raddr[1] = b0[6:0];
-        else if (op[`STORE]) raddr[1] = {2'b0, ir[24:20]};
-        else if (op[`STORE_FP]) raddr[1] = {2'b1, ir[24:20]};
-        else if (op[`AMO] & ir[31:27] == 5'b00011) raddr[1] = {2'b0, ir[24:20]};
-        else raddr[1] = 0;
+    end
+    always_comb begin
+        numin = 0; get_if = 0;
+        for (int i = 0; i < 4; i++) if (in_if[i].valid)
+            if (numin + numval[i] <= 4 - num + numout) begin
+                numin = numin + numval[i];
+                get_if[i] = 1;
+            end else break;
+    end
+    always_comb begin
+        numout = 0; numena = 0;
+        for (int i = 0; i < 4; i++)
+            if (out_reg[i].valid & {1'd0, i[1:0] - front} < num) numout++;
+        if (ena_ex) numena++;
+        if (numout > numena) numout = numena;
+    end
+    always_comb begin
+        res4 = 0; iter4 = 0;
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 3; j++)
+            if (res[i][j].valid & iter4 < 4) begin
+                res4[iter4[1:0]] = res[i][j]; iter4++; end
+    end
+    always_comb begin out_ex = out_reg[front]; out_ex.valid &= num > 0; end
+    always_ff @(posedge clk) if (rst | redir) front <= 0;
+        else front <= front + numout[1:0];
+    always_ff @(posedge clk) if (rst | redir) num <= 0;
+        else num <= num + numin - numout;
+    always_ff @(posedge clk) for (int i = 0; i < 4; i++)
+        if ({1'b0, i[1:0] - front - num[1:0]} < numin) begin
+            out_reg[i] <= res4[{30'd0, i[1:0] - front - num[1:0]}];
+            out_reg[i].cqid <=
+                {1'b1, cqid + {{`lgCQSZ-2{1'b0}}, i[1:0] - front - num[1:0]}};
+        end
+    always_ff @(posedge clk) if (rst | redir) cqid <= 0;
+        else cqid <= cqid + {{`lgCQSZ-3{1'b0}}, numin};
 endmodule
 
 module ex_stage(input logic clk, input logic rst, input logic redir,
     input id_ex_t in_id, output logic get_id,
     input id_ex_t in_pt, output logic get_pt,
     output ex_wb_t out_wb, input logic ena_wb,
-    output id_ex_t out_pt, input logic ena_pt, input logic [1:0][64:0] rvalue,
+    output id_ex_t out_pt, input logic ena_pt,
+    output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
     input logic mul_free, output logic [`lgCQSZ:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
     input logic div_free, output logic [`lgCQSZ:0] div_rqst, output logic [7:0] div_op,
@@ -683,8 +729,9 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     logic frompt, fromid;
     always_comb frompt = in_pt.valid &
         (ena_arb | in_pt.exop[`EX_LOAD] | in_pt.exop[`EX_STORE]);
-    always_comb fromid = in_id.valid & get_id;
+    always_comb fromid = ~redir & in_id.valid & get_id;
     always_comb in = frompt ? in_pt : in_id;
+    always_comb raddr = in_id.rsa;
     logic [`EX_END-1:0] op;
     logic [63:0] a, b;
     logic jump;
@@ -721,7 +768,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     end
     always_comb get_pt = ~in_pt.valid | frompt &
         ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free);
-    always_comb get_id = ~in_id.valid | ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ~frompt &
+    always_comb get_id = ~(~redir & in_id.valid) |
+        ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ~frompt &
         (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
         ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free) &
         ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
@@ -842,7 +890,6 @@ endmodule
 module wb_stage(input logic clk, input logic rst, output logic redir,
     input ex_wb_t in_ex, output logic get_ex,
     output xx_pc_t out_pc, input logic ena_pc,
-    input logic ena_ex, // for register read sync
     input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     input logic [64:0] late_npc, input logic [6:0] late_cause,
@@ -941,22 +988,14 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         end
     always_comb for (int i = 0; i < 2; i++)
         cqraddr[i] = regscqid[raddr[i]][`lgCQSZ-1:0];
-    logic [1:0][6:0] raddr_r;
-    logic [1:0][64:0] rvalue_r;
-    always_ff @(posedge clk) if (ena_ex) raddr_r <= raddr; // sync with ID stage output
-    always_ff @(posedge clk) if (ena_ex) for (int i = 0; i < 2; i++)
-        if (in_ex.valid & raddr[i] == in_ex.rda) rvalue_r[i] <= in_ex.rd;
-        else if (regscqid[raddr[i]][`lgCQSZ]) begin
-            if (cqrvalue[i][64] & late_done == cqrvalue[i][`lgCQSZ:0])
-                rvalue_r[i] <= late_val;
-            else rvalue_r[i] <= cqrvalue[i];
-        end else rvalue_r[i] <= {1'b0, regsval[i]}; else rvalue_r <= rvalue;
     always_comb for (int i = 0; i < 2; i++)
-        if (raddr_r[i] == 0) rvalue[i] = 0;
-        else if (in_ex.valid & raddr_r[i] == in_ex.rda) rvalue[i] = in_ex.rd;
-        else if (rvalue_r[i][64] & late_done == rvalue_r[i][`lgCQSZ:0])
-            rvalue[i] = late_val;
-        else rvalue[i] = rvalue_r[i];
+        if (raddr[i] == 0) rvalue[i] = 0;
+        else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
+        else if (regscqid[raddr[i]][`lgCQSZ])
+            if (cqrvalue[i][64] & late_done == cqrvalue[i][`lgCQSZ:0])
+                rvalue[i] = late_val;
+            else rvalue[i] = cqrvalue[i];
+        else rvalue[i] = {1'b0, regsval[i]};
     always_comb begin {out_pc, outinfo, outnpc} = 0;
         for (int i = 1; i >= 0; i--) if (cqpop[i] & cqpatup[i] | cqredir[i]) begin
             outinfo = i == 0 ? lastinfo : cqinfo[i - 1];
@@ -975,8 +1014,7 @@ endmodule
 module pending_table(input logic clk, input logic rst, input logic flush,
     input id_ex_t in_ex, output logic get_ex,
     output id_ex_t out_ex, input logic ena_ex,
-    input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
-    input logic [6:0] rda_id, input logic [6:0] rda_ex
+    input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val
 );
     logic [`lgPTSZ-1:0] in, out;
     logic in_ena, out_ena;
