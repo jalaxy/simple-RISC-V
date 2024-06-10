@@ -741,7 +741,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     logic [3:0][1:0] lsu_rsrv_g, lsu_aqrl_g; logic [3:0] lsu_wena_g;
     logic [3:0][64:0] lsu_addr_g; logic [3:0][2:0] lsu_bits_g;
     logic [3:0][64:0] lsu_wdat_g; logic [3:0] lsu_g, lsu_g_r;
-    logic [3:0] ready, readylsu;
+    logic [3:0] ready, readylsu, get_id_g;
     always_comb begin
         mul_rqst = 0; mul_op = 0; mul_a = 0; mul_b = 0;
         for (int i = 0; i < 4; i++) if (mul_free_g[i] & |mul_op_g[i]) begin
@@ -769,6 +769,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             lsu_wdat = lsu_wdat_g[i];
         end
     end
+    always_comb for (int i = 0; i < 4; i++) begin get_id[i] = 1;
+        for (int j = 0; j <= i; j++) if (~get_id_g[j]) get_id[i] = 0; end
     for (genvar g = 0; g < 4; g++) begin : execution_unit
         id_ex_t in;
         logic frompt, fromid;
@@ -821,13 +823,12 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             for (int i = 0; i < g; i++) if (readylsu[i] & lsu_g_r[i]) lsu_free_g[g] = 0;
             get_pt[g] = ~in_pt[g].valid | frompt & ~(|mul_op_g[g] & ~mul_free_g[g]) &
                 ~(|div_op_g[g] & ~div_free_g[g]) & ~(|fpu_op_g[g] & ~fpu_free_g[g]);
-            get_id[g] = ~(~redir & in_id[g].valid) |
+            get_id_g[g] = ~(~redir & in_id[g].valid) |
                 ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ~frompt & ena_wb[g] &
                 (out_pt[g].valid & ena_pt[g] | ~out_pt[g].valid &
                 ~(|mul_op_g[g] & ~mul_free_g[g]) & ~(|div_op_g[g] & ~div_free_g[g]) &
                 ~(|fpu_op_g[g] & ~fpu_free_g[g])) &
                 ~(lsu_g[g] & ~lsu_free_g[g] & lsu_rqst_g[g][`lgCQSZ]);
-            for (int i = 0; i < g; i++) if (~get_id[i]) get_id[g] = 0;
         end
         always_comb readylsu[g] = (~redir & in_id[g].valid &
             ~cqidocc[lsu_rqst_g[g][`lgCQSZ-1:0]] & ~frompt);
@@ -1094,12 +1095,10 @@ module pending_table(input logic clk, input logic rst, input logic flush,
     logic in_ena, out_ena;
     logic [`PTSZ-1:0] valid;
     logic [64:0] a[`PTSZ-1:0], b[`PTSZ-1:0], fwd_a[`PTSZ:0], fwd_b[`PTSZ:0];
-    id_ex_t in_ex_fwd, data_out, in_ex_chosen;
-    always_comb begin in_ex_chosen = 0; get_ex = 0;
+    id_ex_t in_ex_fwd, data_out; logic [1:0] chosen;
+    always_comb begin chosen = 0; get_ex = 0;
         for (int i = 3; i >= 0; i--) if (in_ex[i].valid) begin
-            in_ex_chosen = in_ex[i];
-            get_ex = 0; get_ex[i] = in_ena;
-        end end
+            chosen = i[1:0]; get_ex = 0; get_ex[i] = in_ena; end end
     regfile #(.dwidth(`PTLEN), .rports(1), .wports(1), .awidth(`lgPTSZ), .depth(`PTSZ))
         data_inst(.clk(clk), .rst(rst), .raddr(out), .rvalue(data_out),
             .waddr(in), .wvalue(in_ex_fwd), .wena(~flush & in_ex_fwd.valid & in_ena));
@@ -1109,12 +1108,12 @@ module pending_table(input logic clk, input logic rst, input logic flush,
             if (~fwd_a[i][64] & ~fwd_b[i][64]) {out_ena, out} = {1'b1, i[`lgPTSZ-1:0]};
         for (int i = `PTSZ-1; i >= 0; i--)
             if (~valid[i]) {in_ena, in} = {1'b1, i[`lgPTSZ-1:0]};
-        in_ex_fwd = in_ex_chosen;
+        in_ex_fwd = in_ex[chosen];
         {in_ex_fwd.a, in_ex_fwd.b} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
     end
     always_comb for (int i = 0; i <= `PTSZ; i++)
         if (i == `PTSZ | valid[i]) begin
-            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex_chosen.a, in_ex_chosen.b};
+            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex[chosen].a, in_ex[chosen].b};
             else {fwd_a[i], fwd_b[i]} = {a[i], b[i]};
             if (fwd_a[i][64] & late_done == fwd_a[i][`lgCQSZ:0]) fwd_a[i] = late_val;
             if (fwd_b[i][64] & late_done == fwd_b[i][`lgCQSZ:0]) fwd_b[i] = late_val;
