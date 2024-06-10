@@ -157,18 +157,18 @@ module pipeline(
 );
     pc_if_t data_pc_if; logic get_pc_if;
     if_id_t [3:0] data_if_id; logic [3:0] get_if_id;
-    id_ex_t data_id_ex; logic get_id_ex;
-    ex_wb_t data_ex_wb; logic get_ex_wb;
-    id_ex_t data_ex_pt; logic get_ex_pt;
-    id_ex_t data_pt_ex; logic get_pt_ex;
+    id_ex_t [3:0] data_id_ex; logic [3:0] get_id_ex;
+    ex_wb_t [3:0] data_ex_wb; logic [3:0] get_ex_wb;
+    id_ex_t [3:0] data_ex_pt; logic [3:0] get_ex_pt;
+    id_ex_t [3:0] data_pt_ex; logic [3:0] get_pt_ex;
     xx_pc_t data_if_pc; logic get_if_pc;
     xx_pc_t data_wb_pc; logic get_wb_pc;
-    logic [1:0][6:0] raddr; logic [1:0][64:0] rvalue;
+    logic [3:0][1:0][6:0] raddr; logic[3:0] [1:0][64:0] rvalue;
     logic [`lgCQSZ:0] late_done; logic [64:0] late_val;
     logic [64:0] late_npc; logic [6:0] late_cause;
-    logic [`lgCQSZ:0] pt_done; logic [64:0] pt_data;
-    logic pt_ena; logic [64:0] pt_npc;
-    logic [`lgCQSZ:0] addr_done; logic [63:0] addr_val;
+    logic [3:0][`lgCQSZ:0] pt_done; logic [3:0][64:0] pt_data;
+    logic [3:0] pt_ena; logic [3:0][64:0] pt_npc;
+    logic [3:0][`lgCQSZ:0] addr_done; logic [3:0][63:0] addr_val;
     logic [`lgCQSZ:0] lsu_rqst, lsu_done; logic lsu_exc, lsu_ena, lsu_free;
     logic lsu_wena, lsu_csr; logic [2:0] lsu_bits;
     logic [11:0] lsu_fence; logic [1:0] lsu_rsrv; logic [1:0] lsu_aqrl;
@@ -234,7 +234,7 @@ module pipeline(
         .rqst(lsu_rqst), .wena(lsu_wena), .addr(lsu_addr), .bits(lsu_bits),
         .done(lsu_done), .excp(lsu_exc), .rdata(lsu_rdat), .wdata(lsu_wdat),
         .late_done(late_done), .late_val(late_val),
-        .addr_done(addr_done), .addr_val(addr_val),
+        .addr_done(addr_done[3]), .addr_val(addr_val[3]),
         .csr_addr(csr_addr), .csr_wena(csr_wena), .csr_func(csr_func),
         .csr_rval(csr_rval), .csr_wval(csr_wval), .csr_excp(csr_excp),
         .dcache_rqst(dcache_rqst), .dcache_rsrv(dcache_rsrv), .dcache_wena(dcache_wena),
@@ -259,11 +259,11 @@ module pipeline(
         .nret(nret), .ein(redir & cause[6]), .epc(epc), .cause(cause[5:0]));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
                              or use dynamic priority? */
-        .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
-        .val_in({pt_data, fpu_r, div_r, mul_r, lsu_rdat}),
-        .npc_in({pt_npc, 65'd0, 65'd0, 65'd0, 65'd0}),
+        .done_in({pt_done[3], fpu_done, div_done, mul_done, lsu_done}),
+        .val_in({pt_data[3], fpu_r, div_r, mul_r, lsu_rdat}),
+        .npc_in({pt_npc[3], 65'd0, 65'd0, 65'd0, 65'd0}),
         .cause_in({7'd0, 7'd0, 7'd0, 7'd0, 7'd0}),
-        .get({pt_ena, fpu_ena, div_ena, mul_ena, lsu_ena}),
+        .get({pt_ena[3], fpu_ena, div_ena, mul_ena, lsu_ena}),
         .done_out(late_done), .val_out(late_val),
         .npc_out(late_npc), .cause_out(late_cause));
 endmodule
@@ -422,11 +422,12 @@ endmodule
 
 module id_stage(input logic clk, input logic rst, input logic redir,
     input  if_id_t [3:0] in_if, output logic [3:0] get_if,
-    output id_ex_t out_ex, input logic ena_ex
+    output id_ex_t [3:0] out_ex, input logic [3:0] ena_ex
 );
     id_ex_t [3:0] out_reg, res4; logic [2:0] iter4;
     id_ex_t [3:0][2:0] res;
-    logic [1:0] front; logic [2:0] num, numin, numout, numena;
+    logic [1:0] front; logic [3:0][1:0] frontpi;
+    logic [2:0] num, numin, numout, numena;
     logic [`lgCQSZ-1:0] cqid;
     logic [3:0][2:0] numval;
     for (genvar g = 0; g < 3; g++) begin : decoder
@@ -678,7 +679,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
         numout = 0; numena = 0;
         for (int i = 0; i < 4; i++)
             if (out_reg[i].valid & {1'd0, i[1:0] - front} < num) numout++;
-        if (ena_ex) numena++;
+        for (int i = 0; i < 4; i++) if (ena_ex[i]) numena++;
         if (numout > numena) numout = numena;
     end
     always_comb begin
@@ -687,27 +688,29 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             if (res[i][j].valid & iter4 < 4) begin
                 res4[iter4[1:0]] = res[i][j]; iter4++; end
     end
-    always_comb begin out_ex = out_reg[front]; out_ex.valid &= num > 0; end
+    always_comb for (int i = 0; i < 4; i++) frontpi[i] = front + i[1:0];
+    always_comb for (int i = 0; i < 4; i++) out_ex[i] = out_reg[frontpi[i]];
     always_ff @(posedge clk) if (rst | redir) front <= 0;
-        else front <= front + numout[1:0];
+        else front <= frontpi[numout[1:0]];
     always_ff @(posedge clk) if (rst | redir) num <= 0;
         else num <= num + numin - numout;
     always_ff @(posedge clk) for (int i = 0; i < 4; i++)
-        if ({1'b0, i[1:0] - front - num[1:0]} < numin) begin
-            out_reg[i] <= res4[{30'd0, i[1:0] - front - num[1:0]}];
+        if (rst | redir) out_reg[i].valid <= 0;
+        else if ({1'b0, i[1:0] - frontpi[num[1:0]]} < numin) begin
+            out_reg[i] <= res4[{30'd0, i[1:0] - frontpi[num[1:0]]}];
             out_reg[i].cqid <=
-                {1'b1, cqid + {{`lgCQSZ-2{1'b0}}, i[1:0] - front - num[1:0]}};
-        end
+                {1'b1, cqid + {{`lgCQSZ-2{1'b0}}, i[1:0] - frontpi[num[1:0]]}};
+        end else if ({1'b0, i[1:0] - front} < numout) out_reg[i].valid <= 0;
     always_ff @(posedge clk) if (rst | redir) cqid <= 0;
         else cqid <= cqid + {{`lgCQSZ-3{1'b0}}, numin};
 endmodule
 
 module ex_stage(input logic clk, input logic rst, input logic redir,
-    input id_ex_t in_id, output logic get_id,
-    input id_ex_t in_pt, output logic get_pt,
-    output ex_wb_t out_wb, input logic ena_wb,
-    output id_ex_t out_pt, input logic ena_pt,
-    output logic [1:0][6:0] raddr, input logic [1:0][64:0] rvalue,
+    input id_ex_t [3:0] in_id, output logic [3:0] get_id,
+    input id_ex_t [3:0] in_pt, output logic [3:0] get_pt,
+    output ex_wb_t [3:0] out_wb, input logic [3:0] ena_wb,
+    output id_ex_t [3:0] out_pt, input logic [3:0] ena_pt,
+    output logic [3:0][1:0][6:0] raddr, input logic [3:0][1:0][64:0] rvalue,
     input logic mul_free, output logic [`lgCQSZ:0] mul_rqst, output logic [4:0] mul_op,
     output logic [63:0] mul_a, output logic [63:0] mul_b,
     input logic div_free, output logic [`lgCQSZ:0] div_rqst, output logic [7:0] div_op,
@@ -716,181 +719,247 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     output logic [63:0] fpu_a, output logic [63:0] fpu_b,
     output logic [2:0] fpu_rm, output logic fpu_double,
     input logic lsu_free, output logic [`lgCQSZ:0] lsu_rqst,
-    output logic [11:0] lsu_fence,
-    output logic [1:0] lsu_rsrv, output logic [1:0] lsu_aqrl, output logic lsu_csr,
+    output logic [11:0] lsu_fence, output logic lsu_csr,
+    output logic [1:0] lsu_rsrv, output logic [1:0] lsu_aqrl,
     output logic lsu_wena, output logic [64:0] lsu_addr,
     output logic [2:0] lsu_bits, output logic [64:0] lsu_wdat,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
-    output logic [`lgCQSZ:0] pt_done, output logic [64:0] pt_data,
-    output logic [64:0] pt_npc, input logic ena_arb,
-    output logic [`lgCQSZ:0] addr_done, output logic [63:0] addr_val
+    output logic [3:0][`lgCQSZ:0] pt_done, output logic [3:0][64:0] pt_data,
+    output logic [3:0][64:0] pt_npc, input logic [3:0] ena_arb,
+    output logic [3:0][`lgCQSZ:0] addr_done, output logic [3:0][63:0] addr_val
 );
-    id_ex_t in;
-    logic frompt, fromid;
-    always_comb frompt = in_pt.valid &
-        (ena_arb | in_pt.exop[`EX_LOAD] | in_pt.exop[`EX_STORE]);
-    always_comb fromid = ~redir & in_id.valid & get_id;
-    always_comb in = frompt ? in_pt : in_id;
-    always_comb raddr = in_id.rsa;
-    logic [`EX_END-1:0] op;
-    logic [63:0] a, b;
-    logic jump;
-    logic [63:0] jpc;
-    logic [64:0] sub, res;
-    logic [63:0] add, sll, srl, sra;
-    logic [2:0] bflag;
-    logic ready, lsu, mul_valid, div_valid, fpu_valid, lsu_valid;
-    logic [`CQSZ-1:0] cqidocc;
-    always_comb op = in.valid ? in.exop : 0;
+    logic [`CQSZ-1:0] cqidocc; logic [3:0][`lgCQSZ:0] late_req;
+    logic [3:0] mul_free_g; logic [3:0][`lgCQSZ:0] mul_rqst_g;
+    logic [3:0][4:0] mul_op_g; logic [3:0][63:0] mul_a_g, mul_b_g;
+    logic [3:0] div_free_g; logic [3:0][`lgCQSZ:0] div_rqst_g;
+    logic [3:0][7:0] div_op_g; logic [3:0][63:0] div_a_g, div_b_g;
+    logic [3:0] fpu_free_g; logic [3:0][`lgCQSZ:0] fpu_rqst_g;
+    logic [3:0][20:0] fpu_op_g; logic [3:0][63:0] fpu_a_g, fpu_b_g;
+    logic [3:0][2:0] fpu_rm_g; logic [3:0] fpu_double_g;
+    logic [3:0] lsu_free_g; logic [3:0][`lgCQSZ:0] lsu_rqst_g;
+    logic [3:0][11:0] lsu_fence_g; logic [3:0] lsu_csr_g;
+    logic [3:0][1:0] lsu_rsrv_g, lsu_aqrl_g; logic [3:0] lsu_wena_g;
+    logic [3:0][64:0] lsu_addr_g; logic [3:0][2:0] lsu_bits_g;
+    logic [3:0][64:0] lsu_wdat_g; logic [3:0] lsu_g, lsu_g_r;
+    logic [3:0] ready, readylsu;
     always_comb begin
-        if (frompt & in_pt.j) a = in.pc; // JALR in PT
-        else a = in.a[64] ? rvalue[0][63:0] : in.a[63:0];
-        b = in.b[64] ? rvalue[1][63:0] : in.b[63:0];
-        if (in.iword) a = {{32{a[31] & in.isign}}, a[31:0]};
-        if (in.iword) b = {{32{b[31] & in.isign}}, b[31:0]};
-        if (in.iword & (in.exop[`EX_SLL] | in.exop[`EX_SRL] | in.exop[`EX_SRA]))
-            b[5] = 0;
-    end
-    always_comb sub = {1'b0, a} - {1'b0, b};
-    always_comb add = a + b;
-    always_comb sll = a << b[5:0];
-    always_comb srl = a >> b[5:0];
-    always_comb sra = $signed($signed(a) >>> b[5:0]);
-    always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
-    always_comb begin
-        out_pt = in;
-        if (op[`EX_CSR]) out_pt.valid = 0;
-        else if (lsu) out_pt.valid = in.valid & rvalue[0][64];
-        else out_pt.valid = in.valid & (rvalue[0][64] | rvalue[1][64]);
-        if (frompt | cqidocc[in.cqid[`lgCQSZ-1:0]]) out_pt.valid = 0;
-        out_pt.a = in.a[64] | in.base[64] ? rvalue[0] : in.a;
-        out_pt.b = in.b[64] ? rvalue[1] : in.b;
-    end
-    always_comb get_pt = ~in_pt.valid | frompt &
-        ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free);
-    always_comb get_id = ~(~redir & in_id.valid) |
-        ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ~frompt &
-        (out_pt.valid & ena_pt | ~out_pt.valid & ena_wb) &
-        ~(|mul_op & ~mul_free) & ~(|div_op & ~div_free) & ~(|fpu_op & ~fpu_free) &
-        ~(lsu & ~lsu_free & lsu_rqst[`lgCQSZ]);
-    always_comb ready = (fromid | frompt) & ~out_pt.valid;
-    always_comb mul_valid = ~rst & ready & |mul_op;
-    always_comb mul_rqst = {`lgCQSZ+1{mul_valid}} & in.cqid;
-    always_comb mul_op = {op[`EX_MUL] & in.iword,
-        op[`EX_MULHU], op[`EX_MULHSU], op[`EX_MULH], op[`EX_MUL] & ~in.iword};
-    always_comb {mul_a, mul_b} = {a, b};
-    always_comb div_valid = ~rst & ready & |div_op;
-    always_comb div_rqst = {`lgCQSZ+1{div_valid}} & in.cqid;
-    always_comb div_op = {op[`EX_REMU] & in.iword, op[`EX_REM] & in.iword,
-                          op[`EX_DIVU] & in.iword, op[`EX_DIV] & in.iword,
-                          op[`EX_REMU] & ~in.iword,  op[`EX_REM] & ~in.iword,
-                          op[`EX_DIVU] & ~in.iword,  op[`EX_DIV] & ~in.iword};
-    always_comb {div_a, div_b} = {a, b};
-    always_comb fpu_valid = ~rst & ready & |fpu_op;
-    always_comb fpu_rqst = {`lgCQSZ+1{fpu_valid}} & in.cqid;
-    always_comb fpu_op = {
-        op[`EX_FCVTDS], op[`EX_FCVTSD], op[`EX_FCVTFI], op[`EX_FCVTIF],
-        op[`EX_FMVFX],  op[`EX_FCLASS], op[`EX_FMVXF],  op[`EX_FLE],
-        op[`EX_FLT],    op[`EX_FEQ],    op[`EX_FMAX],   op[`EX_FMIN],
-        op[`EX_FSGNJX], op[`EX_FSGNJN], op[`EX_FSGNJ],  op[`EX_FSQRT],
-        op[`EX_FDIV],   op[`EX_FNMUL],  op[`EX_FMUL],   op[`EX_FSUB],
-        op[`EX_FADD]};
-    always_comb {fpu_a, fpu_b} = {a, b};
-    always_comb {fpu_rm, fpu_double} = {in.funct3, in.fdouble};
-    always_comb lsu = op[`EX_LOAD] | op[`EX_STORE] | op[`EX_FENCE] | op[`EX_CSR];
-    always_comb lsu_valid = ~rst & fromid & lsu;
-    always_ff @(posedge clk) begin
-        if (lsu_wdat[64] & late_done == lsu_wdat[`lgCQSZ:0])
-            lsu_wdat <= late_val;
-        if (lsu_free | ~lsu_rqst[`lgCQSZ] & ~|lsu_fence)
-            if (lsu_valid)
-                if (op[`EX_FENCE])
-                    {lsu_rqst, lsu_fence} <= {{`lgCQSZ+1{1'b0}}, in.b[11:0]};
-                else begin
-                    {lsu_rqst, lsu_fence} <= {in.cqid, 12'd0};
-                    lsu_wena <= op[`EX_STORE] | op[`EX_CSR];
-                    /* maybe using LSQ id instead of CQ id as index is better */
-                    lsu_addr <= out_pt.valid ? res : {1'b0, add};
-                    lsu_bits <= in.funct3;
-                    lsu_wdat <= rvalue[1];
-                    lsu_rsrv <= in.rsrv;
-                    lsu_aqrl <= in.aqrl;
-                    lsu_csr <= op[`EX_CSR];
-                    if (op[`EX_CSR]) lsu_addr <= {1'b0, b};
-                    if (op[`EX_CSR]) lsu_wdat <= in.a[64] ? rvalue[0] : in.a;
-                end
-            else {lsu_rqst, lsu_fence} <= 0;
-        if (rst | redir) lsu_rqst <= 0;
-    end
-    always_comb if (out_pt.valid) res = {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
-        else if (in.valid & lsu & ~op[`EX_FENCE])
-            res = {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
-        else begin
-            res =
-                {65{op[`EX_ADD]}}  & {1'b0, add} |
-                {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
-                {65{op[`EX_SLL]}}  & {1'b0, sll} |
-                {65{op[`EX_SRL]}}  & {1'b0, srl} |
-                {65{op[`EX_SRA]}}  & {1'b0, sra} |
-                {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
-                {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
-                {65{op[`EX_XOR]}}  & {1'b0, a ^ b} |
-                {65{op[`EX_OR]}}   & {1'b0, a | b} |
-                {65{op[`EX_AND]}}  & {1'b0, a & b} |
-                {65{op[`EX_MIN]}}  & {1'b0, (in.isign ? sub[63] : sub[64]) ? a : b} |
-                {65{op[`EX_MAX]}}  & {1'b0, (in.isign ? sub[63] : sub[64]) ? b : a} |
-                {65{|mul_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid} |
-                {65{|div_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid} |
-                {65{|fpu_op}}      & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
-            if (in.iword) res[63:0] = {{32{res[31]}}, res[31:0]};
+        mul_rqst = 0; mul_op = 0; mul_a = 0; mul_b = 0;
+        for (int i = 0; i < 4; i++) if (mul_free_g[i] & |mul_op_g[i]) begin
+            mul_rqst = mul_rqst_g[i]; mul_op = mul_op_g[i];
+            mul_a = mul_a_g[i]; mul_b = mul_b_g[i];
         end
+        div_rqst = 0; div_op = 0; div_a = 0; div_b = 0;
+        for (int i = 0; i < 4; i++) if (div_free_g[i] & |div_op_g[i]) begin
+            div_rqst = div_rqst_g[i]; div_op = div_op_g[i];
+            div_a = div_a_g[i]; div_b = div_b_g[i];
+        end
+        fpu_rqst = 0; fpu_op = 0; fpu_a = 0; fpu_b = 0; fpu_rm = 0; fpu_double = 0;
+        for (int i = 0; i < 4; i++) if (fpu_free_g[i] & |fpu_op_g[i]) begin
+            fpu_rqst = fpu_rqst_g[i]; fpu_op = fpu_op_g[i];
+            fpu_a = fpu_a_g[i]; fpu_b = fpu_b_g[i];
+            fpu_rm = fpu_rm_g[i]; fpu_double = fpu_double_g[i];
+        end
+        lsu_rqst = 0; lsu_fence = 0; lsu_csr = 0; lsu_rsrv = 0; lsu_aqrl = 0;
+        lsu_wena = 0; lsu_addr = 0; lsu_bits = 0; lsu_wdat = 0;
+        for (int i = 0; i < 4; i++) if (lsu_free_g[i] & lsu_g_r[i]) begin
+            lsu_rqst = lsu_rqst_g[i]; lsu_fence = lsu_fence_g[i];
+            lsu_csr = lsu_csr_g[i]; lsu_rsrv = lsu_rsrv_g[i];
+            lsu_aqrl = lsu_aqrl_g[i]; lsu_wena = lsu_wena_g[i];
+            lsu_addr = lsu_addr_g[i]; lsu_bits = lsu_bits_g[i];
+            lsu_wdat = lsu_wdat_g[i];
+        end
+    end
+    for (genvar g = 0; g < 4; g++) begin : execution_unit
+        id_ex_t in;
+        logic frompt, fromid;
+        always_comb frompt = in_pt[g].valid &
+            (ena_arb[g] | in_pt[g].exop[`EX_LOAD] | in_pt[g].exop[`EX_STORE]);
+        always_comb fromid = ~redir & in_id[g].valid & get_id[g];
+        always_comb in = frompt ? in_pt[g] : in_id[g];
+        always_comb raddr[g] = in_id[g].rsa;
+        logic [`EX_END-1:0] op;
+        logic [63:0] a, b;
+        logic jump;
+        logic [63:0] jpc;
+        logic [64:0] sub, res;
+        logic [63:0] add, sll, srl, sra;
+        logic [2:0] bflag;
+        logic readyfree, mul_valid, div_valid, fpu_valid, lsu_valid;
+        always_comb op = in.valid ? in.exop : 0;
+        always_comb begin
+            if (frompt & in_pt[g].j) a = in.pc; // JALR in PT
+            else a = in.a[64] ? rvalue[g][0][63:0] : in.a[63:0];
+            b = in.b[64] ? rvalue[g][1][63:0] : in.b[63:0];
+            if (in.iword) a = {{32{a[31] & in.isign}}, a[31:0]};
+            if (in.iword) b = {{32{b[31] & in.isign}}, b[31:0]};
+            if (in.iword & (in.exop[`EX_SLL] | in.exop[`EX_SRL] | in.exop[`EX_SRA]))
+                b[5] = 0;
+        end
+        always_comb sub = {1'b0, a} - {1'b0, b};
+        always_comb add = a + b;
+        always_comb sll = a << b[5:0];
+        always_comb srl = a >> b[5:0];
+        always_comb sra = $signed($signed(a) >>> b[5:0]);
+        always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
+        always_comb begin
+            out_pt[g] = in;
+            if (op[`EX_CSR]) out_pt[g].valid = 0;
+            else if (lsu_g[g]) out_pt[g].valid = in.valid & rvalue[g][0][64];
+            else out_pt[g].valid = in.valid & (rvalue[g][0][64] | rvalue[g][1][64]);
+            if (frompt | cqidocc[in.cqid[`lgCQSZ-1:0]]) out_pt[g].valid = 0;
+            out_pt[g].a = in.a[64] | in.base[64] ? rvalue[g][0] : in.a;
+            out_pt[g].b = in.b[64] ? rvalue[g][1] : in.b;
+        end
+        always_comb begin
+            mul_free_g[g] = mul_free; div_free_g[g] = div_free;
+            fpu_free_g[g] = fpu_free; lsu_free_g[g] = lsu_free;
+            for (int i = 0; i < g; i++) if (ready[i]) begin
+                if (|mul_op_g[i]) mul_free_g[g] = 0;
+                if (|div_op_g[i]) div_free_g[g] = 0;
+                if (|fpu_op_g[i]) fpu_free_g[g] = 0;
+            end
+            for (int i = 0; i < g; i++) if (readylsu[i] & lsu_g_r[i]) lsu_free_g[g] = 0;
+            get_pt[g] = ~in_pt[g].valid | frompt & ~(|mul_op_g[g] & ~mul_free_g[g]) &
+                ~(|div_op_g[g] & ~div_free_g[g]) & ~(|fpu_op_g[g] & ~fpu_free_g[g]);
+            get_id[g] = ~(~redir & in_id[g].valid) |
+                ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ~frompt & ena_wb[g] &
+                (out_pt[g].valid & ena_pt[g] | ~out_pt[g].valid &
+                ~(|mul_op_g[g] & ~mul_free_g[g]) & ~(|div_op_g[g] & ~div_free_g[g]) &
+                ~(|fpu_op_g[g] & ~fpu_free_g[g])) &
+                ~(lsu_g[g] & ~lsu_free_g[g] & lsu_rqst_g[g][`lgCQSZ]);
+            for (int i = 0; i < g; i++) if (~get_id[i]) get_id[g] = 0;
+        end
+        always_comb readylsu[g] = (~redir & in_id[g].valid &
+            ~cqidocc[lsu_rqst_g[g][`lgCQSZ-1:0]] & ~frompt);
+        always_comb ready[g] = (~redir & in_id[g].valid &
+            ~cqidocc[in.cqid[`lgCQSZ-1:0]] & ena_wb[g] | frompt) & ~out_pt[g].valid;
+        always_comb readyfree = (fromid | frompt) & ~out_pt[g].valid;
+        always_comb if (lsu_free_g[g] & lsu_rqst_g[g][`lgCQSZ])
+                late_req[g] = lsu_rqst_g[g];
+            else late_req[g] = {out_pt[g].valid & ena_pt[g] & ~lsu_g[g] |
+                mul_valid | div_valid | fpu_valid, in.cqid[`lgCQSZ-1:0]};
+        always_comb mul_valid = ~rst & readyfree & |mul_op_g[g];
+        always_comb mul_rqst_g[g] = {`lgCQSZ+1{mul_valid}} & in.cqid;
+        always_comb mul_op_g[g] = {op[`EX_MUL] & in.iword,
+            op[`EX_MULHU], op[`EX_MULHSU], op[`EX_MULH], op[`EX_MUL] & ~in.iword};
+        always_comb {mul_a_g[g], mul_b_g[g]} = {a, b};
+        always_comb div_valid = ~rst & readyfree & |div_op_g[g];
+        always_comb div_rqst_g[g] = {`lgCQSZ+1{div_valid}} & in.cqid;
+        always_comb div_op_g[g] = {op[`EX_REMU] & in.iword,  op[`EX_REM] & in.iword,
+                                   op[`EX_DIVU] & in.iword,  op[`EX_DIV] & in.iword,
+                                   op[`EX_REMU] & ~in.iword, op[`EX_REM] & ~in.iword,
+                                   op[`EX_DIVU] & ~in.iword, op[`EX_DIV] & ~in.iword};
+        always_comb {div_a_g[g], div_b_g[g]} = {a, b};
+        always_comb fpu_valid = ~rst & readyfree & |fpu_op_g[g];
+        always_comb fpu_rqst_g[g] = {`lgCQSZ+1{fpu_valid}} & in.cqid;
+        always_comb fpu_op_g[g] = {
+            op[`EX_FCVTDS], op[`EX_FCVTSD], op[`EX_FCVTFI], op[`EX_FCVTIF],
+            op[`EX_FMVFX],  op[`EX_FCLASS], op[`EX_FMVXF],  op[`EX_FLE],
+            op[`EX_FLT],    op[`EX_FEQ],    op[`EX_FMAX],   op[`EX_FMIN],
+            op[`EX_FSGNJX], op[`EX_FSGNJN], op[`EX_FSGNJ],  op[`EX_FSQRT],
+            op[`EX_FDIV],   op[`EX_FNMUL],  op[`EX_FMUL],   op[`EX_FSUB],
+            op[`EX_FADD]};
+        always_comb {fpu_a_g[g], fpu_b_g[g]} = {a, b};
+        always_comb {fpu_rm_g[g], fpu_double_g[g]} = {in.funct3, in.fdouble};
+        always_comb lsu_g[g] = op[`EX_LOAD] | op[`EX_STORE] |
+                               op[`EX_FENCE] | op[`EX_CSR];
+        always_comb lsu_valid = ~rst & fromid & lsu_g[g];
+        always_ff @(posedge clk) begin
+            if (lsu_wdat_g[g][64] & late_done == lsu_wdat_g[g][`lgCQSZ:0])
+                lsu_wdat_g[g] <= late_val;
+            if (lsu_free_g[g] | ~lsu_rqst_g[g][`lgCQSZ] & ~|lsu_fence_g[g]) begin
+                lsu_g_r[g] <= lsu_g[g];
+                if (lsu_valid)
+                    if (op[`EX_FENCE])
+                        {lsu_rqst_g[g], lsu_fence_g[g]} <=
+                            {{`lgCQSZ+1{1'b0}}, in.b[11:0]};
+                    else begin
+                        {lsu_rqst_g[g], lsu_fence_g[g]} <= {in.cqid, 12'd0};
+                        lsu_wena_g[g] <= op[`EX_STORE] | op[`EX_CSR];
+                        /* maybe using LSQ id instead of CQ id as index is better */
+                        lsu_addr_g[g] <= out_pt[g].valid ? res : {1'b0, add};
+                        lsu_bits_g[g] <= in.funct3;
+                        lsu_wdat_g[g] <= rvalue[g][1];
+                        lsu_rsrv_g[g] <= in.rsrv;
+                        lsu_aqrl_g[g] <= in.aqrl;
+                        lsu_csr_g[g] <= op[`EX_CSR];
+                        if (op[`EX_CSR]) lsu_addr_g[g] <= {1'b0, b};
+                        if (op[`EX_CSR]) lsu_wdat_g[g] <=
+                            in.a[64] ? rvalue[g][0] : in.a;
+                    end
+                else {lsu_rqst_g[g], lsu_fence_g[g]} <= 0;
+            end
+            if (rst | redir) lsu_rqst_g[g] <= 0;
+        end
+        always_comb if (out_pt[g].valid) res = {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
+            else if (in.valid & lsu_g[g] & ~op[`EX_FENCE])
+                res = {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
+            else begin
+                res =
+                    {65{op[`EX_ADD]}}  & {1'b0, add} |
+                    {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
+                    {65{op[`EX_SLL]}}  & {1'b0, sll} |
+                    {65{op[`EX_SRL]}}  & {1'b0, srl} |
+                    {65{op[`EX_SRA]}}  & {1'b0, sra} |
+                    {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
+                    {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
+                    {65{op[`EX_XOR]}} & {1'b0, a ^ b} |
+                    {65{op[`EX_OR]}}  & {1'b0, a | b} |
+                    {65{op[`EX_AND]}} & {1'b0, a & b} |
+                    {65{op[`EX_MIN]}} & {1'b0, (in.isign ? sub[63] : sub[64]) ? a : b} |
+                    {65{op[`EX_MAX]}} & {1'b0, (in.isign ? sub[63] : sub[64]) ? b : a} |
+                    {65{|mul_op_g[g]}} & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid} |
+                    {65{|div_op_g[g]}} & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid} |
+                    {65{|fpu_op_g[g]}} & {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
+                if (in.iword) res[63:0] = {{32{res[31]}}, res[31:0]};
+            end
+        always_ff @(posedge clk) if (rst | redir) pt_done[g] <= 0;
+            else if (frompt & ~lsu_g[g])
+                if (res[64]) pt_done[g] <= 0;
+                else {pt_done[g], pt_data[g], pt_npc[g]} <=
+                    {in.cqid, res, 1'b1, jump ? jpc : in.pc + {61'd0, in.delta}};
+            /* execution from ID stage may use `pt_done` wires to handle
+            superscalar dependency by push latter instructions to PT */
+            else if (ena_arb[g]) pt_done[g] <= 0;
+        always_ff @(posedge clk) if (rst | redir) addr_done[g] <= 0;
+            else if (frompt & lsu_g[g]) {addr_done[g], addr_val[g]} <= {in.cqid, add[63:0]};
+            else addr_done[g] <= 0;
+        always_ff @(posedge clk)
+            if (rst | redir) out_wb[g].valid <= 0;
+            else if (fromid) begin
+                out_wb[g].valid <= 1'b1;
+                out_wb[g].rda <= in.rda;
+                out_wb[g].rd <= res;
+                out_wb[g].mw <= op[`EX_STORE] | op[`EX_CSR];
+                out_wb[g].patupd <= (|in.bmask | in.j) &
+                    (in.pat[1:0] == 2'b01 | in.pat[1:0] == 2'b10);
+                out_wb[g].b <= |in.bmask;
+                out_wb[g].c <= ~in.delta[2];
+                out_wb[g].pc <= in.pc;
+                out_wb[g].pat <= in.pat;
+                out_wb[g].npc <= jump ? jpc : in.pc + {61'd0, in.delta};
+                if (op[`EX_ECALL]) out_wb[g].cause <= {1'b1, 6'd11};
+                else if (op[`EX_EBREAK]) out_wb[g].cause <= {1'b1, 6'd3};
+                else out_wb[g].cause <= 0;
+            end else if (ena_wb[g]) out_wb[g].valid <= 0;
+        always_comb if (op[`EX_ECALL] | op[`EX_EBREAK]) jpc = 0;
+            else if (frompt & in_pt[g].j) jpc = in.a[63:0] + in.offset; // JALR
+            else if (in.base[64]) jpc = rvalue[g][0][63:0] + in.offset;
+            else jpc = in.base[63:0] + in.offset;
+        always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
+    end
     always_ff @(posedge clk) if (rst | redir) cqidocc <= 0; else begin
-        if (get_id & (out_pt.valid | lsu_valid & ~op[`EX_FENCE] |
-                      mul_valid | div_valid | fpu_valid))
-            cqidocc[in.cqid[`lgCQSZ-1:0]] <= 1;
+        for (int i = 0; i < 4; i++) if (late_req[i][`lgCQSZ])
+            cqidocc[late_req[i][`lgCQSZ-1:0]] <= 1;
         if (late_done[`lgCQSZ] & ~late_val[64])
             cqidocc[late_done[`lgCQSZ-1:0]] <= 0;
     end
-    always_ff @(posedge clk) if (rst | redir) pt_done <= 0;
-        else if (frompt & ~lsu)
-            if (res[64]) pt_done <= 0;
-            else {pt_done, pt_data, pt_npc} <=
-                {in.cqid, res, 1'b1, jump ? jpc : in.pc + {61'd0, in.delta}};
-        /* execution from ID stage may use `pt_done` wires to handle
-           superscalar dependency by push latter instructions to PT */
-        else if (ena_arb) pt_done <= 0;
-    always_ff @(posedge clk) if (rst | redir) addr_done <= 0;
-        else if (frompt & lsu) {addr_done, addr_val} <= {in.cqid, add[63:0]};
-        else addr_done <= 0;
-    always_ff @(posedge clk)
-        if (rst | redir) out_wb.valid <= 0;
-        else if (fromid) begin
-            out_wb.valid <= 1'b1;
-            out_wb.rda <= in.rda;
-            out_wb.rd <= res;
-            out_wb.mw <= op[`EX_STORE] | op[`EX_CSR];
-            out_wb.patupd <= (|in.bmask | in.j) &
-                (in.pat[1:0] == 2'b01 | in.pat[1:0] == 2'b10);
-            out_wb.b <= |in.bmask;
-            out_wb.c <= ~in.delta[2];
-            out_wb.pc <= in.pc;
-            out_wb.pat <= in.pat;
-            out_wb.npc <= jump ? jpc : in.pc + {61'd0, in.delta};
-            if (op[`EX_ECALL]) out_wb.cause <= {1'b1, 6'd11};
-            else if (op[`EX_EBREAK]) out_wb.cause <= {1'b1, 6'd3};
-            else out_wb.cause <= 0;
-        end else if (ena_wb) out_wb.valid <= 0;
-    always_comb if (op[`EX_ECALL] | op[`EX_EBREAK]) jpc = 0;
-        else if (frompt & in_pt.j) jpc = in.a[63:0] + in.offset; // JALR
-        else if (in.base[64]) jpc = rvalue[0][63:0] + in.offset;
-        else jpc = in.base[63:0] + in.offset;
-    always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
 endmodule
 
 module wb_stage(input logic clk, input logic rst, output logic redir,
-    input ex_wb_t in_ex, output logic get_ex,
+    input ex_wb_t [3:0] in_ex, output logic [3:0] get_ex,
     output xx_pc_t out_pc, input logic ena_pc,
-    input logic [1:0][6:0] raddr, output logic [1:0][64:0] rvalue,
+    input logic [3:0][1:0][6:0] raddr, output logic [3:0][1:0][64:0] rvalue,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
     input logic [64:0] late_npc, input logic [6:0] late_cause,
     input logic [63:0] mtvec, output logic [63:0] nret,
@@ -910,28 +979,29 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     logic lastvalid; cqinfo_t lastinfo, outinfo; logic [63:0] lastnpc, outnpc;
     logic lsu_cmt;
     regfile #(.dwidth(64), .rports(2), .wports(2), .awidth(7), .depth(65))
-        regs_inst(.clk(clk), .rst(rst), .raddr(raddr), .rvalue(regsval),
+        regs_inst(.clk(clk), .rst(rst), .raddr(raddr[0]), .rvalue(regsval),
             .waddr({cqinfo[1].rda, cqinfo[0].rda}),
             .wvalue({cqdata[1][63:0], cqdata[0][63:0]}),
             .wena({cqpop[1] & |cqinfo[1].rda, cqpop[0] & |cqinfo[0].rda}));
     regfile #(.dwidth(`CQLEN), .rports(2), .wports(1), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqinfo_inst(.clk(clk), .rst(rst), .raddr(front[1:0]), .rvalue(cqinfo),
-            .waddr(rear[0]), .wvalue(in_ex[`CQLEN-1:0]), .wena(cqpush));
+            .waddr(rear[0]), .wvalue(in_ex[0][`CQLEN-1:0]), .wena(cqpush));
     regfile #(.dwidth(64), .rports(2), .wports(2), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqnpc_inst(.clk(clk), .rst(rst), .raddr(front[1:0]), .rvalue(cqnpc),
             .waddr({late_done[`lgCQSZ-1:0], rear[0]}),
-            .wvalue({late_npc[63:0], in_ex.npc}),
+            .wvalue({late_npc[63:0], in_ex[0].npc}),
             .wena({late_done[`lgCQSZ] & late_npc[64], cqpush}));
     regfile #(.dwidth(7), .rports(2), .wports(2), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqcause_inst(.clk(clk), .rst(rst), .raddr(front[1:0]), .rvalue(cqcause),
             .waddr({late_done[`lgCQSZ-1:0], rear[0]}),
-            .wvalue({late_cause, in_ex.cause}),
+            .wvalue({late_cause, in_ex[0].cause}),
             .wena({late_done[`lgCQSZ] & late_cause[6], cqpush}));
     regfile #(.dwidth(65), .rports(4), .wports(2), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqval_inst(.clk(clk), .rst(rst), .raddr({front[1:0], cqraddr}),
             .rvalue({cqdata, cqrvalue}), .wena({late_done[`lgCQSZ], cqpush}),
-            .waddr({late_done[`lgCQSZ-1:0], rear[0]}), .wvalue({late_val, in_ex.rd}));
-    always_comb get_ex = ~in_ex.valid | cqpush;
+            .waddr({late_done[`lgCQSZ-1:0], rear[0]}),
+            .wvalue({late_val, in_ex[0].rd}));
+    always_comb get_ex = {3'd0, ~in_ex[0].valid | cqpush};
     always_comb for (int i = 0; i < 3; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 2; i++) rear[i] = cqrear + i[`lgCQSZ-1:0];
     always_comb cqvalid[0] = ~cqempty;
@@ -945,7 +1015,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb cqpatup[1] = cqredir[1] | cqvalid[0] & cqinfo[0].patupd;
     always_comb cqready[0] = cqvalid[0] & ~cqdata[0][64] & ~cqredir[0];
     always_comb cqready[1] = cqvalid[1] & ~cqdata[1][64] & ~cqredir[1];
-    always_comb cqpush = in_ex.valid & (~cqfull | cqpop[0]);
+    always_comb cqpush = in_ex[0].valid & (~cqfull | cqpop[0]);
     always_comb begin cqpatup_ena = ena_pc; cqpop_accum = 1; 
         for (int i = 0; i < 2; i++) begin
             cqpop[i] = cqpop_accum & cqready[i];
@@ -978,7 +1048,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
             cqfront <= cqpop[1] ? front[2] : (cqpop[0] ? front[1] : front[0]);
             cqrear <= cqpush ? rear[1] : rear[0];
             assert((cqempty | cqfull) == (front[0] == rear[0]));
-            if (cqpush & in_ex.rd[64]) assert(in_ex.rd[`lgCQSZ-1:0] == rear[0]);
+            if (cqpush & in_ex[0].rd[64]) assert(in_ex[0].rd[`lgCQSZ-1:0] == rear[0]);
         end
     always_ff @(posedge clk)
         if (rst | redir) for (int i = 0; i < 65; i++) regscqid[i][`lgCQSZ] <= 0;
@@ -987,18 +1057,19 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
                 regscqid[cqinfo[0].rda] <= 0;
             if (cqpop[1] & regscqid[cqinfo[1].rda][`lgCQSZ-1:0] == front[1])
                 regscqid[cqinfo[1].rda] <= 0;
-            if (cqpush & |in_ex.rda) regscqid[in_ex.rda] <= {1'b1, rear[0]};
+            if (cqpush & |in_ex[0].rda) regscqid[in_ex[0].rda] <= {1'b1, rear[0]};
         end
     always_comb for (int i = 0; i < 2; i++)
-        cqraddr[i] = regscqid[raddr[i]][`lgCQSZ-1:0];
+        cqraddr[i] = regscqid[raddr[0][i]][`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 2; i++)
-        if (raddr[i] == 0) rvalue[i] = 0;
-        else if (in_ex.valid & raddr[i] == in_ex.rda) rvalue[i] = in_ex.rd;
-        else if (regscqid[raddr[i]][`lgCQSZ])
+        if (raddr[0][i] == 0) rvalue[0][i] = 0;
+        else if (in_ex[0].valid & raddr[0][i] == in_ex[0].rda)
+            rvalue[0][i] = in_ex[0].rd;
+        else if (regscqid[raddr[0][i]][`lgCQSZ])
             if (cqrvalue[i][64] & late_done == cqrvalue[i][`lgCQSZ:0])
-                rvalue[i] = late_val;
-            else rvalue[i] = cqrvalue[i];
-        else rvalue[i] = {1'b0, regsval[i]};
+                rvalue[0][i] = late_val;
+            else rvalue[0][i] = cqrvalue[i];
+        else rvalue[0][i] = {1'b0, regsval[i]};
     always_comb begin {out_pc, outinfo, outnpc} = 0;
         for (int i = 1; i >= 0; i--) if (cqpop[i] & cqpatup[i] | cqredir[i]) begin
             outinfo = i == 0 ? lastinfo : cqinfo[i - 1];
@@ -1015,46 +1086,51 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
 endmodule
 
 module pending_table(input logic clk, input logic rst, input logic flush,
-    input id_ex_t in_ex, output logic get_ex,
-    output id_ex_t out_ex, input logic ena_ex,
+    input id_ex_t [3:0] in_ex, output logic [3:0] get_ex,
+    output id_ex_t [3:0] out_ex, input logic [3:0] ena_ex,
     input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val
 );
     logic [`lgPTSZ-1:0] in, out;
     logic in_ena, out_ena;
     logic [`PTSZ-1:0] valid;
     logic [64:0] a[`PTSZ-1:0], b[`PTSZ-1:0], fwd_a[`PTSZ:0], fwd_b[`PTSZ:0];
-    id_ex_t in_ex_fwd, data_out;
+    id_ex_t in_ex_fwd, data_out, in_ex_chosen;
+    always_comb begin in_ex_chosen = 0; get_ex = 0;
+        for (int i = 3; i >= 0; i--) if (in_ex[i].valid) begin
+            in_ex_chosen = in_ex[i];
+            get_ex = 0; get_ex[i] = in_ena;
+        end end
     regfile #(.dwidth(`PTLEN), .rports(1), .wports(1), .awidth(`lgPTSZ), .depth(`PTSZ))
         data_inst(.clk(clk), .rst(rst), .raddr(out), .rvalue(data_out),
             .waddr(in), .wvalue(in_ex_fwd), .wena(~flush & in_ex_fwd.valid & in_ena));
-    always_comb get_ex = in_ena;
     always_comb begin
         {in_ena, out_ena, in, out} = 0;
         for (int i = `PTSZ-1; i >= 0; i--)
             if (~fwd_a[i][64] & ~fwd_b[i][64]) {out_ena, out} = {1'b1, i[`lgPTSZ-1:0]};
         for (int i = `PTSZ-1; i >= 0; i--)
             if (~valid[i]) {in_ena, in} = {1'b1, i[`lgPTSZ-1:0]};
-        in_ex_fwd = in_ex;
+        in_ex_fwd = in_ex_chosen;
         {in_ex_fwd.a, in_ex_fwd.b} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
     end
     always_comb for (int i = 0; i <= `PTSZ; i++)
         if (i == `PTSZ | valid[i]) begin
-            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex.a, in_ex.b};
+            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex_chosen.a, in_ex_chosen.b};
             else {fwd_a[i], fwd_b[i]} = {a[i], b[i]};
             if (fwd_a[i][64] & late_done == fwd_a[i][`lgCQSZ:0]) fwd_a[i] = late_val;
             if (fwd_b[i][64] & late_done == fwd_b[i][`lgCQSZ:0]) fwd_b[i] = late_val;
         end else {fwd_a[i], fwd_b[i]} = {1'b1, 64'd0, 1'b1, 64'd0};
-    always_ff @(posedge clk) if (rst | flush) out_ex.valid <= 0;
-        else if (ena_ex) begin
-            out_ex <= data_out;
-            {out_ex.a, out_ex.b} <= {fwd_a[{1'b0, out}], fwd_b[{1'b0, out}]};
-            out_ex.valid <= out_ena;
+    always_ff @(posedge clk) out_ex[2:0] <= 0;
+    always_ff @(posedge clk) if (rst | flush) out_ex[3].valid <= 0;
+        else if (ena_ex[3]) begin
+            out_ex[3] <= data_out;
+            {out_ex[3].a, out_ex[3].b} <= {fwd_a[{1'b0, out}], fwd_b[{1'b0, out}]};
+            out_ex[3].valid <= out_ena;
         end
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) valid[i] <= 0;
         else begin
             if (in_ex_fwd.valid & in_ena) valid[in] <= 1;
-            if (out_ena & ena_ex) valid[out] <= 0;
+            if (out_ena & ena_ex[3]) valid[out] <= 0;
         end
     always_ff @(posedge clk) for (int i = 0; i < `PTSZ; i++)
         if (in_ex_fwd.valid & in_ena & i[`lgPTSZ-1:0] == in)
@@ -1105,7 +1181,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
     always_comb pop = ~empty & ~thr & ~|lsqrqst[front];
     always_comb frontp1 = front + 1;
     always_comb rearp1 = rear + 1;
-    always_comb get = ~rqst[`lgCQSZ] | push;
+    always_comb get = (~full | pop) & ~(fwd[`lgCQSZ] & dcache_done[`lgCQSZ]);
     always_comb begin
         th = rqst[`lgCQSZ] & ~wena & ~addr[64] & ~misa;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i][`lgCQSZ])
