@@ -16,9 +16,9 @@ module stats(
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh,
     // stats
-    output logic [63:0] cmtpc[1:0],
-    output logic  [6:0] cmtaddr[1:0],
-    output logic [63:0] cmtdata[1:0],
+    output logic [63:0] cmtpc[3:0],
+    output logic  [6:0] cmtaddr[3:0],
+    output logic [63:0] cmtdata[3:0],
     output logic        cmtcsrena,
     output logic [11:0] cmtcsraddr,
     output logic [63:0] cmtcsrval,
@@ -37,34 +37,28 @@ module stats(
         dcache_done, dcache_rdat, dcache_wdat, dcache_flsh);
 
     // monitor registers change
-    always_comb {cmtpc[0], cmtaddr[0], cmtdata[0]} =
-        pipeline_inst.wb_stage_inst.cqpop[0] &
-            ~pipeline_inst.wb_stage_inst.cqinfo[0].rda[6] ?
-            {pipeline_inst.wb_stage_inst.cqinfo[0].pc,
-             pipeline_inst.wb_stage_inst.cqinfo[0].rda,
-             pipeline_inst.wb_stage_inst.cqdata[0][63:0]} : 0;
-    always_comb {cmtpc[1], cmtaddr[1], cmtdata[1]} =
-        pipeline_inst.wb_stage_inst.cqpop[1] &
-            ~pipeline_inst.wb_stage_inst.cqinfo[1].rda[6] ?
-            {pipeline_inst.wb_stage_inst.cqinfo[1].pc,
-             pipeline_inst.wb_stage_inst.cqinfo[1].rda,
-             pipeline_inst.wb_stage_inst.cqdata[1][63:0]} : 0;
+    always_comb for (int i = 0; i < 4; i++) {cmtpc[i], cmtaddr[i], cmtdata[i]} =
+        pipeline_inst.wb_stage_inst.cqpop[i] &
+            ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6] ?
+            {pipeline_inst.wb_stage_inst.cqinfo[i].pc,
+             pipeline_inst.wb_stage_inst.cqinfo[i].rda,
+             pipeline_inst.wb_stage_inst.cqdata[i][63:0]} : 0;
     always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
         pipeline_inst.csr_inst.addr, pipeline_inst.csr_inst.wres};
 
     // extract architectural registers from instance
-    /*verilator tracing_off*/ logic [63:0] dupregs[1:0][63:0]; /*verilator tracing_on*/
-    for (genvar i = 0; i < 2; i++) for (genvar j = 0; j < 64; j++)
+    /*verilator tracing_off*/ logic [63:0] dupregs[3:0][63:0]; /*verilator tracing_on*/
+    for (genvar i = 0; i < 4; i++) for (genvar j = 0; j < 64; j++)
         assign dupregs[i][j] = pipeline_inst.wb_stage_inst.regs_inst.dupregs[i].regs[j];
     always_comb for (int i = 0; i < 64; i++)
         arregs[i] = dupregs[pipeline_inst.wb_stage_inst.regs_inst.sel[i]][i];
 
     // record occupancy of buffers
     always_comb begin
-        cqocc = {{32-`lgCQSZ{1'b0}}, pipeline_inst.wb_stage_inst.cqrear} +
-            `CQSZ - {{32-`lgCQSZ{1'b0}}, pipeline_inst.wb_stage_inst.cqfront};
-        if (cqocc > `CQSZ | pipeline_inst.wb_stage_inst.cqempty) cqocc -= `CQSZ;
-        lsqocc = {{32-`lgLSQSZ{1'b0}}, pipeline_inst.lsu_inst.rear }+
+        cqocc = {{32-`lgCQSZ{1'b0}}, pipeline_inst.wb_stage_inst.rear[0]} +
+            `CQSZ - {{32-`lgCQSZ{1'b0}}, pipeline_inst.wb_stage_inst.front[0]};
+        if (cqocc > `CQSZ | |pipeline_inst.wb_stage_inst.num) cqocc -= `CQSZ;
+        lsqocc = {{32-`lgLSQSZ{1'b0}}, pipeline_inst.lsu_inst.rear} +
             `LSQSZ - {{32-`lgLSQSZ{1'b0}}, pipeline_inst.lsu_inst.front};
         if (lsqocc > `LSQSZ | pipeline_inst.lsu_inst.empty) lsqocc -= `LSQSZ;
         ptocc = 0;
