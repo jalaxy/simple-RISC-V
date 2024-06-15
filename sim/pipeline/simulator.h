@@ -11,6 +11,7 @@ class simulator
 {
 private:
     std::map<uint64_t, uint8_t> memory, reserved;
+    std::map<uint64_t, int> instfreq;
     uint64_t pc = 0, npc, arregs[64] = {0};
     uint64_t mwaddr, mwdata, csraddr, csrdata;
     uint32_t ir;
@@ -34,5 +35,6 @@ public:
     uint64_t get_csrdata();
     const char *get_asmcode();
     const char *get_csrname(uint64_t addr);
+    const std::map<uint64_t, int> &get_freq();
     std::map<uint64_t, uint8_t> &get_mem();
 };

@@ -26,6 +26,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
 {
     npc = initpc;
     memory = initmem;
+    instfreq.clear();
     csr[0x000] = {"ustatus", 0};
     csr[0x001] = {"fflags", 0};
     csr[0x002] = {"frm", 0};
@@ -1020,6 +1021,11 @@ void simulator::step(int nojump)
     if (excp)
         npc = csr[0x305].val, step();
     arregs[0] = 0;
+
+    // statistics
+    if (instfreq.find(pc) == instfreq.end())
+        instfreq[pc] = 0;
+    instfreq[pc]++;
 }
 
 /**
@@ -1060,5 +1066,6 @@ const char *simulator::get_csrname(uint64_t addr)
         return csr[addr].name;
     return defname;
 }
+const std::map<uint64_t, int> &simulator::get_freq() { return instfreq; }
 uint64_t simulator::get_csraddr() { return csraddr; }
 uint64_t simulator::get_csrdata() { return csrdata; }
