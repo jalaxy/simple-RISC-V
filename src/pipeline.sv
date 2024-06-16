@@ -242,8 +242,8 @@ module pipeline(
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
         .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .raddr(raddr), .rvalue(rvalue), .mtvec(csr_inst.mtvec),
-        .late_done(late_done), .late_val(late_val),
-        .late_npc(late_npc), .late_cause(late_cause),
+        .late_done({late_done, {3*`lgCQSZ+3{1'b0}}}), .late_val({late_val, 195'd0}),
+        .late_npc({late_npc, 195'd0}), .late_cause({late_cause, 21'd0}),
         .nret(nret), .epc(epc), .cause(cause));
     pending_table pending_table_inst(.clk(clk), .rst(rst), .flush(redir),
         .in_ex(data_ex_pt), .get_ex(get_ex_pt),
@@ -436,9 +436,8 @@ module id_stage(input logic clk, input logic rst, input logic redir,
     input  if_id_t [3:0] in_if, output logic [3:0] get_if,
     output id_ex_t [3:0] out_ex, input logic [3:0] ena_ex
 );
-    id_ex_t [3:0] out_reg, res4; logic [2:0] iter4; logic [3:0][1:0] rem4;
-    id_ex_t [3:0][2:0] res;
-    logic [2:0] num, numin, numrem; logic [3:0][2:0] numval;
+    id_ex_t [3:0][2:0] res; id_ex_t [3:0] res4; logic [2:0] iter4;
+    logic [2:0] numin, numout, numrem; logic [3:0][2:0] numval;
     logic [`lgCQSZ-1:0] cqid;
     for (genvar g = 0; g < 4; g++) begin : decoder
         logic [2:0][`EX_END-1:0] exop;
@@ -677,36 +676,28 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             res[g][2].rda = {2'd0, ir[11:7]};
         end
     end
-    always_comb begin numrem = 0; rem4 = 0;
-        for (int i = 0; i < 4; i++) if (out_reg[i].valid & ~ena_ex[i]) begin
-            rem4[numrem] = i[1:0]; numrem++; end end
-    always_comb begin
-        numin = 0; get_if = 0;
+    always_comb begin numrem = 0; numout = 0;
+        for (int i = 0; i < 4; i++) if (out_ex[i].valid)
+            if (ena_ex[i]) numout++; else numrem++; end
+    always_comb begin numin = 0; get_if = 0;
         for (int i = 0; i < 4; i++) if (in_if[i].valid)
             if (numrem + numin + numval[i] <= 4) begin
                 numin = numin + numval[i];
                 get_if[i] = 1;
-            end else break;
-    end
-    always_comb begin
-        res4 = 0; iter4 = 0;
+            end else break; end
+    always_comb begin res4 = 0; iter4 = 0;
         for (int i = 0; i < 4; i++) for (int j = 0; j < 3; j++)
             if (res[i][j].valid & iter4 < 4) begin
-                res4[iter4[1:0]] = res[i][j]; iter4++; end
-    end
-    always_comb out_ex = out_reg;
-    always_ff @(posedge clk) if (rst | redir) num <= 0;
-        else num <= numrem + numin;
+                res4[iter4[1:0]] = res[i][j]; iter4++; end end
     always_ff @(posedge clk) for (int i = 0; i < 4; i++)
-        if (rst | redir) out_reg[i].valid <= 0;
-        else if (i[2:0] < numrem)
-            out_reg[i] <= out_reg[rem4[i]];
+        if (rst | redir) out_ex[i].valid <= 0;
+        else if (i[2:0] < numrem) out_ex[i] <= out_ex[i + 32'(numout)];
         else if (i[2:0] < numrem + numin) begin
-            out_reg[i] <= res4[{29'd0, i[2:0] - numrem}];
-            out_reg[i].cqid <= {1'b1, cqid + {{`lgCQSZ-3{1'b0}}, i[2:0] - numrem}};
-        end else out_reg[i] <= 0;
+            out_ex[i] <= res4[i - 32'(numrem)];
+            out_ex[i].cqid <= {1'b1, cqid + `lgCQSZ'(i) - `lgCQSZ'(numrem)};
+        end else out_ex[i] <= 0;
     always_ff @(posedge clk) if (rst | redir) cqid <= 0;
-        else cqid <= cqid + {{`lgCQSZ-3{1'b0}}, numin};
+        else cqid <= cqid + `lgCQSZ'(numin);
 endmodule
 
 module ex_stage(input logic clk, input logic rst, input logic redir,
@@ -723,11 +714,16 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     output logic [3:0][64:0] pt_npc, input logic [3:0] ena_arb,
     output logic [3:0][`lgCQSZ:0] addr_done, output logic [3:0][63:0] addr_val
 );
-    logic [3:0] get_id_g, get_pt_g;
+    logic [3:0] get_id_g, get_pt_g; ex_wb_t [3:0] out_wb_g;
     logic [`CQSZ-1:0] cqidocc; rqst_t [3:0] rqst_g; id_ex_t [3:0] out_pt_g;
     logic [1:0] mul_i, div_i, fpu_i, lsu_i, pt_i;
+    logic [2:0] numrem, numin, numout;
+    always_comb begin numrem = 0; numout = 0;
+        for (int i = 0; i < 4; i++) if (out_wb[i].valid)
+            if (ena_wb[i]) numout++; else numrem++; end
     always_comb begin
-        get_id = 0; get_pt = 0; mul_i = 0; div_i = 0; fpu_i = 0; lsu_i = 0; pt_i = 0;
+        get_id = 0; get_pt = 0; numin = 0;
+        mul_i = 0; div_i = 0; fpu_i = 0; lsu_i = 0; pt_i = 0;
         mul_rqst = 0; div_rqst = 0; fpu_rqst = 0; lsu_rqst = 0; out_pt = 0;
         for (int i = 0; i < 4; i++) begin
             get_id[i] = get_id_g[i];
@@ -748,7 +744,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
                 if (ena_pt[pt_i] & get_id[i]) begin
                     out_pt[pt_i] = out_pt_g[i]; pt_i++;
                 end else get_id[i] = 0;
-            if (~get_id[i]) break;
+            if (get_id[i]) numin++;
+            if (~get_id[i] | numrem + numin == 4) break;
         end
         for (int i = 3; i < 4; i++) if (get_pt_g[i])
             if (rqst_g[i].mul) begin
@@ -759,6 +756,11 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
                 fpu_rqst[fpu_i] = rqst_g[i].out[`FPULEN-1:0]; fpu_i++; get_pt[i] = 1;
             end else get_pt[i] = 1;
     end
+    always_ff @(posedge clk) for (int i = 0; i < 4; i++)
+        if (rst | redir) out_wb[i].valid <= 0;
+        else if (i[2:0] < numrem) out_wb[i] <= out_wb[i + 32'(numout)];
+        else if (i[2:0] < numrem + numin) out_wb[i] <= out_wb_g[i - 32'(numrem)];
+        else out_wb[i] <= 0;
     for (genvar g = 0; g < 4; g++) begin : execution_unit
         logic frompt, fromid;
         id_ex_t in; logic [1:0][64:0] rval;
@@ -887,29 +889,27 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             else if (frompt & (op[`EX_LOAD] | op[`EX_STORE]))
                 {addr_done[g], addr_val[g]} <= {in.cqid, add[63:0]};
             else addr_done[g] <= 0;
-        always_ff @(posedge clk)
-            if (rst | redir) out_wb[g].valid <= 0;
-            else if (fromid) begin
-                out_wb[g].valid <= 1'b1;
-                out_wb[g].rda <= in.rda;
-                out_wb[g].rd <= res;
-                out_wb[g].mw <= op[`EX_STORE] | op[`EX_CSR];
-                out_wb[g].patupd <= (|in.bmask | in.j) &
-                    (in.pat[1:0] == 2'b01 | in.pat[1:0] == 2'b10);
-                out_wb[g].b <= |in.bmask;
-                out_wb[g].c <= ~in.delta[2];
-                out_wb[g].pc <= in.pc;
-                out_wb[g].pat <= in.pat;
-                out_wb[g].npc <= jump ? jpc : in.pc + {61'd0, in.delta};
-                if (op[`EX_ECALL]) out_wb[g].cause <= {1'b1, 6'd11};
-                else if (op[`EX_EBREAK]) out_wb[g].cause <= {1'b1, 6'd3};
-                else out_wb[g].cause <= 0;
-            end else if (ena_wb[g]) out_wb[g].valid <= 0;
         always_comb if (op[`EX_ECALL] | op[`EX_EBREAK]) jpc = 0;
             else if (frompt & in_pt[g].j) jpc = in.a[63:0] + in.offset; // JALR
             else if (in.base[64]) jpc = rval[0][63:0] + in.offset;
             else jpc = in.base[63:0] + in.offset;
         always_comb jump = in.j | |in.bmask & in.bneg != |(in.bmask & bflag);
+        always_comb begin
+            out_wb_g[g].valid = in_id[g].valid;
+            out_wb_g[g].rda = in.rda;
+            out_wb_g[g].rd = res;
+            out_wb_g[g].mw = op[`EX_STORE] | op[`EX_CSR];
+            out_wb_g[g].patupd = (|in.bmask | in.j) &
+                (in.pat[1:0] == 2'b01 | in.pat[1:0] == 2'b10);
+            out_wb_g[g].b = |in.bmask;
+            out_wb_g[g].c = ~in.delta[2];
+            out_wb_g[g].pc = in.pc;
+            out_wb_g[g].pat = in.pat;
+            out_wb_g[g].npc = jump ? jpc : in.pc + {61'd0, in.delta};
+            if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 6'd11};
+            else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
+            else out_wb_g[g].cause = 0;
+        end
     end
     always_ff @(posedge clk) if (rst | redir) cqidocc <= 0; else begin
         for (int i = 0; i < 4; i++) begin
@@ -930,8 +930,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     input ex_wb_t [3:0] in_ex, output logic [3:0] get_ex,
     output xx_pc_t out_pc, input logic ena_pc,
     input logic [3:0][1:0][6:0] raddr, output logic [3:0][1:0][64:0] rvalue,
-    input logic [`lgCQSZ:0] late_done, input logic [64:0] late_val,
-    input logic [64:0] late_npc, input logic [6:0] late_cause,
+    input logic [3:0][`lgCQSZ:0] late_done, input logic [3:0][64:0] late_val,
+    input logic [3:0][64:0] late_npc, input logic [3:0][6:0] late_cause,
     input logic [63:0] mtvec, output logic [63:0] nret,
     output logic [63:0] epc, output logic [6:0] cause
 );
@@ -955,28 +955,36 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
                      cqdata[1][63:0], cqdata[0][63:0]}),
             .wena({cqpop[3] & |cqinfo[3].rda, cqpop[2] & |cqinfo[2].rda,
                    cqpop[1] & |cqinfo[1].rda, cqpop[0] & |cqinfo[0].rda}));
+    logic [3:0][`lgCQSZ-1:0] cqwaddr;
+    logic [3:0] cqinfowena, cqnpcwena, cqcausewena, cqvalwena;
+    cqinfo_t [3:0] cqinfow; logic [3:0][63:0] cqnpcw;
+    logic [3:0][6:0] cqcausew; logic [3:0][64:0] cqvalw;
+    always_comb for (int i = 0; i < 4; i++) if (late_done[i][`lgCQSZ]) begin
+        cqwaddr[i] = late_done[i][`lgCQSZ-1:0];
+        cqinfowena[i] = 0; cqinfow[i] = 0;
+        cqvalwena[i]  = 1; cqvalw[i]  = late_val[i];
+        cqnpcwena[i]   = late_npc[i][64];  cqnpcw[i]   = late_npc[i][63:0];
+        cqcausewena[i] = late_cause[i][6]; cqcausew[i] = late_cause[i];
+    end else begin
+        cqwaddr[i] = rear[i];
+        cqinfowena[i] = cqpush[i]; cqvalwena[i] = cqpush[i];
+        cqnpcwena[i] = cqpush[i]; cqcausewena[i] = cqpush[i];
+        cqinfow[i] = in_ex[i][`CQLEN-1:0]; cqvalw[i] = in_ex[i].rd;
+        cqnpcw[i] = in_ex[i].npc; cqcausew[i] = in_ex[i].cause;
+    end
     regfile #(.dwidth(`CQLEN), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
-        cqinfo_inst(.clk(clk), .rst(rst),
-            .raddr(front[3:0]), .rvalue(cqinfo), .waddr(rear),
-            .wvalue({in_ex[3][`CQLEN-1:0], in_ex[2][`CQLEN-1:0],
-                     in_ex[1][`CQLEN-1:0], in_ex[0][`CQLEN-1:0]}), .wena(cqpush));
-    regfile #(.dwidth(64), .rports(4), .wports(5), .awidth(`lgCQSZ), .depth(`CQSZ))
+        cqinfo_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqinfo),
+            .waddr(cqwaddr), .wvalue(cqinfow), .wena(cqinfowena));
+    regfile #(.dwidth(64), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqnpc_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqnpc),
-            .waddr({late_done[`lgCQSZ-1:0], rear}),
-            .wvalue({late_npc[63:0], in_ex[3].npc, in_ex[2].npc,
-                                     in_ex[1].npc, in_ex[0].npc}),
-            .wena({late_done[`lgCQSZ] & late_npc[64], cqpush}));
-    regfile #(.dwidth(7), .rports(4), .wports(5), .awidth(`lgCQSZ), .depth(`CQSZ))
+            .waddr(cqwaddr), .wvalue(cqnpcw), .wena(cqnpcwena));
+    regfile #(.dwidth(7), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqcause_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqcause),
-            .waddr({late_done[`lgCQSZ-1:0], rear}),
-            .wvalue({late_cause, in_ex[3].cause, in_ex[2].cause,
-                                 in_ex[1].cause, in_ex[0].cause}),
-            .wena({late_done[`lgCQSZ] & late_cause[6], cqpush}));
-    regfile #(.dwidth(65), .rports(12), .wports(5), .awidth(`lgCQSZ), .depth(`CQSZ))
-        cqval_inst(.clk(clk), .rst(rst), .raddr({front[3:0], cqraddr}),
-            .rvalue({cqdata, cqrvalue}), .wena({late_done[`lgCQSZ], cqpush}),
-            .waddr({late_done[`lgCQSZ-1:0], rear}),
-            .wvalue({late_val, in_ex[3].rd, in_ex[2].rd, in_ex[1].rd, in_ex[0].rd}));
+            .waddr(cqwaddr), .wvalue(cqcausew), .wena(cqcausewena));
+    regfile #(.dwidth(65), .rports(12), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
+        cqval_inst(.clk(clk), .rst(rst),
+            .raddr({front[3:0], cqraddr}), .rvalue({cqdata, cqrvalue}),
+            .waddr(cqwaddr), .wena(cqvalwena), .wvalue(cqvalw));
     always_comb for (int i = 0; i < 4; i++) get_ex[i] = ~in_ex[i].valid | cqpush[i];
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) rear[i] = front[i] + num[`lgCQSZ-1:0];
@@ -996,8 +1004,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
             cqpop_accum = cqpop[i];
             cqpatup_ena &= ~cqpatup[i];
         end end
-    always_comb for (int i = 0; i < 4; i++)
-        cqpush[i] = in_ex[i].valid & num - numout + i[`lgCQSZ:0] < `CQSZ;
+    always_comb for (int i = 0; i < 4; i++) cqpush[i] =
+        in_ex[i].valid & num - numout + i[`lgCQSZ:0] < `CQSZ & ~late_done[i][`lgCQSZ];
     always_comb begin numin = 0; for (int n = 1; n <= 4; n++)
         if (cqpush[n - 1]) numin = n[`lgCQSZ:0]; end
     always_comb begin numout = 0; for (int n = 1; n <= 4; n++)
@@ -1012,8 +1020,9 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         else for (int i = 0; i < 4; i++)
             if (cqpop[i]) {lastvalid, lastinfo} <= {1'b1, cqinfo[i]};
     always_ff @(posedge clk) if (rst) lastnpc <= `RST_PC;
-        else if (|cqexcep) lastnpc <= mtvec;
-        else for (int i = 0; i < 4; i++) if (cqpop[i]) lastnpc <= cqnpc[i];
+        else if (~cqpop[0] & cqexcep[0]) lastnpc <= mtvec;
+        else for (int i = 0; i < 4; i++) if (cqpop[i])
+            lastnpc <= cqexcep[i + 1] ? mtvec : cqnpc[i];
     always_ff @(posedge clk) if (rst | redir) {cqfront, num} <= 0;
         else {cqfront, num} <= {front[numout], num + numin - numout};
     always_ff @(posedge clk)
@@ -1033,8 +1042,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         for (int j = 0; j < 2; j++) begin
             rvalue[i][j] = {1'b0, regsval[i][j]};
             if (regscqid[raddr[i][j]][`lgCQSZ]) rvalue[i][j] = cqrvalue[i][j];
-            if (rvalue[i][j][64] & late_done == rvalue[i][j][`lgCQSZ:0])
-                rvalue[i][j] = late_val;
+            if (rvalue[i][j][64] & late_done[3] == rvalue[i][j][`lgCQSZ:0])
+                rvalue[i][j] = late_val[3];
             for (int k = 0; k < 4; k++)
                 if (in_ex[k].valid & raddr[i][j] == in_ex[k].rda)
                     rvalue[i][j] = in_ex[k].rd;
