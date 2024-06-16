@@ -58,18 +58,36 @@ module stats(
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get, input mul_rqst_t rqst,
+    input logic ena, input mul_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
-`define mullatency 10
+    mul_rqst_t [3:0] buffer[`CQSZ-1:0]; logic in, out;
+    logic [`lgCQSZ-1:0] front; logic [`lgCQSZ:0] num;
+    mul_rqst_t [3:0] cur; logic [2:0] curnum; logic [1:0] curi;
+    always_comb begin
+        in = 0; curnum = 0; curi = 0;
+        for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) in = 1;
+        for (int i = 0; i < 4; i++) if (cur[i].id[`lgCQSZ]) curnum++;
+        for (int i = 3; i >= 0; i--) if (cur[i].id[`lgCQSZ]) curi = 2'(i);
+    end
+    always_comb out = |num & curnum <= 3'(ena);
+    always_ff @(posedge clk) if (rst | flush) front <= 0;
+        else front <= front + `lgCQSZ'(out);
+    always_ff @(posedge clk) if (rst | flush) num <= 0;
+        else num <= num + `lgCQSZ'(in) - `lgCQSZ'(out);
+    always_ff @(posedge clk) if (in) buffer[front + num[`lgCQSZ-1:0]] <= rqst;
+    always_ff @(posedge clk) if (rst | flush) cur <= 0;
+        else if (out) cur <= buffer[front];
+        else if (ena) cur[curi].id <= 0;
+`define mullatency 6
     logic [`mullatency-1:0][63:0] r_q;
-    logic [`mullatency-1:0][`lgCQSZ:0] valid;
+    logic [`mullatency-1:0][`lgCQSZ:0] id;
     logic [127:0] res, aext, bext;
     logic [63:0] rext;
     // op: 0 -> MUL  1 -> MULH  2 -> MULHSU  3 -> MULHU  4 -> MULW
     logic [4:0] op; logic [63:0] a, b;
     always_comb begin
-        op = rqst.op; a = rqst.a; b = rqst.b;
+        op = cur[curi].op; a = cur[curi].a; b = cur[curi].b;
         aext = {128{op[0] | op[1] | op[2] | op[4]}} & {{64{a[63]}}, a} |
                {128{op[3]}} & {64'd0, a};
         bext = {128{op[0] | op[1] | op[4]}} & {{64{b[63]}}, b} |
@@ -79,25 +97,42 @@ module mul(input logic clk, input logic rst, input logic flush,
                {64{op[1] | op[2] | op[3]}} & res[127:64];
     end
     always_ff @(posedge clk)
-        if (rst | flush) valid <= {`lgCQSZ+1{`mullatency'd0}};
-        else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst.id, valid[`mullatency-1:1]};
+        if (rst | flush) id <= {`lgCQSZ+1{`mullatency'd0}};
+        else if (ena | ~id[0][`lgCQSZ]) begin
+            id <= {cur[curi].id, id[`mullatency-1:1]};
             r_q <= {rext, r_q[`mullatency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;
-    always_comb done = valid[0];
-    always_comb get = ena | ~valid[0][`lgCQSZ];
+    always_comb done = id[0];
 endmodule
 
 module div(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get, input div_rqst_t rqst,
+    input logic ena, input div_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
+    div_rqst_t [3:0] buffer[`CQSZ-1:0]; logic in, out;
+    logic [`lgCQSZ-1:0] front; logic [`lgCQSZ:0] num;
+    div_rqst_t [3:0] cur; logic [2:0] curnum; logic [1:0] curi;
+    always_comb begin
+        in = 0; curnum = 0; curi = 0;
+        for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) in = 1;
+        for (int i = 0; i < 4; i++) if (cur[i].id[`lgCQSZ]) curnum++;
+        for (int i = 3; i >= 0; i--) if (cur[i].id[`lgCQSZ]) curi = 2'(i);
+    end
+    always_comb out = |num & curnum <= 3'(ena);
+    always_ff @(posedge clk) if (rst | flush) front <= 0;
+        else front <= front + `lgCQSZ'(out);
+    always_ff @(posedge clk) if (rst | flush) num <= 0;
+        else num <= num + `lgCQSZ'(in) - `lgCQSZ'(out);
+    always_ff @(posedge clk) if (in) buffer[front + num[`lgCQSZ-1:0]] <= rqst;
+    always_ff @(posedge clk) if (rst | flush) cur <= 0;
+        else if (out) cur <= buffer[front];
+        else if (ena) cur[curi].id <= 0;
 
 // should be un-pipelined
 
-`define divlatency 20
+`define divlatency 16
     logic [`divlatency-1:0][63:0] r_q;
     logic [`divlatency-1:0][`lgCQSZ:0] valid;
     logic [63:0] res;
@@ -105,9 +140,9 @@ module div(input logic clk, input logic rst, input logic flush,
     // op: 0 -> DIV   1 -> DIVU   2 -> REM   3 -> REMU
     //     4 -> DIVW  5 -> DIVUW  6 -> REMW  7 -> REMUW
     logic [7:0] op; logic [63:0] a, b;
-    always_comb a = rqst.a;
-    always_comb b = rqst.b;
-    always_comb op = rqst.op;
+    always_comb a = cur[curi].a;
+    always_comb b = cur[curi].b;
+    always_comb op = cur[curi].op;
     always_comb if (a[31:0] == 32'h80000000 & b[31:0] == 32'hffffffff & (op[4] | op[6]))
             res32 = {32{op[4]}} & a[31:0];
         else if (~|b) res32 = {32{op[4] | op[5]}} & -32'd1 |
@@ -129,13 +164,12 @@ module div(input logic clk, input logic rst, input logic flush,
     always_ff @(posedge clk)
         if (rst | flush) valid <= {`lgCQSZ+1{`divlatency'd0}};
         else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst.id, valid[`divlatency-1:1]};
+            valid <= {cur[curi].id, valid[`divlatency-1:1]};
             r_q <= {res, r_q[`divlatency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;
     always_comb done = valid[0];
-    always_comb get = ena | ~valid[0][`lgCQSZ];
 endmodule
 
 function logic [63:0] single2double(input logic [31:0] s);
@@ -159,21 +193,39 @@ function logic [31:0] double2single(input logic [63:0] d, input logic [2:0] rm);
 endfunction
 
 module fpu(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get, input fpu_rqst_t rqst,
+    input logic ena, input fpu_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
-`define fpulatency 10
+    fpu_rqst_t [3:0] buffer[`CQSZ-1:0]; logic in, out;
+    logic [`lgCQSZ-1:0] front; logic [`lgCQSZ:0] num;
+    fpu_rqst_t [3:0] cur; logic [2:0] curnum; logic [1:0] curi;
+    always_comb begin
+        in = 0; curnum = 0; curi = 0;
+        for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) in = 1;
+        for (int i = 0; i < 4; i++) if (cur[i].id[`lgCQSZ]) curnum++;
+        for (int i = 3; i >= 0; i--) if (cur[i].id[`lgCQSZ]) curi = 2'(i);
+    end
+    always_comb out = |num & curnum <= 3'(ena);
+    always_ff @(posedge clk) if (rst | flush) front <= 0;
+        else front <= front + `lgCQSZ'(out);
+    always_ff @(posedge clk) if (rst | flush) num <= 0;
+        else num <= num + `lgCQSZ'(in) - `lgCQSZ'(out);
+    always_ff @(posedge clk) if (in) buffer[front + num[`lgCQSZ-1:0]] <= rqst;
+    always_ff @(posedge clk) if (rst | flush) cur <= 0;
+        else if (out) cur <= buffer[front];
+        else if (ena) cur[curi].id <= 0;
+`define fpulatency 6
     logic [`fpulatency-1:0][63:0] r_q;
     logic [`fpulatency-1:0][`lgCQSZ:0] valid;
     logic [63:0] res, ad, bd;
     logic [9:0] fclass;
     real af, bf;
     logic [20:0] op; logic [63:0] a, b; logic [2:0] rm; logic double;
-    always_comb op = rqst.op;
-    always_comb a = rqst.a;
-    always_comb b = rqst.b;
-    always_comb rm = rqst.rm;
-    always_comb double = rqst.double;
+    always_comb op = cur[curi].op;
+    always_comb a = cur[curi].a;
+    always_comb b = cur[curi].b;
+    always_comb rm = cur[curi].rm;
+    always_comb double = cur[curi].double;
     always_comb begin
         if (double) ad = a; else if (a[63:32] == -32'd1) ad = single2double(a[31:0]);
         else ad = {-32'd1, 32'h7fc00000};
@@ -244,13 +296,12 @@ module fpu(input logic clk, input logic rst, input logic flush,
     always_ff @(posedge clk)
         if (rst | flush) valid <= {`lgCQSZ+1{`fpulatency'd0}};
         else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst.id, valid[`fpulatency-1:1]};
+            valid <= {cur[curi].id, valid[`fpulatency-1:1]};
             r_q <= {res, r_q[`fpulatency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;
     always_comb done = valid[0];
-    always_comb get = ena | ~valid[0][`lgCQSZ];
 endmodule
 
 module regfile #(parameter dwidth = 64,
