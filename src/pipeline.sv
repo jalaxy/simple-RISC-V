@@ -747,7 +747,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             if (get_id[i]) numin++;
             if (~get_id[i] | numrem + numin == 4) break;
         end
-        for (int i = 3; i < 4; i++) if (get_pt_g[i])
+        for (int i = 0; i < 4; i++) if (get_pt_g[i])
             if (rqst_g[i].mul) begin
                 mul_rqst[mul_i] = rqst_g[i].out[`MULLEN-1:0]; mul_i++; get_pt[i] = 1;
             end else if (rqst_g[i].div) begin
@@ -1049,11 +1049,11 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
             rvalue[i][j] = {1'b0, regsval[i][j]};
             if (regscqid[raddr[i][j]][`lgCQSZ]) rvalue[i][j] = cqrvalue[i][j];
             for (int k = 0; k < 4; k++)
-                if (rvalue[i][j][64] & late_done[k] == rvalue[i][j][`lgCQSZ:0])
-                    rvalue[i][j] = late_val[k];
-            for (int k = 0; k < 4; k++)
                 if (in_ex[k].valid & raddr[i][j] == in_ex[k].rda)
                     rvalue[i][j] = in_ex[k].rd;
+            for (int k = 0; k < 4; k++)
+                if (rvalue[i][j][64] & late_done[k] == rvalue[i][j][`lgCQSZ:0])
+                    rvalue[i][j] = late_val[k];
             if (raddr[i][j] == 0) rvalue[i][j] = 0;
         end
     always_comb begin {out_pc, outinfo, outnpc} = 0;
@@ -1077,58 +1077,60 @@ module pending_table(input logic clk, input logic rst, input logic flush,
     output id_ex_t [3:0] out_ex, input logic [3:0] ena_ex,
     input logic [3:0][`lgCQSZ:0] late_done, input logic [3:0][64:0] late_val
 );
-    logic [`lgPTSZ-1:0] in, out, out_r;
-    logic in_ena, out_ena;
-    logic [`PTSZ-1:0] valid, mask;
-    logic [64:0] a[`PTSZ-1:0], b[`PTSZ-1:0], fwd_a[`PTSZ:0], fwd_b[`PTSZ:0];
-    id_ex_t in_ex_fwd, data_out;
-    always_comb get_ex = {3'd0, in_ena};
-    regfile #(.dwidth(`PTLEN), .rports(1), .wports(1), .awidth(`lgPTSZ), .depth(`PTSZ))
-        data_inst(.clk(clk), .rst(rst), .raddr(out), .rvalue(data_out),
-            .waddr(in), .wvalue(in_ex_fwd), .wena(~flush & in_ex_fwd.valid & in_ena));
-    always_comb begin
-        {in_ena, out_ena, in, out} = 0;
-        for (int i = `PTSZ-1; i >= 0; i--)
-            if (mask[i] & ~fwd_a[i][64] & ~fwd_b[i][64])
-                {out_ena, out} = {1'b1, i[`lgPTSZ-1:0]};
-        for (int i = `PTSZ-1; i >= 0; i--)
-            if (~valid[i]) {in_ena, in} = {1'b1, i[`lgPTSZ-1:0]};
-        in_ex_fwd = in_ex[0];
-        {in_ex_fwd.a, in_ex_fwd.b} = {fwd_a[`PTSZ], fwd_b[`PTSZ]};
-    end
-    always_comb for (int i = 0; i <= `PTSZ; i++)
-        if (i == `PTSZ | valid[i]) begin
-            if (i == `PTSZ) {fwd_a[i], fwd_b[i]} = {in_ex[0].a, in_ex[0].b};
-            else {fwd_a[i], fwd_b[i]} = {a[i], b[i]};
-            for (int j = 0; j < 4; j++)
-                if (fwd_a[i][64] & late_done[j] == fwd_a[i][`lgCQSZ:0])
-                    fwd_a[i] = late_val[j];
-            for (int j = 0; j < 4; j++)
-                if (fwd_b[i][64] & late_done[j] == fwd_b[i][`lgCQSZ:0])
-                    fwd_b[i] = late_val[j];
-        end else {fwd_a[i], fwd_b[i]} = {1'b1, 64'd0, 1'b1, 64'd0};
-    always_ff @(posedge clk) begin
-        if (rst | flush | ~out_ena | ena_ex[3]) mask <= -1;
-        if (out_ena) mask[out] <= 0; // to avoid deadlock
-    end
-    always_ff @(posedge clk) out_ex[2:0] <= 0;
-    always_ff @(posedge clk) if (rst | flush) out_ex[3].valid <= 0;
-        else begin
-            out_r <= out;
-            out_ex[3] <= data_out;
-            {out_ex[3].a, out_ex[3].b} <= {fwd_a[{1'b0, out}], fwd_b[{1'b0, out}]};
-            out_ex[3].valid <= out_ena;
-        end
+    logic [`PTSZ-1:0] valid, valid_fwd;
+    logic [`PTSZ-1:0][64:0] a, b, a_fwd, b_fwd;
+    logic [3:0] in_ena, out_ena; logic [3:0][`lgPTSZ-1:0] in_idx, out_idx;
+    id_ex_t [3:0] in_dat, out_dat; logic [2:0] i0, i1, i2;
+    regfile #(.dwidth(`PTLEN), .rports(4), .wports(4), .awidth(`lgPTSZ), .depth(`PTSZ))
+        data_inst(.clk(clk), .rst(rst), .raddr(out_idx), .rvalue(out_dat),
+            .waddr(in_idx), .wvalue(in_dat), .wena(in_ena));
+    always_comb begin out_ena = 0; out_idx = 0; i0 = 0; valid_fwd = valid;
+        for (int i = 0; i < `PTSZ; i++) if (valid[i] & ~a_fwd[i][64] & ~b_fwd[i][64])
+            if (i0 < 4 & (ena_ex[i0[1:0]] | ~out_ex[i0[1:0]].valid)) begin
+                out_ena[i0[1:0]] = 1; out_idx[i0[1:0]] = i[`lgPTSZ-1:0];
+                valid_fwd[i] = 0; i0++;
+            end end
+    always_comb begin in_ena = 0; in_idx = 0; i1 = 0;
+        for (int i = 0; i < `PTSZ; i++) if (~valid[i])
+            if (i1 < 4 & in_ex[i1[1:0]].valid) begin
+                in_ena[i1[1:0]] = 1; in_idx[i1[1:0]] = i[`lgPTSZ-1:0]; i1++; end end
+    always_comb begin get_ex = 0; i2 = 0;
+        for (int i = 0; i < `PTSZ; i++) if (~valid[i])
+            if (i2 < 4) begin get_ex[i2[1:0]] = 1; i2++; end end
+    always_comb in_dat = in_ex;
+    always_comb for (int i = 0; i < `PTSZ; i++) begin a_fwd[i] = a[i]; b_fwd[i] = b[i];
+        for (int j = 0; j < 4; j++) begin
+            if (a_fwd[i][64] & late_done[j] == a_fwd[i][`lgCQSZ:0])
+                a_fwd[i] = late_val[j];
+            if (b_fwd[i][64] & late_done[j] == b_fwd[i][`lgCQSZ:0])
+                b_fwd[i] = late_val[j];
+        end end
+    always_ff @(posedge clk) for (int i = 0; i < 4; i++)
+        if (rst | flush) out_ex[i].valid <= 0;
+        else if (out_ena[i]) begin
+            out_ex[i] <= out_dat[i];
+            out_ex[i].a <= a_fwd[out_idx[i]];
+            out_ex[i].b <= b_fwd[out_idx[i]];
+        end else if (ena_ex[i]) out_ex[i].valid <= 0;
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) valid[i] <= 0;
         else begin
-            if (in_ex_fwd.valid & in_ena) valid[in] <= 1;
-            if (out_ex[3].valid & ena_ex[3]) valid[out_r] <= 0;
+            for (int i = 0; i < 4; i++) if (out_ena[i]) valid[out_idx[i]] <= 0;
+            for (int i = 0; i < 4; i++) if (in_ena[i]) valid[in_idx[i]] <= 1;
         end
-    always_ff @(posedge clk) for (int i = 0; i < `PTSZ; i++)
-        if (in_ex_fwd.valid & in_ena & i[`lgPTSZ-1:0] == in)
-            {a[i], b[i]} <= {in_ex_fwd.a, in_ex_fwd.b};
-        else {a[i], b[i]} <= {fwd_a[i], fwd_b[i]};
+    always_ff @(posedge clk) begin
+        a <= a_fwd; b <= b_fwd;
+        for (int i = 0; i < 4; i++) if (in_ena[i]) begin
+            a[in_idx[i]] <= in_ex[i].a;
+            b[in_idx[i]] <= in_ex[i].b;
+            for (int j = 0; j < 4; j++)
+                if (in_ex[i].a[64] & late_done[j] == in_ex[i].a[`lgCQSZ:0])
+                    a[in_idx[i]] <= late_val[j];
+            for (int j = 0; j < 4; j++)
+                if (in_ex[i].a[64] & late_done[j] == in_ex[i].a[`lgCQSZ:0])
+                    a[in_idx[i]] <= late_val[j];
+        end
+    end
 endmodule
 
 module lsu(input logic clk, input logic rst, input logic flush, input logic cmt,
@@ -1171,7 +1173,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic cmt,
         th = rqst[0].id[`lgCQSZ] & ~rqst[0].wena & ~rqst[0].addr[64] & ~misa;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ])
             if (lsqrqst[i].addr[64] | lsqmisa[i] |
-                rqst[0].addr[63:3] == lsqrqst[i].addr[63:3])
+                rqst[0].addr[63:3] == lsqrqst[i].addr[63:3] & lsqrqst[i].wena)
                 th = 0;
         for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ] & lsqraq[i]) th = 0;
         if (rqst[0].aqrl[0] | rqst[0].csr) th = 0;
