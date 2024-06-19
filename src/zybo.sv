@@ -1,5 +1,3 @@
-`define CQSZ 16
-`define lgCQSZ 4
 module wrapper(input logic clk, input logic rst, output logic [3:0] pos);
     logic [63:0][7:0] imem;
     logic imem_rqst, imem_done;
@@ -41,51 +39,59 @@ module wrapper(input logic clk, input logic rst, output logic [3:0] pos);
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic [`lgCQSZ:0] rqst, input logic [4:0] op,
-    input logic [63:0] a, input logic [63:0] b,
+    input logic ena, input mul_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
+    mul_rqst_t [3:0] buffer[`CQSZ-1:0]; logic in, out;
+    logic [`lgCQSZ-1:0] front; logic [`lgCQSZ:0] num;
+    mul_rqst_t [3:0] cur; logic [2:0] curnum; logic [1:0] curi;
+    always_comb begin
+        in = 0; curnum = 0; curi = 0;
+        for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) in = 1;
+        for (int i = 0; i < 4; i++) if (cur[i].id[`lgCQSZ]) curnum++;
+        for (int i = 3; i >= 0; i--) if (cur[i].id[`lgCQSZ]) curi = 2'(i);
+    end
+    always_comb out = |num & curnum <= 3'(ena);
+    always_ff @(posedge clk) if (rst | flush) front <= 0;
+        else front <= front + `lgCQSZ'(out);
+    always_ff @(posedge clk) if (rst | flush) num <= 0;
+        else num <= num + `lgCQSZ'(in) - `lgCQSZ'(out);
+    always_ff @(posedge clk) if (in) buffer[front + num[`lgCQSZ-1:0]] <= rqst;
+    always_ff @(posedge clk) if (rst | flush) cur <= 0;
+        else if (out) cur <= buffer[front];
+        else if (ena) cur[curi].id <= 0;
 `define latency 10
     logic [`latency-1:0][63:0] r_q;
-    logic [`latency-1:0][`lgCQSZ:0] valid;
+    logic [`latency-1:0][`lgCQSZ:0] id;
     logic [127:0] res;
-    always_comb res = {64'd0, a} * {64'd0, b};
+    always_comb res = {64'd0, cur[curi].a} * {64'd0, cur[curi].b};
     always_ff @(posedge clk)
-        if (rst | flush) valid <= {`lgCQSZ+1{`latency'd0}};
-        else if (ena | ~valid[0][`lgCQSZ]) begin
-            valid <= {rqst, valid[`latency-1:1]};
+        if (rst | flush) id <= {`lgCQSZ+1{`latency'd0}};
+        else if (ena | ~id[0][`lgCQSZ]) begin
+            id <= {cur[curi].id, id[`latency-1:1]};
             r_q <= {res[63:0], r_q[`latency-1:1]};
         end
     always_comb r = {1'b0, r_q[0]};
     always_comb e = 0;
-    always_comb done = valid[0];
-    always_comb get = ena | ~valid[0][`lgCQSZ];
+    always_comb done = id[0];
 endmodule
 
 module div(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic [`lgCQSZ:0] rqst, input logic [7:0] op,
-    input logic [63:0] a, input logic [63:0] b,
+    input logic ena, input div_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
-    always_ff @(posedge clk) r <= {1'b0, a | b};
+    always_ff @(posedge clk) r <= {1'b0, rqst[0].a | rqst[0].b};
     always_ff @(posedge clk) done <= rqst;
     always_comb e = 0;
-    always_comb get = ena;
 endmodule
 
 module fpu(input logic clk, input logic rst, input logic flush,
-    input logic ena, output logic get,
-    input logic [`lgCQSZ:0] rqst, input logic [20:0] op,
-    input logic [63:0] a, input logic [63:0] b,
-    input logic [2:0] rm, input logic double,
+    input logic ena, input fpu_rqst_t [3:0] rqst,
     output logic [`lgCQSZ:0] done, output logic [64:0] r, output logic e
 );
-    always_ff @(posedge clk) r <= {1'b0, a | b};
+    always_ff @(posedge clk) r <= {1'b0, rqst[0].a | rqst[0].b};
     always_ff @(posedge clk) done <= rqst;
     always_comb e = 0;
-    always_comb get = ena;
 endmodule
 
 module regfile #(parameter dwidth = 64,
