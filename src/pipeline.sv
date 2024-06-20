@@ -1151,113 +1151,150 @@ module lsu(input logic clk, input logic rst, input logic flush,
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh
 );
-    lsu_rqst_t [`LSQSZ-1:0] lsqrqst;
-    logic [`LSQSZ-1:0] lsqsent, lsqmisa, lsqfwd, lsqraq;
-    logic [`lgLSQSZ-1:0] front, rear, frontp1, rearp1;
-    logic full, empty, push, pop, th, thr, ready, misa;
-    logic [`lgCQSZ:0] fwd; logic [64:0] fwddata, fwdval; logic [2:0] fwdbits;
-    logic [`lgCQSZ:0] thrrqst; logic [1:0] thrrsrv; logic thrwena;
-    logic [64:0] thraddr; logic [2:0] thrbits;
-    always_comb case (rqst[0].bits[1:0])
-        0: misa = 0;               1: misa = rqst[0].addr[0];
-        2: misa = |rqst[0].addr[1:0]; 3: misa = |rqst[0].addr[2:0];
-    endcase
-    always_comb ready = ~empty & ~lsqsent[front] & ~lsqrqst[front].addr[64] &
-        (~lsqrqst[front].wena | ~lsqrqst[front].wdat[64] & lsqrqst[front].id == mwcqid);
-    always_comb push = rqst[0].id[`lgCQSZ] & (~full | pop) &
-        ~(fwd[`lgCQSZ] & dcache_done[`lgCQSZ]);
-    always_comb pop = ~empty & ~thr & (~|lsqrqst[front].id | done == lsqrqst[front].id);
-    always_comb frontp1 = front + 1;
-    always_comb rearp1 = rear + 1;
-    always_comb get = {3'd0, (~full | pop) & ~(fwd[`lgCQSZ] & dcache_done[`lgCQSZ])};
+    lsu_rqst_t [`LSQSZ-1:0] lsqrqst; lsu_rqst_t [`LSQSZ+3:0] lsq;
+    logic [`LSQSZ-1:0] lsqsent, lsqmisa; logic [`LSQSZ+3:0] lsqmi;
+    logic [`lgLSQSZ-1:0] lsqfront; logic [`lgLSQSZ:0] num, numout, numin;
+    logic [`LSQSZ-1:0][`lgLSQSZ-1:0] front; logic [`lgLSQSZ-1:0] rear;
+    logic [3:0] through, fwd, misa; logic [3:0][63:0] fwddata;
+    logic fromlsq, fromth, fromdc, fromfwd, fromcsr;
     always_comb begin
-        th = rqst[0].id[`lgCQSZ] & ~rqst[0].wena & ~rqst[0].addr[64] & ~misa;
-        for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ])
-            if (lsqrqst[i].addr[64] | lsqmisa[i] |
-                rqst[0].addr[63:3] == lsqrqst[i].addr[63:3] & lsqrqst[i].wena)
-                th = 0;
-        for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ] & lsqraq[i]) th = 0;
-        if (rqst[0].aqrl[0] | rqst[0].csr) th = 0;
+        for (int i = 0; i < `LSQSZ; i++) lsq[i] = lsqrqst[front[i]];
+        for (int i = 0; i < `LSQSZ; i++) lsqmi[i] = lsqmisa[front[i]];
+        for (int i = 0; i < 4; i++) lsq[`LSQSZ + i] = rqst[i];
+        for (int i = 0; i < 4; i++) lsqmi[`LSQSZ + i] = misa[i];
     end
-    always_comb case (fwdbits[1:0])
-        0: fwdval = {1'b0, {56{fwddata[7] & ~fwdbits[2]}}, fwddata[7:0]};
-        1: fwdval = {1'b0, {48{fwddata[15] & ~fwdbits[2]}}, fwddata[15:0]};
-        2: fwdval = {1'b0, {32{fwddata[31] & ~fwdbits[2]}}, fwddata[31:0]};
-        3: fwdval = fwddata;
-    endcase
-    always_ff @(posedge clk) if (rst | flush) {fwd, thr} <= 0;
-        else if (push) begin
-            {fwd, fwddata} <= 0; thr <= th;
-            if (rqst[0].id[`lgCQSZ] & ~rqst[0].wena & ~|rqst[0].rsrv)
-                for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ])
-                    if (~lsqrqst[i].addr[64] & ~lsqrqst[i].wdat[64] &
-                        lsqfwd[i] & lsqrqst[i].wena & ~|lsqrqst[i].rsrv &
-                        rqst[0].addr[63:0] == lsqrqst[i].addr[63:0] &
-                        rqst[0].bits[1:0] == lsqrqst[i].bits[1:0])
-                        {fwd, fwdbits, fwddata} <=
-                            {rqst[0].id, rqst[0].bits, lsqrqst[i].wdat};
-            for (int i = 0; i < `LSQSZ; i++)
-                if (lsqrqst[i].id[`lgCQSZ] & (lsqraq[i] | lsqmisa[i])) fwd <= 0;
-            if (rqst[0].aqrl[0] | rqst[0].csr) fwd <= 0;
-        end else if (~dcache_done[`lgCQSZ]) {fwd, thr} <= 0; else thr <= 0;
-    always_ff @(posedge clk) if (rst | flush) begin
-            {front, rear, full, empty} <= 1;
-            for (int i = 0; i< `LSQSZ; i++) lsqrqst[i].id <= 0;
+    always_comb for (int i = 0; i < 4; i++)
+        case (rqst[i].bits[1:0])
+            0: misa[i] = 0;                  1: misa[i] = rqst[0].addr[0];
+            2: misa[i] = |rqst[0].addr[1:0]; 3: misa[i] = |rqst[0].addr[2:0];
+        endcase
+    always_comb for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) begin
+        through[i] = ~rqst[i].wena & ~rqst[i].addr[64] & ~misa[i];
+        for (int j = 0; j < `LSQSZ + i; j++) if (lsq[j].id[`lgCQSZ])
+            if (lsq[j].addr[64] | lsqmi[j] | lsq[j].aqrl[1] |
+                lsq[j].wena & rqst[i].addr[63:3] == lsq[j].addr[63:3])
+                through[i] = 0;
+        if (rqst[i].aqrl[0] | rqst[i].csr) through[i] = 0;
+        fwd[i] = 0; fwddata[i] = 0;
+        for (int j = 0; j < `LSQSZ + i; j++)
+            if (lsq[j].id[`lgCQSZ] & lsq[j].wena)
+                if (lsq[j].addr[64] | lsqmi[j]) fwd[i] = 0;
+                else if (lsq[j].addr      == rqst[i].addr &
+                         lsq[j].bits[1:0] == rqst[i].bits[1:0]) begin
+                    fwd[i] = ~lsq[j].wdat[64] & ~lsq[j].rsrv[0];
+                    fwddata[i] = lsq[j].wdat[63:0];
+                    case (rqst[i].bits[1:0])
+                        0: fwddata[i] =
+                            {{56{fwddata[i][7] & ~rqst[i].bits[2]}}, fwddata[i][7:0]};
+                        1: fwddata[i] =
+                            {{48{fwddata[i][15] & ~rqst[i].bits[2]}}, fwddata[i][15:0]};
+                        2: fwddata[i] =
+                            {{32{fwddata[i][31] & ~rqst[i].bits[2]}}, fwddata[i][31:0]};
+                        3: fwddata[i] = fwddata[i];
+                    endcase
+                end else if (lsq[j].addr[63:3] == rqst[i].addr[63:3] &
+                             lsq[j].bits[1:0]  != rqst[i].bits[1:0])
+                    fwd[i] = 0;
+        for (int j = 0; j < `LSQSZ; j++)
+            if (lsq[j].id[`lgCQSZ] & lsq[j].aqrl[1]) fwd[i] = 0;
+        if (rqst[i].wena | |rqst[i].rsrv | misa[i]) fwd[i] = 0;
+        if (rqst[i].aqrl[0] | rqst[i].csr) fwd[i] = 0;
+    end else {through[i], fwd[i], fwddata[i]} = 0;
+    always_comb numout = (~lsqrqst[front[0]].id[`lgCQSZ] |
+                           lsqrqst[front[0]].id == done) & |num ? 1 : 0;
+    always_comb begin get = 0; for (int i = 0; i < 4; i++)
+        if (num - numout + i[`lgLSQSZ:0] < `LSQSZ) get[i] = 1; end
+    always_comb begin numin = 0; for (int i = 1; i <= 4; i++)
+        if (rqst[i - 1].id[`lgCQSZ] & get[i - 1]) numin = i[`lgLSQSZ:0]; end
+    always_comb for (int i = 0; i < `LSQSZ; i++) front[i] = lsqfront + i[`lgLSQSZ-1:0];
+    always_comb rear = front[num[`lgLSQSZ-1:0]];
+    always_ff @(posedge clk) if (rst | flush) {lsqfront, num} <= 0;
+        else {lsqfront, num} <= {front[numout], num - numout + numin};
+    always_ff @(posedge clk) for (int i = 0; i < `LSQSZ; i++)
+        if (rst | flush) lsqrqst[i].id <= 0;
+        else if ({1'b0, i[`lgLSQSZ-1:0] - rear} < numin) begin
+            lsqrqst[i] <= rqst[2'(i - 32'(rear))];
+            lsqmisa[i] <= misa[2'(i - 32'(rear))];
+            lsqsent[i] <= through[2'(i - 32'(rear))] | fwd[2'(i - 32'(rear))];
+            for (int j = 0; j < 4; j++)
+                if (rqst[2'(i - 32'(rear))].addr[64] &
+                    rqst[2'(i - 32'(rear))].addr[`lgCQSZ:0] == addr_done[j])
+                    lsqrqst[i].addr <= 65'(addr_val[j]);
+            for (int j = 0; j < 4; j++)
+                if (rqst[2'(i - 32'(rear))].wdat[64] &
+                    rqst[2'(i - 32'(rear))].wdat[`lgCQSZ:0] == late_done[j])
+                    lsqrqst[i].wdat <= late_val[j];
         end else begin
-            if (pop & ~push & frontp1 == rear) empty <= 1;
-            if (push & ~pop & rearp1 == front) full <= 1;
-            if (push) empty <= 0;
-            if (pop & ~push) full <= 0;
-            if (pop) begin lsqrqst[front].id <= 0; front <= frontp1; end
-            if (~thr & ready) lsqsent[front] <= 1;
-            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ]) begin
-                if (push & (rqst[0].addr[64] |
-                    rqst[0].addr[64:3] == lsqrqst[i].addr[64:3]))
-                    lsqfwd[i] <= 0;
-                if (done == lsqrqst[i].id) lsqrqst[i].id <= 0;
-                for (int j = 0; j < 4; j++)
-                    if (addr_done[j] == lsqrqst[i].addr[`lgCQSZ:0] &
-                        lsqrqst[i].addr[64]) lsqrqst[i].addr <= 65'(addr_val[j]);
-                for (int j = 0; j < 4; j++)
-                    if (late_done[j] == lsqrqst[i].wdat[`lgCQSZ:0] &
-                        lsqrqst[i].wdat[64]) lsqrqst[i].wdat <= late_val[j];
-            end
-            for (int i = 0; i < `LSQSZ; i++) if (lsqrqst[i].id[`lgCQSZ])
-                if (lsqrqst[i].wena &  rqst[0].fence[1] & rqst[0].fence[4] |
-                    ~lsqrqst[i].wena & (rqst[0].fence[1] & rqst[0].fence[5] |
-                    rqst[0].fence[11])) lsqraq[i] <= 1;
-            if (push) begin
-                rear <= rearp1;
-                lsqrqst[rear] <= rqst[0];
-                lsqsent[rear] <= th; lsqmisa[rear] <= misa;
-                lsqfwd[rear] <= ~rqst[0].addr[64]; lsqraq[rear] <= rqst[0].aqrl[1];
-                thrrqst <= rqst[0].id; thrrsrv <= rqst[0].rsrv; thrwena <= rqst[0].wena;
-                thraddr <= rqst[0].addr; thrbits <= rqst[0].bits;
-                for (int i = 0; i < 4; i++)
-                    if (rqst[0].addr[64] & addr_done[i] == rqst[0].addr[`lgCQSZ:0])
-                        lsqrqst[rear].addr <= {1'b0, addr_val[i]};
-                for (int i = 0; i < 4; i++)
-                    if (rqst[0].wdat[64] & late_done[i] == rqst[0].wdat[`lgCQSZ:0])
-                        lsqrqst[rear].wdat <= late_val[i];
-            end
+            for (int j = 0; j < 4; j++)
+                if (lsqrqst[i].addr[64] &lsqrqst[i].addr[`lgCQSZ:0] == addr_done[j])
+                    lsqrqst[i].addr <= 65'(addr_val[j]);
+            for (int j = 0; j < 4; j++)
+                if (lsqrqst[i].wdat[64] & lsqrqst[i].wdat[`lgCQSZ:0] == late_done[j])
+                    lsqrqst[i].wdat <= late_val[j];
+            if ( lsqrqst[i].wena &  rqst[0].fence[1] & rqst[0].fence[4] |
+                ~lsqrqst[i].wena & (rqst[0].fence[1] & rqst[0].fence[5] |
+                                    rqst[0].fence[11]))
+                lsqrqst[i].aqrl[1] <= 1;
+            if (i == 32'(front[0]) & fromlsq) lsqsent[i] <= 1;
+            if (lsqrqst[i].id == done) lsqrqst[i].id <= 0;
         end
-    always_comb dcache_rqst = thr ? thrrqst :
-        (ready & lsqrqst[front].id != fwd & ~lsqrqst[front].csr ? lsqrqst[front].id : 0);
-    always_comb dcache_rsrv = thr ? thrrsrv : lsqrqst[front].rsrv;
-    always_comb dcache_wena = thr ? thrwena : lsqrqst[front].wena;
-    always_comb dcache_addr = thr ? thraddr[63:0] : lsqrqst[front].addr[63:0];
-    always_comb dcache_bits = thr ? thrbits : lsqrqst[front].bits;
-    always_comb done = dcache_done[`lgCQSZ] ? dcache_done : (
-        fwd[`lgCQSZ] ? fwd : (ready & lsqrqst[front].csr ? lsqrqst[front].id : 0));
-    always_comb rdata = dcache_done[`lgCQSZ] ? {1'b0, dcache_rdat} : (
-        fwd[`lgCQSZ] ? fwdval : {1'b0, csr_rval});
-    always_comb excp = csr_excp | 0;
-    always_comb dcache_wdat = lsqrqst[front].wdat[63:0];
+    logic [`lgLSQSZ-1:0] thfront, fwdfront; logic [3:0][`lgLSQSZ-1:0] threar, fwdrear;
+    logic [`lgLSQSZ:0] thnum, fwdnum;
+    lsu_rqst_t thrqst, dcrqst; logic [`lgCQSZ:0] fwdid; logic [63:0] fwdval;
+    lsu_rqst_t [3:0] thw; logic [3:0][`lgCQSZ+64:0] fwdw;
+    logic [3:0] thwena, fwdwena; logic [2:0] thiter, fwditer;
+    always_comb begin thw = 0; thwena = 0; thiter = 0;
+        for (int i = 0; i < 4; i++) if (i[`lgLSQSZ:0] < numin & through[i]) begin
+            thw[thiter[1:0]] = rqst[i]; thwena[thiter[1:0]] = 1; thiter++; end end
+    always_comb begin fwdw = 0; fwdwena = 0; fwditer = 0;
+        for (int i = 0; i < 4; i++) if (i[`lgLSQSZ:0] < numin & fwd[i]) begin
+            fwdw[fwditer[1:0]] = {rqst[i].id, fwddata[i]};
+            fwdwena[fwditer[1:0]] = 1; fwditer++;
+        end end
+    always_comb for (int i = 0; i < 4; i++)
+        threar[i] = thfront + `lgLSQSZ'(thnum) + `lgLSQSZ'(i);
+    always_comb for (int i = 0; i < 4; i++)
+        fwdrear[i] = fwdfront + `lgLSQSZ'(fwdnum) + `lgLSQSZ'(i);
+    always_ff @(posedge clk) if (rst | flush) thfront <= 0;
+        else if (fromth) thfront <= thfront + `lgLSQSZ'(1);
+    always_ff @(posedge clk) if (rst | flush) fwdfront <= 0;
+        else if (fromfwd) fwdfront <= fwdfront + `lgLSQSZ'(1);
+    always_ff @(posedge clk) if (rst | flush) thnum <= 0;
+        else thnum <= thnum + (`lgLSQSZ+1)'(thiter) - (`lgLSQSZ+1)'(fromth);
+    always_ff @(posedge clk) if (rst | flush) fwdnum <= 0;
+        else fwdnum <= fwdnum + (`lgLSQSZ+1)'(fwditer) - (`lgLSQSZ+1)'(fromfwd);
+    regfile #(.dwidth(`LSULEN), .rports(1), .wports(4),
+              .awidth(`lgLSQSZ), .depth(`LSQSZ))
+        thbuf_inst(.clk(clk), .rst(rst), .raddr(thfront), .rvalue(thrqst),
+            .waddr(threar), .wvalue(thw), .wena(thwena));
+    regfile #(.dwidth(`lgCQSZ+65), .rports(1), .wports(4),
+              .awidth(`lgLSQSZ), .depth(`LSQSZ))
+        fwdbuf_inst(.clk(clk), .rst(rst), .raddr(fwdfront), .rvalue({fwdid, fwdval}),
+            .waddr(fwdrear), .wvalue(fwdw), .wena(fwdwena));
+    always_comb fromth = |thnum;
+    always_comb fromlsq = ~fromth & lsq[0].id[`lgCQSZ] & ~lsqsent[front[0]] &
+        ~lsq[0].addr[64] & (~lsq[0].wena | ~lsq[0].wdat[64] & lsq[0].id == mwcqid);
+    always_comb fromdc = dcache_done[`lgCQSZ];
+    always_comb fromfwd = ~fromdc & |fwdnum;
+    always_comb fromcsr = ~fromdc & ~fromfwd & lsqrqst[front[0]].id[`lgCQSZ] &
+        lsqrqst[front[0]].csr & lsqrqst[front[0]].id == mwcqid;
+    always_comb dcrqst = fromth ? thrqst : (fromlsq ? lsq[0] : 0);
+    always_comb dcache_rqst = dcrqst.csr ? 0 : dcrqst.id;
+    always_comb dcache_rsrv = dcrqst.rsrv;
+    always_comb dcache_wena = dcrqst.wena;
+    always_comb dcache_bits = dcrqst.bits;
+    always_comb dcache_addr = dcrqst.addr[63:0];
+    always_comb dcache_wdat = dcrqst.wdat[63:0];
     always_comb dcache_flsh = flush;
-    always_comb csr_addr = lsqrqst[front].addr[11:0];
-    always_comb csr_wena = ready & lsqrqst[front].csr;
-    always_comb csr_func = lsqrqst[front].bits;
-    always_comb csr_wval = lsqrqst[front].wdat[63:0];
+    always_comb csr_addr = lsqrqst[front[0]].addr[11:0];
+    always_comb csr_wena = fromcsr;
+    always_comb csr_func = lsqrqst[front[0]].bits;
+    always_comb csr_wval = lsqrqst[front[0]].wdat[63:0];
+    always_comb if (fromdc)  {done, rdata} = {dcache_done, 1'b0, dcache_rdat};
+        else    if (fromfwd) {done, rdata} = {fwdid,       1'b0, fwdval};
+        else    if (fromcsr) {done, rdata} = {lsqrqst[front[0]].id, 1'b0, csr_rval};
+        else                 {done, rdata} = 0;
+    always_comb excp = csr_excp | 0;
 endmodule
 
 module arbiter(
