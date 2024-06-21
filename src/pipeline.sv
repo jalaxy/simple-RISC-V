@@ -1021,7 +1021,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         if (cqexcep[i]) {cause, epc} = {cqcause[i], cqinfo[i].pc}; end
     always_comb begin nret = 0; for (int i = 0; i < 4; i++)
         if (cqpop[i] & ~cqinfo[i].rda[6]) nret++; end
-    always_comb mwcqid = {`lgCQSZ+1{cqvalid[0] & cqinfo[0].mw}} & {1'b1, front[0]};
+    always_comb if (cqvalid[0] & cqinfo[0].mw & ~redir) mwcqid = {1'b1, front[0]};
+        else mwcqid = 0;
     always_ff @(posedge clk) if (redir) lastvalid <= 0;
         else for (int i = 0; i < 4; i++)
             if (cqpop[i]) {lastvalid, lastinfo} <= {1'b1, cqinfo[i]};
@@ -1107,10 +1108,10 @@ module pending_table(input logic clk, input logic rst, input logic flush,
         end end
     always_ff @(posedge clk) for (int i = 0; i < 4; i++)
         if (rst | flush) out_ex[i].valid <= 0;
-        else if (out_ena[i]) begin
-            out_ex[i] <= out_dat[i];
-            out_ex[i].a <= a_fwd[out_idx[i]];
-            out_ex[i].b <= b_fwd[out_idx[i]];
+        else if (out_ena[3 - i]) begin
+            out_ex[i] <= out_dat[3 - i];
+            out_ex[i].a <= a_fwd[out_idx[3 - i]];
+            out_ex[i].b <= b_fwd[out_idx[3 - i]];
         end else if (ena_ex[i]) out_ex[i].valid <= 0;
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) valid[i] <= 0;
@@ -1163,11 +1164,10 @@ module lsu(input logic clk, input logic rst, input logic flush,
         for (int i = 0; i < 4; i++) lsq[`LSQSZ + i] = rqst[i];
         for (int i = 0; i < 4; i++) lsqmi[`LSQSZ + i] = misa[i];
     end
-    always_comb for (int i = 0; i < 4; i++)
-        case (rqst[i].bits[1:0])
-            0: misa[i] = 0;                  1: misa[i] = rqst[0].addr[0];
-            2: misa[i] = |rqst[0].addr[1:0]; 3: misa[i] = |rqst[0].addr[2:0];
-        endcase
+    always_comb for (int i = 0; i < 4; i++) case (rqst[i].bits[1:0])
+        0: misa[i] = 0;                  1: misa[i] = rqst[i].addr[0];
+        2: misa[i] = |rqst[i].addr[1:0]; 3: misa[i] = |rqst[i].addr[2:0];
+    endcase
     always_comb for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) begin
         through[i] = ~rqst[i].wena & ~rqst[i].addr[64] & ~misa[i];
         for (int j = 0; j < `LSQSZ + i; j++) if (lsq[j].id[`lgCQSZ])
