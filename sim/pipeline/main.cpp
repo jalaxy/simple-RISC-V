@@ -452,8 +452,9 @@ int main(int argc, char **argv)
     if (cmd.debug)
     {
         printf("Statistics:\n");
-        printf("    Cycle: %lu    Instructions: %lu    Mispredictions: %lu\n",
-               dut->cycle, dut->instret, dut->misp);
+        printf("    CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
+               dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
+               dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
     }
 
     // Clean

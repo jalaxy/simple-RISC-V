@@ -1237,6 +1237,7 @@ module lsu(input logic clk, input logic rst, input logic flush,
                                     rqst[0].fence[11]))
                 lsqrqst[i].aqrl[1] <= 1;
             if (i == 32'(front[0]) & fromlsq) lsqsent[i] <= 1;
+            if (i == 32'(front[0]) & |numout) lsqrqst[i].id <= 0;
             if (lsqrqst[i].id == done) lsqrqst[i].id <= 0;
         end
     logic [`lgLSQSZ-1:0] thfront, fwdfront; logic [3:0][`lgLSQSZ-1:0] threar, fwdrear;
