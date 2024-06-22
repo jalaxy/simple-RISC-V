@@ -255,6 +255,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < ini_code.size(); i++)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
+    memory[0] = 0x6f;
 
     // Simulation
     simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
@@ -309,7 +310,8 @@ int main(int argc, char **argv)
             d_delay.empty() ? d_delay.push({0}), 0 : 0;
             dut->icache_done = i_delay.front().rqst; // other signals change after clk
             if (i_delay.front().rqst)
-                dut->icache_data = DLE(memory, i_delay.front().addr);
+                for (int j = 0; j < 4; j++)
+                    dut->icache_data[j] = DLE(memory, i_delay.front().addr + 4 * j);
             dut->dcache_done = d_delay.front().rqst;
             if (d_delay.front().rqst)
                 dut->dcache_rdat = DLE(memory, d_delay.front().addr);
