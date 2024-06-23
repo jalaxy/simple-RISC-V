@@ -83,12 +83,13 @@
 `define EX_STORE  6'd42
 `define EX_FENCE  6'd43
 `define EX_FENCEI 6'd44
-`define EX_CSR    6'd45
-`define EX_ECALL  6'd46
-`define EX_EBREAK 6'd47
-`define EX_RET    6'd48
-`define EX_INV    6'd49
-`define EX_END    6'd50
+`define EX_FENCES 6'd45
+`define EX_CSR    6'd46
+`define EX_ECALL  6'd47
+`define EX_EBREAK 6'd48
+`define EX_RET    6'd49
+`define EX_INV    6'd50
+`define EX_END    6'd51
 
 typedef struct packed {
     logic valid, branch;
@@ -127,6 +128,7 @@ typedef struct packed {
     logic mem, patupd, b, c;
     logic [6:0] rda;
     logic [17:0] pat;
+    logic [2:0] ret;
 } ex_wb_t;
 typedef struct packed {
     logic reinf, redir, c;
@@ -139,6 +141,7 @@ typedef struct packed {
     logic mem, patupd, b, c;
     logic [6:0] rda;
     logic [17:0] pat;
+    logic [2:0] ret;
 } cqinfo_t;
 typedef struct packed {
     logic [`lgCQSZ:0] id;
@@ -244,7 +247,7 @@ module pipeline(
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
         .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .frontid(frontid), .nextid(nextid),
-        .raddr(raddr), .rvalue(rvalue), .mtvec(csr_inst.mtvec),
+        .raddr(raddr), .rvalue(rvalue), .mtvec(csr_inst.mtvec), .mepc(csr_inst.mepc),
         .late_done(late_done), .late_val(late_val),
         .late_npc(late_npc), .late_cause(late_cause),
         .nret(nret), .epc(epc), .cause(cause));
@@ -565,6 +568,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
                 op[`AMO] & ir[31:27] == 5'b00011;
             exop[0][`EX_FENCE] = op[`MISC_MEM] & ir[14:12] == 3'b000;
             exop[0][`EX_FENCEI] = op[`MISC_MEM] & ir[14:12] == 3'b001;
+            exop[0][`EX_FENCES] = op[`SYSTEM] & ir[31:25] == 7'b0001001;
             exop[0][`EX_CSR] = op[`SYSTEM] & |ir[13:12];
             exop[0][`EX_ECALL] = ir == 32'h00000073;
             exop[0][`EX_EBREAK] = ir == 32'h00100073;
@@ -919,6 +923,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
             else if (op[`EX_INV]) out_wb_g[g].cause = {1'b1, 6'd2};
             else out_wb_g[g].cause = 0;
+            out_wb_g[g].ret = op[`EX_RET] ? in.funct3 : 3'b0;
         end
     end
     always_ff @(posedge clk) if (rst | redir) cqidocc <= 0; else begin
@@ -944,7 +949,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     input logic [3:0][1:0][6:0] raddr, output logic [3:0][1:0][64:0] rvalue,
     input logic [3:0][`lgCQSZ:0] late_done, input logic [3:0][64:0] late_val,
     input logic [3:0][64:0] late_npc, input logic [3:0][6:0] late_cause,
-    input logic [63:0] mtvec, output logic [63:0] nret,
+    input logic [63:0] mtvec, input logic [63:0] mepc, output logic [63:0] nret,
     output logic [63:0] epc, output logic [6:0] cause
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
@@ -1004,6 +1009,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
                 if (late_npc[j][64]) cqnpc[i] = late_npc[j][63:0];
                 if (late_cause[j][6]) cqcause[i] = late_cause[j];
             end
+        if (|cqinfo[i].ret) cqnpc[i] = mepc;
     end
     always_comb for (int i = 0; i < 4; i++) get_ex[i] = ~in_ex[i].valid | cqpush[i];
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
@@ -1354,6 +1360,7 @@ module csr(input logic clk, input logic rst,
     logic [63:0] mtime, mtimecmp; // memory mapped
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
     logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
+    logic [63:0] satp;
     logic [63:0] utvec;
     always_comb case (func[1:0])
         2'b00: wres = 0;
@@ -1375,7 +1382,7 @@ module csr(input logic clk, input logic rst,
         12'hb02: rval = minstret;      12'h306: rval = mcounteren;
         12'h320: rval = mcountinhibit; 12'h340: rval = mscratch;
         12'h341: rval = mepc;          12'h342: rval = mcause;
-        12'h343: rval = mtval;
+        12'h343: rval = mtval;         12'h180: rval = satp;
         default: rval = 0;
         12'h005: rval = utvec;
     endcase
@@ -1427,6 +1434,7 @@ module csr(input logic clk, input logic rst,
         if (rst) mcause <= 0; else if (wena & addr == 12'h342) mcause <= wres;
         else if (ein) mcause <= {58'd0, cause};
         if (rst) mtval <= 0; else if (wena & addr == 12'h343) mtval <= wres;
+        if (rst) satp <= 0; else if (wena & addr == 12'h180) satp <= wres;
         if (rst) eout <= 0;
         if (rst) level <= 2'b11;
         if (wena & addr == 12'h005) utvec <= wres;

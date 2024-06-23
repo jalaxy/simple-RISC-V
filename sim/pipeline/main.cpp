@@ -20,9 +20,9 @@
 
 typedef struct struct_cmd
 {
-    const char *filename = 0, *vcd = 0;
+    const char *filename = 0, *vcd = 0, *dtb = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, debug = 0, step = 0;
+    uint8_t help = 0, filetype = 0, debug = 0, step = 0, pc = 0;
     int maxtime = INT32_MAX, mintime = 0;
 } cmd_t;
 
@@ -115,6 +115,8 @@ int main(int argc, char **argv)
                 cmd.filetype = 0;
             else if (strcmp(argv[i] + j, "elf") == 0)
                 cmd.filetype = 1;
+            else if (strcmp(argv[i] + j, "dtb") == 0)
+                cmd.dtb = argv[++i];
             else if (strcmp(argv[i] + j, "w") == 0)
                 cmd.vcd = argv[++i];
             else if (strcmp(argv[i] + j, "t") == 0)
@@ -135,6 +137,8 @@ int main(int argc, char **argv)
                 cmd.step = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
+            else if (strcmp(argv[i] + j, "pc") == 0)
+                cmd.pc = 1;
         }
         else if (cmd.filename == NULL)
             cmd.filename = argv[i];
@@ -149,9 +153,11 @@ int main(int argc, char **argv)
         printf("    -dump: (default) input file as hex hump\n");
         printf("    -elf: (force) input file as RISC-V ELF executable\n");
         printf("    -w `waveform`: output waveform to `waveform`\n");
+        printf("    -dtb `binary`: specify device tree binary.\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
         printf("    -d: debug mode\n");
         printf("    -d -s: debug mode with step\n");
+        printf("    -pc: output PC trace\n");
         return 0;
     }
     if (cmd.debug)
@@ -168,7 +174,8 @@ int main(int argc, char **argv)
     // Load and set reset code in memory
     std::map<uint64_t, uint8_t> memory, reserved;
     std::vector<uint32_t> ini_code;
-    htif_t htif;
+    htif_t htif = {0, 0, 0};
+    uint64_t dtbaddr = 0x10000000; // [0-0x7ffff]000, or modify initial code
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
         return printf("Unable to open file %s.\n", cmd.filename), 1;
@@ -243,6 +250,9 @@ int main(int argc, char **argv)
         delete[] shdr;
         fclose(fp);
         // start section: jump from reset address to ELF entry
+        // a1 -> dtb address
+        ini_code.push_back(0x5b7 | dtbaddr & 0xfffff000); // lui a1, `dtbaddr >> 12`
+        // ra -> entry point
         ini_code.push_back(0x93); // addi ra, zero, 0
         for (int i = 0; i < 8; i++)
         {
@@ -256,6 +266,18 @@ int main(int argc, char **argv)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
     memory[0] = 0x6f;
+    if (cmd.dtb)
+    {
+        fp = fopen(cmd.dtb, "r");
+        if (!fp)
+            return printf("Unable to open file %s.\n", cmd.dtb), 1;
+        fseek(fp, 0, SEEK_END);
+        int sz = ftell(fp);
+        rewind(fp);
+        for (int i = 0; i < sz; i++)
+            if (fread(&memory[dtbaddr + i], 1, 1, fp) < 0)
+                exit((perror("fread"), 1));
+    }
 
     // Simulation
     simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
@@ -400,6 +422,8 @@ int main(int argc, char **argv)
                 getchar();
             }
         }
+        if (cmt_check & cmd.pc)
+            printf("%d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
         if (cmt_check)
             commits.pop();
         // HTIF requests handler

@@ -1,0 +1,39 @@
+/dts-v1/;
+
+/ {
+    compatible = "machine";
+    cpu {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        hart@0 {
+            device_type = "cpu";
+            reg = <0>;
+            intc: interrupt-contoller {
+                phandle = <0x123>;
+                #address-cells = <0>;
+                #interrupt-cells = <1>;
+                interrupt-controller = <1>;
+            };
+        };
+    };
+    mem {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        mem@0 {
+            device_type = "memory";
+            reg = <0x0 0xf0000000>;
+        };
+    };
+    client {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        client@0 {
+            compatible = "riscv,clint0";
+            reg = <0xb0000000>;
+            interrupts-extended = <&intc 0x456>, <&intc 0x789>;
+        };
+    };
+    htif {
+        compatible = "ucb,htif0";
+    };
+};
