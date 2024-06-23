@@ -25,6 +25,7 @@ module stats(
     output logic [63:0] arregs[63:0],
     output logic [63:0] cycle,
     output logic [63:0] instret,
+    output logic [63:0] stallpc,
     output logic [63:0] misp
 );
     // instantiate
@@ -53,6 +54,10 @@ module stats(
     // other stats
     always_comb cycle = pipeline_inst.csr_inst.mcycle;
     always_comb instret = pipeline_inst.csr_inst.minstret;
+    always_comb begin stallpc = 0; for (int i = 3; i >= 0; i--)
+        if ( pipeline_inst.wb_stage_inst.cqvalid[i] &
+            ~pipeline_inst.wb_stage_inst.cqpop[i] & ~pipeline_inst.redir)
+            stallpc = pipeline_inst.wb_stage_inst.cqinfo[i].pc; end
     always_ff @(posedge clk) if (rst) misp <= 0;
         else if (pipeline_inst.redir) misp <= misp + 1;
 endmodule
