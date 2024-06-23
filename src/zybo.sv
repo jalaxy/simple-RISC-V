@@ -1,7 +1,7 @@
 module wrapper(input logic clk, input logic rst, output logic [3:0] pos);
     logic [63:0][7:0] imem;
     logic imem_rqst, imem_done;
-    logic [63:0] imem_addr, imem_data;
+    logic [63:0] imem_addr; logic [127:0] imem_data;
     always_ff @(posedge clk) if (rst) imem <= {
         32'h6f,
         32'h00120213,
@@ -21,7 +21,7 @@ module wrapper(input logic clk, input logic rst, output logic [3:0] pos);
         32'h12300093
     };
     always_ff @(posedge clk) if (rst) imem_done <= 0; else imem_done <= imem_rqst;
-    always_ff @(posedge clk) imem_data <= imem[imem_addr[5:0]+7-:8];
+    always_ff @(posedge clk) imem_data <= imem[imem_addr[5:0]+15-:16];
     logic [15:0][63:0] dmem;
     logic [`lgCQSZ:0] dmem_rqst, dmem_done;
     logic dmem_wena, dmem_flsh; logic [1:0] dmem_rsrv, dmem_bits;

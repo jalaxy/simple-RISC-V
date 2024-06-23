@@ -280,6 +280,7 @@ int main(int argc, char **argv)
     std::queue<commit_t> commits;
     std::queue<store_t> stores;
     std::queue<csrcmt_t> csrs;
+    std::map<uint64_t, int> stalls;
     int i = 0, exitcall = 0, exitcode = 0;
     while (i < cmd.maxtime)
     {
@@ -345,6 +346,12 @@ int main(int argc, char **argv)
                     commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j]});
             if (dut->cmtcsrena)
                 csrs.push({dut->cmtcsraddr, dut->cmtcsrval});
+            if (dut->stallpc)
+            {
+                if (stalls.find(dut->stallpc) == stalls.end())
+                    stalls[dut->stallpc] = 0;
+                stalls[dut->stallpc]++;
+            }
             i++;
         }
         // simulator checker

@@ -952,8 +952,8 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     logic [`lgCQSZ-1:0] cqfront; logic [`lgCQSZ:0] num, numin, numout;
     logic [3:0] cqpush; logic cqpop_accum, cqpatup_ena;
     logic [3:0] cqvalid, cqexcep, cqpatup, cqredir, cqpop;
-    cqinfo_t [3:0] cqinfo; logic [3:0][63:0] cqnpc;
-    logic [3:0][6:0] cqcause; logic [3:0][64:0] cqdata;
+    cqinfo_t [3:0] cqinfo; logic [3:0][63:0] cqnpc, cqfnpc;
+    logic [3:0][6:0] cqcause, cqfcause; logic [3:0][64:0] cqdata, cqfdata;
     logic [3:0][1:0][`lgCQSZ-1:0] cqraddr; logic [3:0][1:0][64:0] cqrvalue;
     logic [4:0][`lgCQSZ-1:0] front; logic [3:0][`lgCQSZ-1:0] rear;
     logic lastvalid; cqinfo_t lastinfo, outinfo; logic [63:0] lastnpc, outnpc;
@@ -985,15 +985,24 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         cqinfo_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqinfo),
             .waddr(cqwaddr), .wvalue(cqinfow), .wena(cqinfowena));
     regfile #(.dwidth(64), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
-        cqnpc_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqnpc),
+        cqnpc_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqfnpc),
             .waddr(cqwaddr), .wvalue(cqnpcw), .wena(cqnpcwena));
     regfile #(.dwidth(7), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
-        cqcause_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqcause),
+        cqcause_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqfcause),
             .waddr(cqwaddr), .wvalue(cqcausew), .wena(cqcausewena));
     regfile #(.dwidth(65), .rports(12), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqval_inst(.clk(clk), .rst(rst),
-            .raddr({front[3:0], cqraddr}), .rvalue({cqdata, cqrvalue}),
+            .raddr({front[3:0], cqraddr}), .rvalue({cqfdata, cqrvalue}),
             .waddr(cqwaddr), .wena(cqvalwena), .wvalue(cqvalw));
+    always_comb for (int i = 0; i < 4; i++) begin
+        cqdata[i] = cqfdata[i]; cqnpc[i] = cqfnpc[i]; cqcause[i] = cqfcause[i];
+        for (int j = 0; j < 4; j++)
+            if (late_done[j] == {1'b1, front[i]}) begin
+                cqdata[i] = late_val[j];
+                if (late_npc[j][64]) cqnpc[i] = late_npc[j][63:0];
+                if (late_cause[j][6]) cqcause[i] = late_cause[j];
+            end
+    end
     always_comb for (int i = 0; i < 4; i++) get_ex[i] = ~in_ex[i].valid | cqpush[i];
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) rear[i] = front[i] + num[`lgCQSZ-1:0];
@@ -1025,7 +1034,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
         if (cqexcep[i]) {cause, epc} = {cqcause[i], cqinfo[i].pc}; end
     always_comb begin nret = 0; for (int i = 0; i < 4; i++)
         if (cqpop[i] & ~cqinfo[i].rda[6]) nret++; end
-    always_comb if (cqvalid[0] & cqinfo[0].mem & ~redir) memcqid = {1'b1, front[0]};
+    always_comb if (cqvalid[0] & cqinfo[0].mem) memcqid = {1'b1, front[0]};
         else memcqid = 0;
     always_ff @(posedge clk) if (redir) lastvalid <= 0;
         else for (int i = 0; i < 4; i++)
@@ -1399,8 +1408,8 @@ module csr(input logic clk, input logic rst,
         end
         if (rst) mcycle <= 0; else if (wena & addr == 12'hb00) mcycle <= wres;
         else mcycle <= mcycle + 64'd1;
-        if (rst) minstret <= 0; else if (wena & addr == 12'hb02) minstret <= wres;
-        else if (~mcountinhibit[2]) minstret <= minstret + nret;
+        if (rst) minstret <= 0; else minstret <=
+            (wena & addr == 12'hb02 ? wres : minstret) + (mcountinhibit[2] ? 0 : nret);
         for (int i = 3; i < 32; i++) if (rst) mhpmcounter[i] <= 0;
             else if (wena & addr[11:5] == 7'h58) mhpmcounter[i] <= wres;
         for (int i = 3; i < 32; i++) if (rst) mhpmevent[i] <= 0;
