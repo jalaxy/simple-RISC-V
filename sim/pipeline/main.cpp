@@ -5,6 +5,7 @@
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include <elf.h>
+#include <fcntl.h>
 #include "Vstats.h"
 #include "simulator.h"
 
@@ -198,8 +199,8 @@ int main(int argc, char **argv)
     }
     if (cmd.debug)
     {
-        printf("[Info] Running simulation in %s mode with:\n[Info]     %s",
-               cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
+        printf("[Info] Running simulation in %s mode with:\n[Info]     ",
+               cmd.filetype == 0 ? "dump" : "elf");
         for (int i = 0; i < cmd.args.size(); i++)
             printf(" %s", cmd.args[i]);
         printf("\n");
@@ -465,7 +466,7 @@ int main(int argc, char **argv)
                 getchar();
             }
         }
-        if (cmt_check & cmd.pc)
+        if (cmt_check & cmd.pc & commits.front().cycle > cmd.mintime)
             printf("[Info] %d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
         if (cmt_check)
             commits.pop();
@@ -480,16 +481,57 @@ int main(int argc, char **argv)
             else if (tohost_dat != 0) // proxied ststem call
             {
                 uint64_t magic_mem = tohost_dat, which = DLE(memory, magic_mem);
-                if (which == 0x40) // syswrite
+                uint64_t retval = 0;
+                if (which == 0x38) // sysopenat
+                {
+                    uint64_t arg0, arg1, arg2, arg3, arg4;
+                    arg0 = DLE(memory, magic_mem + 8);  // directory file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // filename
+                    arg2 = DLE(memory, magic_mem + 24); // filename size
+                    arg3 = DLE(memory, magic_mem + 32); // flags
+                    arg4 = DLE(memory, magic_mem + 40); // mode
+                    char *filename = new (std::nothrow) char[arg2];
+                    if (!filename)
+                        return printf("[Error] Memory allocation failed.\n"), 1;
+                    for (int i = 0; i < arg2; i++)
+                        filename[i] = memory[arg1 + i];
+                    retval = openat(arg0, filename, arg3, arg4);
+                    delete[] filename;
+                }
+                else if (which == 0x39) // sysclose
+                {
+                    uint64_t arg0;
+                    arg0 = DLE(memory, magic_mem + 8); // file descriptor
+                    retval = close(arg0);
+                }
+                else if (which == 0x40) // syswrite
                 {
                     uint64_t arg0, arg1, arg2;
                     arg0 = DLE(memory, magic_mem + 8);  // file descriptor
                     arg1 = DLE(memory, magic_mem + 16); // memory address
                     arg2 = DLE(memory, magic_mem + 24); // write size
+                    uint8_t *buf = new (std::nothrow) uint8_t[arg2];
+                    if (!buf)
+                        return printf("[Error] Memory allocation failed.\n"), 1;
                     for (int i = 0; i < arg2; i++)
-                        putchar(memory[arg1 + i]);
-                    for (int i = 0; i < 8; i++)
-                        memory[magic_mem + i] = 0; // return value at magic_mem[0]
+                        buf[i] = memory[arg1 + i];
+                    retval = write(arg0, buf, arg2);
+                    delete[] buf;
+                }
+                else if (which == 0x43) // syspread
+                {
+                    uint64_t arg0, arg1, arg2, arg3;
+                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // memory address
+                    arg2 = DLE(memory, magic_mem + 24); // read size
+                    arg3 = DLE(memory, magic_mem + 32); // read offset
+                    uint8_t *buf = new (std::nothrow) uint8_t[arg2];
+                    if (!buf)
+                        return printf("[Error] Memory allocation failed.\n"), 1;
+                    retval = pread(arg0, buf, arg2, arg3);
+                    for (int i = 0; i < retval; i++)
+                        memory[arg1 + i] = buf[i];
+                    delete[] buf;
                 }
                 else if (which == 0x5d) // exit
                     exitcall = 1, exitcode = (DLE(memory, magic_mem + 8) << 1) | 1;
@@ -510,11 +552,13 @@ int main(int argc, char **argv)
                             memory[addr++] = cmd.args[i][j];
                         memory[addr++] = '\0';
                     }
-                    for (int i = 0; i < 8; i++)
-                        memory[magic_mem + i] = 0; // return value at magic_mem[0]
+                    if (addr - pkargaddr >= arg1)
+                        retval = -1;
                 }
                 else
-                    printf("[Info] Unhandled proxied system call:\n[Info]     which: 0x%lx\n", which);
+                    printf("[Info] Unhandled proxied system call 0x%lx@0x%lx\n", which, dut->epc);
+                for (int i = 0; i < 8; i++)
+                    memory[magic_mem + i] = DTOB(retval, i);
             }
         }
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write

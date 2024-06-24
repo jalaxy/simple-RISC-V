@@ -1,9 +1,4 @@
-.PHONY: all
-
-clean:
-	$(RM) -r obj_dir
-
-######################## Verilator #############################
+.PHONY: all clean
 
 # Execute in docker.io/jxy324/verilator:v0
 
@@ -20,11 +15,12 @@ all: obj_dir/V$(VERILATOR_TOP)
 
 # Verilator bin target
 obj_dir/V$(VERILATOR_TOP): obj_dir $(VERILATOR_CPP) $(VERILATOR_H)
-	make -C obj_dir -f V$(VERILATOR_TOP).mk
+	make -j8 -C obj_dir -f V$(VERILATOR_TOP).mk
 
 # Verilator obj_dir target
 obj_dir: $(VERILATOR_V)
 	$(RM) -r obj_dir
 	/opt/verilator/bin/verilator $(VERILATOR_FLAGS) $(VERILATOR_SRC)
 
-################################################################
+clean:
+	$(RM) -r obj_dir

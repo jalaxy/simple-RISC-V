@@ -26,6 +26,7 @@ module stats(
     output logic [63:0] arregs[63:0],
     output logic [63:0] cycle,
     output logic [63:0] instret,
+    output logic [63:0] epc,
     output logic [63:0] stallpc,
     output logic [63:0] misp
 );
@@ -55,6 +56,7 @@ module stats(
     // other stats
     always_comb cycle = pipeline_inst.csr_inst.mcycle;
     always_comb instret = pipeline_inst.csr_inst.minstret;
+    always_comb epc = pipeline_inst.csr_inst.mepc;
     always_comb begin stallpc = 0; for (int i = 3; i >= 0; i--)
         if ( pipeline_inst.wb_stage_inst.cqvalid[i] &
             ~pipeline_inst.wb_stage_inst.cqpop[i] & ~pipeline_inst.redir)
@@ -352,7 +354,7 @@ Supervisor-level CSR:
         0x100 -> sstatus    0x102 -> sedeleg    0x103 -> sideleg    0x104 -> sie
         0x105 -> stvec      0x106 -> scounteren
     0x140 -- 0x144:
-        0x140 -> sscrach    0x141 -> sepc    0x142 -> scause    0x143 -> stval
+        0x140 -> sscratch    0x141 -> sepc    0x142 -> scause    0x143 -> stval
         0x144 -> sip
     0x180 -- 0x180:
         0x180 -> satp
