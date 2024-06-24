@@ -16,6 +16,8 @@
 #define DTOB(x, i) ((uint8_t)((x) >> (8 * (uint64_t)(i))))
 #define DLE(pb, addr) (BTOD((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3], \
                             (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
+#define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
+#define BIT(dw, i) BITS(dw, i, i)
 #define NOP ((uint64_t)0x13)
 
 typedef struct struct_cmd
@@ -60,6 +62,8 @@ typedef struct struct_csr
     uint64_t addr, data;
 } csrcmt_t;
 
+extern const uint8_t dtb_htif[676]; // HTIF device tree
+
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
     printf("Memory@%016lx:", addr);
@@ -99,6 +103,38 @@ void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
             sprintf(s, "%08x", code);
         printf("    0x%016lx:  %s  %s\n", sim.get_pc(), s, sim.get_asmcode());
     }
+}
+
+uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr)
+{
+    uint64_t ppn, vpn[4], offset;
+    int start = -1;
+    ppn = BITS(satp, 0, 43);
+    offset = vaddr & 0xfffllu;
+    if (satp >> 60 == 0) // bare
+        return vaddr;
+    if (satp >> 60 == 8) // sv39
+    {
+        start = 2;
+        offset = BITS(vaddr, 0, 12);
+        vpn[0] = BITS(vaddr, 12, 20);
+        vpn[1] = BITS(vaddr, 21, 29);
+        vpn[2] = BITS(vaddr, 30, 38);
+    }
+    for (int i = start; i >= 0; i--)
+    {
+        uint64_t pte = DLE(mem, (ppn << 12) + (vpn[i] << 3));
+        ppn = pte >> 10;
+        if (BIT(pte, 0) == 0)
+            return -1;
+        if (BIT(pte, 1) || BIT(pte, 3)) // pte.r = 1 or pte.x = 1 -> leaf node
+        {
+            for (int j = 0; j < i; j++)
+                ppn |= vpn[j] << (j * 9); // super page
+            break;
+        }
+    }
+    return (ppn << 12) | offset;
 }
 
 int main(int argc, char **argv)
@@ -141,7 +177,7 @@ int main(int argc, char **argv)
                 cmd.pc = 1;
         }
         else if (cmd.filename == NULL)
-            cmd.filename = argv[i];
+            cmd.filename = argv[i], cmd.args.push_back(argv[i]);
         else
             cmd.args.push_back(argv[i]);
     if (!cmd.help && cmd.filename == NULL)
@@ -162,23 +198,24 @@ int main(int argc, char **argv)
     }
     if (cmd.debug)
     {
-        printf("Running simulation in %s mode with:\n    %s",
+        printf("[Info] Running simulation in %s mode with:\n[Info]     %s",
                cmd.filetype == 0 ? "dump" : "elf", cmd.filename);
         for (int i = 0; i < cmd.args.size(); i++)
             printf(" %s", cmd.args[i]);
         printf("\n");
         if (cmd.vcd)
-            printf("Recording waveform in file: %s\n", cmd.vcd);
+            printf("[Info] Recording waveform in file: %s\n", cmd.vcd);
     }
 
     // Load and set reset code in memory
     std::map<uint64_t, uint8_t> memory, reserved;
     std::vector<uint32_t> ini_code;
     htif_t htif = {0, 0, 0};
-    uint64_t dtbaddr = 0x10000000; // [0-0x7ffff]000, or modify initial code
+    uint64_t dtbaddr = 0x10000000;   // [0-0x7ffff]000, or modify initial code
+    uint64_t pkargaddr = 0x80020000; // proxy kernel arguments address
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
-        return printf("Unable to open file %s.\n", cmd.filename), 1;
+        return printf("[Error] Unable to open file %s.\n", cmd.filename), 1;
     if (cmd.filetype == 0) // direct dumped hex code
     {
         int code;
@@ -194,11 +231,11 @@ int main(int argc, char **argv)
             exit((perror("fread"), 1));
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
             elf_h.e_ident[EI_CLASS] != ELFCLASS64)
-            return printf("Not 64-bit ELF format.\n"), 1;
+            return printf("[Error] Not 64-bit ELF format.\n"), 1;
         if (elf_h.e_type != ET_EXEC && elf_h.e_type != ET_DYN)
-            return printf("Not an executable file.\n"), 1;
+            return printf("[Error] Not an executable file.\n"), 1;
         if (elf_h.e_machine != EM_RISCV)
-            return printf("Not RISC-V architecture.\n"), 1;
+            return printf("[Error] Not RISC-V architecture.\n"), 1;
         // sections from ELF file
         Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
         fseek(fp, elf_h.e_shoff, SEEK_SET);
@@ -245,10 +282,28 @@ int main(int argc, char **argv)
         if (htif.fromhost == 0 || htif.tohost == 0)
         {
             htif = {0x100000, 0x100008, 0x100010}; // default htif addresses
-            printf("HTIF address not specified, set to default.\n");
+            printf("[Info] HTIF address not specified, set to default.\n");
         }
         delete[] shdr;
         fclose(fp);
+        if (cmd.dtb)
+        {
+            fp = fopen(cmd.dtb, "r");
+            if (!fp)
+                return printf("[Error] Unable to open file %s.\n", cmd.dtb), 1;
+            fseek(fp, 0, SEEK_END);
+            int sz = ftell(fp);
+            rewind(fp);
+            for (int i = 0; i < sz; i++)
+                if (fread(&memory[dtbaddr + i], 1, 1, fp) < 0)
+                    exit((perror("fread"), 1));
+        }
+        else
+        {
+            printf("[Info] Using default device tree (HTIF).\n");
+            for (int i = 0; i < sizeof(dtb_htif) / sizeof(dtb_htif[0]); i++)
+                memory[dtbaddr + i] = dtb_htif[i];
+        }
         // start section: jump from reset address to ELF entry
         // a1 -> dtb address
         ini_code.push_back(0x5b7 | dtbaddr & 0xfffff000); // lui a1, `dtbaddr >> 12`
@@ -266,18 +321,6 @@ int main(int argc, char **argv)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
     memory[0] = 0x6f;
-    if (cmd.dtb)
-    {
-        fp = fopen(cmd.dtb, "r");
-        if (!fp)
-            return printf("Unable to open file %s.\n", cmd.dtb), 1;
-        fseek(fp, 0, SEEK_END);
-        int sz = ftell(fp);
-        rewind(fp);
-        for (int i = 0; i < sz; i++)
-            if (fread(&memory[dtbaddr + i], 1, 1, fp) < 0)
-                exit((perror("fread"), 1));
-    }
 
     // Simulation
     simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
@@ -319,11 +362,11 @@ int main(int argc, char **argv)
                 // if (i == 0004) // delay for some cycles in some conditions
                 //     for (int i = 0; i < 0004; i++)
                 //         i_delay.push({0, 0});
-                i_delay.push({1, dut->icache_addr});
+                i_delay.push({1, paddr(memory, dut->csr_satp, dut->icache_addr)});
             }
             if (dut->dcache_rqst)
-                d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena,
-                              dut->dcache_rsrv, dut->dcache_addr, dut->dcache_wdat});
+                d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena, dut->dcache_rsrv,
+                              paddr(memory, dut->csr_satp, dut->dcache_addr), dut->dcache_wdat});
             while (dut->icache_flsh && !i_delay.empty())
                 i_delay.pop();
             while (dut->dcache_flsh && !d_delay.empty())
@@ -396,34 +439,34 @@ int main(int argc, char **argv)
                                    curcsr.addr, curcsr.data);
             if ((!check || cmd.step) && curcommit.cycle >= cmd.mintime)
             {
-                printf(check ? "Cycle %d:\n" : "Difference found at cycle %d:\n", curcommit.cycle);
-                printf("DUT:\n    pc: 0x%016lx\n", curcommit.pc);
-                printf("    %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                printf(check ? "[Info] Cycle %d:\n" : "[Info] Difference found at cycle %d:\n", curcommit.cycle);
+                printf("[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
+                printf("[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
                        curcommit.addr % 32, curcommit.data);
                 if (curstore.width < 8)
                     curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
                 if (sim->get_csraddr() != -1)
-                    printf("    %s: 0x%016lx\n", sim->get_csrname(curcsr.addr), curcsr.data);
+                    printf("[Info]     %s: 0x%016lx\n", sim->get_csrname(curcsr.addr), curcsr.data);
                 if (sim->get_mwwidth())
-                    printf("    mem%d@0x%lx: 0x%0*lx\n",
+                    printf("[Info]     mem%d@0x%lx: 0x%0*lx\n",
                            curstore.width, curstore.addr,
                            curstore.width * 2, curstore.data);
-                printf("SIM:\n    pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
-                printf("    %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                printf("[Info] SIM:\n[Info]     pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
+                printf("[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
                        curcommit.addr % 32, sim->get_arreg()[curcommit.addr]);
                 if (sim->get_csraddr() != -1)
-                    printf("    %s: 0x%016lx\n",
+                    printf("[Info]     %s: 0x%016lx\n",
                            sim->get_csrname(sim->get_csraddr()), sim->get_csrdata());
                 if (sim->get_mwwidth())
-                    printf("    mem%d@0x%lx: 0x%0*lx\n",
+                    printf("[Info]     mem%d@0x%lx: 0x%0*lx\n",
                            sim->get_mwwidth(), sim->get_mwaddr(),
                            sim->get_mwwidth() * 2, sim->get_mwdata());
-                printf("Press Enter to continue...\n");
+                printf("[Info] Press Enter to continue...\n[Info] ");
                 getchar();
             }
         }
         if (cmt_check & cmd.pc)
-            printf("%d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
+            printf("[Info] %d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
         if (cmt_check)
             commits.pop();
         // HTIF requests handler
@@ -450,14 +493,34 @@ int main(int argc, char **argv)
                 }
                 else if (which == 0x5d) // exit
                     exitcall = 1, exitcode = (DLE(memory, magic_mem + 8) << 1) | 1;
+                else if (which == 0x7db) // pk-sysgetmainvars
+                {
+                    // buffer format: argc(64) argv[0](64) argv[1](64) ...
+                    uint64_t arg0, arg1;
+                    arg0 = DLE(memory, magic_mem + 8);  // argument buffer address
+                    arg1 = DLE(memory, magic_mem + 16); // argument buffer size
+                    for (int i = 0; i < 8; i++)
+                        memory[arg0 + i] = DTOB(cmd.args.size(), i);
+                    uint64_t addr = pkargaddr;
+                    for (int i = 0; i < cmd.args.size(); i++)
+                    {
+                        for (int j = 0; j < 8; j++)
+                            memory[arg0 + (i + 1) * 8 + j] = DTOB(addr, j);
+                        for (int j = 0; j < strlen(cmd.args[i]); j++)
+                            memory[addr++] = cmd.args[i][j];
+                        memory[addr++] = '\0';
+                    }
+                    for (int i = 0; i < 8; i++)
+                        memory[magic_mem + i] = 0; // return value at magic_mem[0]
+                }
                 else
-                    printf("Unhandled proxied system call:\n    which: 0x%lx\n", which);
+                    printf("[Info] Unhandled proxied system call:\n[Info]     which: 0x%lx\n", which);
             }
         }
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
             putchar(tohost_dat);
-        else if (cmd.debug)
-            printf("Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
+        else
+            printf("[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                    tohost_dev, tohost_cmd, tohost_dat);
         for (int i = 0; i < 8; i++)
             memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
@@ -465,7 +528,7 @@ int main(int argc, char **argv)
         cmd.debug ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
     if (cmd.debug && exitcall)
-        printf("Exit with code %d.\n", exitcode);
+        printf("[Info] Exit with code %d.\n", exitcode);
     else if (cmd.debug)
     {
         // final status check
@@ -474,18 +537,18 @@ int main(int argc, char **argv)
         for (int i = 0; i < 64; i++)
             if (sim->get_arreg()[i] != dut->arregs[i])
             {
-                printf("Difference found at maximum cycle:\n");
-                printf("    DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, dut->arregs[i]);
-                printf("    SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, sim->get_arreg()[i]);
-                printf("Press Enter to continue...\n");
+                printf("[Info] Difference found at maximum cycle:\n");
+                printf("[Info]     DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, dut->arregs[i]);
+                printf("[Info]     SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, sim->get_arreg()[i]);
+                printf("[Info] Press Enter to continue...\n");
                 getchar();
             }
-        printf("Maximum cycle %d reached.\n", cmd.maxtime);
+        printf("[Info] Maximum cycle %d reached.\n", cmd.maxtime);
     }
     if (cmd.debug)
     {
-        printf("Statistics:\n");
-        printf("    CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
+        printf("[Info] Statistics:\n");
+        printf("[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
                dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
                dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
     }
@@ -496,3 +559,48 @@ int main(int argc, char **argv)
     delete dut;
     return exitcode;
 }
+
+const uint8_t dtb_htif[676] = {
+    0xd0, 0x0d, 0xfe, 0xed, 0x00, 0x00, 0x02, 0xa4, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x02, 0x2c,
+    0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x01, 0xf4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x63, 0x68,
+    0x69, 0x6e, 0x65, 0x00, 0x00, 0x00, 0x00, 0x01, 0x63, 0x70, 0x75, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x68, 0x61, 0x72, 0x74, 0x40, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x26, 0x63, 0x70, 0x75, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x69, 0x6e, 0x74, 0x65,
+    0x72, 0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x6f, 0x6c, 0x6c, 0x65, 0x72, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x01, 0x23,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x4f, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+    0x6d, 0x65, 0x6d, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0b,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x1a,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x6d, 0x65, 0x6d, 0x40, 0x30, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x26, 0x6d, 0x65, 0x6d, 0x6f,
+    0x72, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x32,
+    0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+    0x00, 0x00, 0x00, 0x01, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x40, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x72, 0x69, 0x73, 0x63, 0x76, 0x2c, 0x63, 0x6c,
+    0x69, 0x6e, 0x74, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x32, 0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10,
+    0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x01, 0x23, 0x00, 0x00, 0x04, 0x56, 0x00, 0x00, 0x01, 0x23,
+    0x00, 0x00, 0x07, 0x89, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+    0x68, 0x74, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0a,
+    0x00, 0x00, 0x00, 0x00, 0x75, 0x63, 0x62, 0x2c, 0x68, 0x74, 0x69, 0x66, 0x30, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x09, 0x63, 0x6f, 0x6d, 0x70,
+    0x61, 0x74, 0x69, 0x62, 0x6c, 0x65, 0x00, 0x23, 0x61, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73, 0x2d,
+    0x63, 0x65, 0x6c, 0x6c, 0x73, 0x00, 0x23, 0x73, 0x69, 0x7a, 0x65, 0x2d, 0x63, 0x65, 0x6c, 0x6c,
+    0x73, 0x00, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x5f, 0x74, 0x79, 0x70, 0x65, 0x00, 0x72, 0x65,
+    0x67, 0x00, 0x70, 0x68, 0x61, 0x6e, 0x64, 0x6c, 0x65, 0x00, 0x23, 0x69, 0x6e, 0x74, 0x65, 0x72,
+    0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x65, 0x6c, 0x6c, 0x73, 0x00, 0x69, 0x6e, 0x74, 0x65, 0x72,
+    0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x6c, 0x65, 0x72, 0x00,
+    0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x73, 0x2d, 0x65, 0x78, 0x74, 0x65, 0x6e,
+    0x64, 0x65, 0x64, 0x00};

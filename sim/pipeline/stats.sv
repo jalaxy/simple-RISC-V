@@ -1,6 +1,7 @@
 module stats(
-    input  logic        clk,
-    input  logic        rst,
+    input  logic         clk,
+    input  logic         rst,
+    output logic [63:0]  csr_satp,
     output logic         icache_rqst,
     output logic [63:0]  icache_addr,
     output logic         icache_flsh,
@@ -29,7 +30,7 @@ module stats(
     output logic [63:0] misp
 );
     // instantiate
-    pipeline pipeline_inst(clk, rst,
+    pipeline pipeline_inst(clk, rst, csr_satp,
         icache_rqst, icache_addr, icache_flsh, icache_done, icache_data,
         dcache_rqst, dcache_rsrv, dcache_wena, dcache_addr, dcache_bits,
         dcache_done, dcache_rdat, dcache_wdat, dcache_flsh);
