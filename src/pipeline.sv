@@ -1207,7 +1207,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
         through[i] = ~rqst[i].wena & ~rqst[i].addr[64] & ~misa[i];
         for (int j = 0; j < `LSQSZ + i; j++) if (lsq[j].id[`lgCQSZ])
             if (lsq[j].addr[64] | lsqmi[j] | lsq[j].aqrl[1] |
-                lsq[j].wena & rqst[i].addr[63:3] == lsq[j].addr[63:3])
+                rqst[i].addr[63:3] == lsq[j].addr[63:3])
                 through[i] = 0;
         if (rqst[i].aqrl[0] | rqst[i].csr) through[i] = 0;
         fwd[i] = 0; fwddata[i] = 0;
