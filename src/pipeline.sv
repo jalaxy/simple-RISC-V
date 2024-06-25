@@ -98,13 +98,13 @@ typedef struct packed {
     logic [7:0][1:0] pat;
 } pc_if_t;
 typedef struct packed {
-    logic valid;
+    logic valid, pf;
     logic [63:0] pc;
     logic [31:0] ir;
     logic [17:0] pat;
 } if_id_t;
 typedef struct packed {
-    logic valid;
+    logic valid, pf;
     logic [`lgCQSZ:0] cqid;
     logic [2:0] delta;
     logic [63:0] pc;
@@ -183,6 +183,7 @@ module pipeline(
     output logic [63:0]  icache_addr,
     output logic         icache_flsh,
     input  logic         icache_done,
+    input  logic         icache_pgft,
     input  logic [127:0] icache_data,
 
     output logic [`lgCQSZ:0] dcache_rqst,
@@ -191,6 +192,7 @@ module pipeline(
     output logic      [63:0] dcache_addr,
     output logic       [2:0] dcache_bits,
     input  logic [`lgCQSZ:0] dcache_done,
+    input  logic       [1:0] dcache_pgft,
     input  logic      [63:0] dcache_rdat,
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh
@@ -214,11 +216,12 @@ module pipeline(
     logic [`lgCQSZ:0] mul_done; logic mul_exc, mul_ena; logic [64:0] mul_r;
     logic [`lgCQSZ:0] div_done; logic div_exc, div_ena; logic [64:0] div_r;
     logic [`lgCQSZ:0] fpu_done; logic fpu_exc, fpu_ena; logic [64:0] fpu_r;
-    logic [`lgCQSZ:0] lsu_done; logic lsu_exc, lsu_ena; logic [64:0] lsu_rdat;
+    logic [`lgCQSZ:0] lsu_done; logic lsu_ena;
+    logic [64:0] lsu_rdat; logic [6:0] lsu_cause;
     logic [`lgCQSZ:0] frontid, nextid; logic redir;
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
-    logic [6:0] cause; logic [63:0] epc, nret; logic [2:0] ret;
+    logic [6:0] cause; logic [63:0] epc, tval, nret; logic [2:0] ret;
     logic [63:0] csr_tvec, csr_mepc, csr_sepc;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
@@ -230,8 +233,8 @@ module pipeline(
         .out_pc(data_if_pc), .ena_pc(get_if_pc),
         .out_id(data_if_id), .ena_id(get_if_id),
         .icache_rqst(icache_rqst), .icache_addr(icache_addr),
-        .icache_flsh(icache_flsh),
-        .icache_done(icache_done), .icache_data(icache_data));
+        .icache_flsh(icache_flsh), .icache_done(icache_done),
+        .icache_pgft(icache_pgft), .icache_data(icache_data));
     id_stage id_stage_inst(.clk(clk), .rst(rst), .redir(redir),
         .in_if(data_if_id), .get_if(get_if_id),
         .out_ex(data_id_ex), .ena_ex(get_id_ex));
@@ -254,21 +257,23 @@ module pipeline(
         .mepc(csr_mepc), .sepc(csr_sepc),
         .late_done(late_done), .late_val(late_val),
         .late_npc(late_npc), .late_cause(late_cause),
-        .nret(nret), .epc(epc), .cause(cause), .ret(ret));
+        .nret(nret), .epc(epc), .tval(tval), .cause(cause), .ret(ret));
     pending_table pending_table_inst(.clk(clk), .rst(rst), .flush(redir),
         .in_ex(data_ex_pt), .get_ex(get_ex_pt),
         .out_ex(data_pt_ex), .ena_ex(get_pt_ex),
         .late_done(late_done), .late_val(late_val));
     lsu lsu_inst(.clk(clk), .rst(rst), .flush(redir),
         .ena(lsu_ena), .get(lsu_free), .frontid(frontid), .nextid(nextid),
-        .rqst(lsu_rqst), .done(lsu_done), .excp(lsu_exc), .rdata(lsu_rdat),
+        .rqst(lsu_rqst), .done(lsu_done), .cause(lsu_cause), .rdata(lsu_rdat),
         .late_done(late_done), .late_val(late_val),
         .addr_done(addr_done), .addr_val(addr_val),
         .csr_addr(csr_addr), .csr_wena(csr_wena), .csr_func(csr_func),
         .csr_rval(csr_rval), .csr_wval(csr_wval), .csr_excp(csr_excp),
-        .dcache_rqst(dcache_rqst), .dcache_rsrv(dcache_rsrv), .dcache_wena(dcache_wena),
-        .dcache_addr(dcache_addr), .dcache_bits(dcache_bits), .dcache_done(dcache_done),
-        .dcache_rdat(dcache_rdat), .dcache_wdat(dcache_wdat), .dcache_flsh(dcache_flsh)
+        .dcache_rqst(dcache_rqst), .dcache_rsrv(dcache_rsrv),
+        .dcache_wena(dcache_wena), .dcache_flsh(dcache_flsh),
+        .dcache_addr(dcache_addr), .dcache_bits(dcache_bits),
+        .dcache_done(dcache_done), .dcache_pgft(dcache_pgft),
+        .dcache_rdat(dcache_rdat), .dcache_wdat(dcache_wdat)
     );
     mul mul_inst(.clk(clk), .rst(rst), .flush(redir), .ena(mul_ena),
         .rqst(mul_rqst), .done(mul_done), .r(mul_r), .e(mul_exc));
@@ -278,7 +283,8 @@ module pipeline(
         .rqst(fpu_rqst), .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
         .rval(csr_rval), .wval(csr_wval), .func(csr_func), .eout(csr_excp),
-        .nret(nret), .ein(redir & cause[6]), .epc(epc), .cause(cause[5:0]), .ret(ret),
+        .nret(nret), .ret(ret), .ein(redir & cause[6]),
+        .epc(epc), .tval(tval), .cause(cause[5:0]),
         .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
         .csr_sepc(csr_sepc), .csr_satp(csr_satp));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
@@ -286,7 +292,7 @@ module pipeline(
         .done_in({pt_done, fpu_done, div_done, mul_done, lsu_done}),
         .val_in({pt_data, fpu_r, div_r, mul_r, lsu_rdat}),
         .npc_in({pt_npc, 65'd0, 65'd0, 65'd0, 65'd0}),
-        .cause_in({28'd0, 7'd0, 7'd0, 7'd0, 7'd0}),
+        .cause_in({28'd0, 7'd0, 7'd0, 7'd0, lsu_cause}),
         .get({pt_ena, fpu_ena, div_ena, mul_ena, lsu_ena}),
         .done_out(late_done), .val_out(late_val),
         .npc_out(late_npc), .cause_out(late_cause));
@@ -327,8 +333,12 @@ module pc_stage(input logic clk, input logic rst,
         if (in_if.redir) pc <= in_if.npc;
         if (in_wb.redir) pc <= in_wb.npc;
     end
-    always_comb begin {branch, num} = 8; for (int i = 7; i >= 0; i--)
-        if (phtrv[i][1]) {branch, num} = {1'b1, i[3:0] + 3'd1}; end
+    always_comb begin
+        {branch, num} = 8;
+        for (int i = 7; i >= 0; i--) if (phtrv[i][1])
+            {branch, num} = {1'b1, i[3:0] + 3'd1};
+        if (|pc[11:1] & 11'(num) > -pc[11:1]) num = -pc[4:1]; // avoid beyond-page fetch
+    end
     always_comb out_if.valid = ~in_wb.redir & ~in_if.redir;
     always_comb out_if.pc = pc;
     always_comb out_if.num = num;
@@ -344,26 +354,29 @@ module if_stage(input logic clk, input logic rst, input logic redir,
     output logic [63:0]  icache_addr,
     output logic         icache_flsh,
     input  logic         icache_done,
+    input  logic         icache_pgft,
     input  logic [127:0] icache_data
 );
     logic [4:0] remnum, isnum, getnum; logic [3:0] getinstnum, instnum;
     logic [15:0][15:0] remdat, isdat; logic [15:0][63:0] rempc, ispc;
-    logic [15:0][1:0] rempat, ispat; logic [15:0] remb, isb;
-    logic [3:0] icnum; logic [7:0] icb;
+    logic [15:0][1:0] rempat, ispat; logic [15:0] remb, isb, rempf, ispf;
+    logic [3:0] icnum; logic [7:0] icb, icpf;
     logic [7:0][15:0] icdat; logic [7:0][63:0] icpc; logic [7:0][1:0] icpat;
-    logic [3:0][3:0] irpos; logic [3:0] irvalid, irb;
+    logic [3:0][3:0] irpos; logic [3:0] irvalid, irb, irpf;
     logic [3:0][63:0] irpc; logic [3:0][31:0] irdat;
     logic [3:0][1:0] irpat; logic [3:0][15:0] irgh;
     logic [15:0] isnc; logic busy; logic [15:0] ghr, ghnew; logic [1:0] incomp;
     always_comb isdat = ({128'd0, icache_data} << {remnum, 4'b0}) | remdat;
     always_comb ispc = ({512'd0, icpc} << {remnum, 6'd0}) | rempc;
     always_comb ispat = ({16'd0, icpat} << {remnum, 1'b0}) | rempat;
-    always_comb isb = ({8'd0, icb} << {remnum}) | remb;
+    always_comb isb = ({8'd0, icb} << remnum) | remb;
+    always_comb ispf = ({8'd0, icpf} << remnum) | rempf;
     always_comb isnum = remnum + (icache_done ? {1'b0, icnum} : 5'd0);
     always_comb for (int i = 0; i < 16; i++) isnc[i] = &isdat[i][1:0];
     always_comb for (int i = 0; i < 4; i++) irvalid[i] =
         |isnum & {1'b0, irpos[i]} + (isnc[irpos[i]] ? 5'd2 : 5'd1) <= isnum;
     always_comb for (int i = 0; i < 4; i++) irpc[i] = ispc[irpos[i]];
+    always_comb for (int i = 0; i < 4; i++) irpf[i] = ispf[irpos[i]];
     always_comb for (int i = 0; i < 4; i++) irdat[i] = isdat[irpos[i]+1-:2];
     always_comb for (int i = 0; i < 4; i++) irb[i] = irvalid[i] &(
         irdat[i][6:0] == 7'b1100011 |                        // BRANCH
@@ -396,6 +409,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
         remdat <= (~(-256'd1 << {isnum, 4'd0}) & isdat) >> {getnum, 4'd0};
         rempc <= (~(-1024'd1 << {isnum, 6'd0}) & ispc) >> {getnum, 6'd0};
         rempat <= (~(-32'd1 << {isnum, 1'd0}) & ispat) >> {getnum, 1'd0};
+        rempf <= (~(-16'd1 << isnum) & ispf) >> getnum;
         remb <= (~(-16'd1 << isnum) & isb) >> getnum;
         if (out_pc.redir) remb <= 0; // signal b is only used for incomplete instruction
     end
@@ -426,6 +440,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
         always_comb out_id[i].pc = irpc[i];
         always_comb out_id[i].pat = {irgh[i], irpat[i]};
         always_comb out_id[i].ir = irdat[i];
+        always_comb out_id[i].pf = irpf[i];
     end
     always_comb begin {out_pc, incomp} = 0; for (int i = 7; i>= 0; i--)
         if (irvalid[i] & isnc[irpos[i]] & isb[irpos[i]]) begin
@@ -439,6 +454,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
             out_pc.gh = ghnew;
         end end
     always_comb icdat = icache_data;
+    always_comb icpf = {8{icache_pgft}};
     always_comb icache_rqst = ~rst & get_pc & in_pc.valid;
     always_comb icache_addr = in_pc.pc;
     always_comb icache_flsh = redir;
@@ -616,6 +632,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
         always_comb b[2] = {1'd0, imm} & {65{op[`AMO]}};
         always_comb begin
             res[g][0].valid = |exop[0];
+            res[g][0].pf = in_if[g].pf;
             res[g][0].delta = |exop[1] ? 3'd0 : delta;
             res[g][0].pc = in_if[g].pc;
             res[g][0].pat = in_if[g].pat;
@@ -929,6 +946,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             out_wb_g[g].npc = jump ? jpc : in.pc + {61'd0, in.delta};
             if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 4'd2, level};
             else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
+            else if (in.pf) out_wb_g[g].cause = {1'b1, 6'd12};
             else if (op[`EX_INV]) out_wb_g[g].cause = {1'b1, 6'd2};
             else out_wb_g[g].cause = 0;
             out_wb_g[g].ret = {op[`EX_RET], in.funct3[1:0]};
@@ -958,7 +976,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     input logic [3:0][`lgCQSZ:0] late_done, input logic [3:0][64:0] late_val,
     input logic [3:0][64:0] late_npc, input logic [3:0][6:0] late_cause,
     output logic [63:0] nret, output logic [2:0] ret,
-    output logic [63:0] epc, output logic [6:0] cause,
+    output logic [63:0] epc, output logic [63:0] tval, output logic [6:0] cause,
     input logic [63:0] tvec, input logic [63:0] mepc, input logic [63:0] sepc
 );
     // register number: 00_xxxxx -> integer, 01_xxxxx -> float, 10_00000 -> tmp
@@ -1048,13 +1066,22 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb begin numout = 0; for (int n = 1; n <= 4; n++)
         if (cqpop[n - 1]) numout = n[`lgCQSZ:0]; end
     always_comb redir = out_pc.redir;
-    always_comb begin {cause, epc} = 0; for (int i = 3; i >= 0; i--) if (cqredir[i])
-        {cause, epc} = cqexcep[i] ? {cqcause[i], cqinfo[i].pc} : 0; end
+    always_comb begin
+        cause = 0; epc = 0; tval = 0;
+        for (int i = 3; i >= 0; i--) if (cqredir[i])
+            if (cqexcep[i]) begin
+                cause = cqcause[i];
+                epc = cqinfo[i].pc;
+                if (cause[5:0] == 6'd12) tval = cqinfo[i].pc; // I page fault
+                else if (cause[5:0] == 6'd13 | cause[5:0] == 6'd15) // L/S page fault
+                    tval = cqdata[i][63:0];
+            end else cause = 0;
+    end
     always_comb begin ret = 0; for (int i = 3; i >= 0; i--)
         if (cqpop[i] & cqinfo[i].ret[2]) ret = cqinfo[i].ret; end
     always_comb begin nret = 0; for (int i = 0; i < 4; i++)
         if (cqpop[i] & ~cqinfo[i].rda[6]) nret++; end
-    always_comb frontid = {1'b1, front[0]};
+    always_comb frontid = cqinfo[0].pc == lastnpc ? {1'b1, front[0]} : 0;
     always_comb begin nextid = 0; for (int i = 3; i >= 0; i--)
         if (~cqpop[i] & cqvalid[i] & ~cqredir[i]) nextid = {1'b1, front[i]}; end
     always_ff @(posedge clk) if (redir) lastvalid <= 0;
@@ -1171,7 +1198,7 @@ endmodule
 module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     input logic [`lgCQSZ:0] frontid, input logic [`lgCQSZ:0] nextid,
     output logic [3:0] get, input lsu_rqst_t [3:0] rqst,
-    output logic [`lgCQSZ:0] done, output logic excp, output logic [64:0] rdata,
+    output logic [`lgCQSZ:0] done, output logic [6:0] cause, output logic [64:0] rdata,
     input logic [3:0][`lgCQSZ:0] late_done, input logic [3:0][64:0] late_val,
     input logic [3:0][`lgCQSZ:0] addr_done, input logic [3:0][63:0] addr_val,
     output logic [11:0] csr_addr, output logic csr_wena, output logic [2:0] csr_func,
@@ -1182,6 +1209,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     output logic      [63:0] dcache_addr,
     output logic       [2:0] dcache_bits,
     input  logic [`lgCQSZ:0] dcache_done,
+    input  logic       [1:0] dcache_pgft,
     input  logic      [63:0] dcache_rdat,
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh
@@ -1334,7 +1362,10 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
         else    if (fromfwd) {done, rdata} = {fwdid,       1'b0, fwdval};
         else    if (fromcsr) {done, rdata} = {lsqrqst[front[0]].id, 1'b0, csr_rval};
         else                 {done, rdata} = 0;
-    always_comb excp = csr_excp | 0;
+    always_comb if (csr_excp) cause = {1'b1, 6'd2};
+        else if (fromdc & dcache_pgft[1]) cause = {1'b1, 6'd15};
+        else if (fromdc & dcache_pgft[0]) cause = {1'b1, 6'd13};
+        else cause = 0;
 endmodule
 
 module arbiter(
@@ -1363,7 +1394,7 @@ module csr(input logic clk, input logic rst,
     input logic [11:0] addr, output logic [63:0] rval,
     input logic wena, input logic [63:0] wval, input logic [2:0] func,
     input logic [63:0] nret, output logic eout,
-    input logic ein, input logic [63:0] epc,
+    input logic ein, input logic [63:0] epc, logic [63:0] tval,
     input logic [5:0] cause, input logic [2:0] ret,
     output logic [63:0] csr_tvec, output logic [63:0] csr_mepc,
     output logic [63:0] csr_sepc, output logic [63:0] csr_satp
@@ -1414,10 +1445,12 @@ module csr(input logic clk, input logic rst,
             if (trapintos) begin
                 level <= 2'b01; // trap into S mode
                 sepc <= epc;
+                stval <= tval;
                 scause <= {58'd0, cause};
             end else begin
                 level <= 2'b11; // trap into M mode
                 mepc <= epc;
+                mtval <= tval;
                 mcause <= {58'd0, cause};
             end
         if (ret[2])
@@ -1443,7 +1476,9 @@ module csr(input logic clk, input logic rst,
             end
         if (rst) level <= 2'b11;
         // M-level CSR
-        if (rst) misa <= {2'h2, 36'h0, 26'h112D};
+                                        // ZY XWVU TSRQ PONM LKJI HGFE DCBA
+                                        //          S      M    I   F  DC A
+        if (rst) misa <= {2'h2, 36'h0, 26'b00_0000_0100_0001_0001_0010_1101};
         else if (wena & addr == 12'h301) begin
             misa[0] <= wres[0]; misa[3:2] <= wres[3:2]; misa[4] <= ~wres[8];
             misa[8:5] <= wres[8:5]; misa[13:12] <= wres[13:12]; misa[16] <= wres[16];

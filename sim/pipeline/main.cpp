@@ -6,6 +6,7 @@
 #include <verilated_vcd_c.h>
 #include <elf.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include "Vstats.h"
 #include "simulator.h"
 
@@ -43,7 +44,7 @@ typedef struct struct_icache_req
 typedef struct struct_dcache_req
 {
     uint8_t rqst = 0, bits = 0, wena = 0, rsrv = 0;
-    uint64_t addr = 0, wdata = 0;
+    uint64_t addr = 0, wdata = 0, vaddr = 0;
 } dcache_req_t;
 
 typedef struct struct_commit
@@ -106,7 +107,7 @@ void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
     }
 }
 
-uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr)
+uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr, uint8_t wena = 0)
 {
     uint64_t ppn, vpn[4], offset;
     int start = -1;
@@ -117,7 +118,7 @@ uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr)
     if (satp >> 60 == 8) // sv39
     {
         start = 2;
-        offset = BITS(vaddr, 0, 12);
+        offset = BITS(vaddr, 0, 11);
         vpn[0] = BITS(vaddr, 12, 20);
         vpn[1] = BITS(vaddr, 21, 29);
         vpn[2] = BITS(vaddr, 30, 38);
@@ -130,6 +131,9 @@ uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr)
             return -1;
         if (BIT(pte, 1) || BIT(pte, 3)) // pte.r = 1 or pte.x = 1 -> leaf node
         {
+            pte |= 1 << 6;
+            if (wena)
+                pte |= 1 << 7;
             for (int j = 0; j < i; j++)
                 ppn |= vpn[j] << (j * 9); // super page
             break;
@@ -367,7 +371,8 @@ int main(int argc, char **argv)
             }
             if (dut->dcache_rqst)
                 d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena, dut->dcache_rsrv,
-                              paddr(memory, dut->csr_satp, dut->dcache_addr), dut->dcache_wdat});
+                              paddr(memory, dut->csr_satp, dut->dcache_addr, dut->dcache_wena),
+                              dut->dcache_wdat, dut->dcache_addr});
             while (dut->icache_flsh && !i_delay.empty())
                 i_delay.pop();
             while (dut->dcache_flsh && !d_delay.empty())
@@ -376,34 +381,45 @@ int main(int argc, char **argv)
             i_delay.empty() ? i_delay.push({0}), 0 : 0;
             d_delay.empty() ? d_delay.push({0}), 0 : 0;
             dut->icache_done = i_delay.front().rqst; // other signals change after clk
-            if (i_delay.front().rqst)
+            if (i_delay.front().rqst && i_delay.front().addr != -1)
                 for (int j = 0; j < 4; j++)
                     dut->icache_data[j] = DLE(memory, i_delay.front().addr + 4 * j);
+            dut->icache_pgft = i_delay.front().rqst && i_delay.front().addr == -1;
             dut->dcache_done = d_delay.front().rqst;
             if (d_delay.front().rqst)
-                dut->dcache_rdat = DLE(memory, d_delay.front().addr);
+                if (d_delay.front().addr == -1)
+                    dut->dcache_rdat = d_delay.front().vaddr;
+                else
+                    dut->dcache_rdat = DLE(memory, d_delay.front().addr);
+            if (d_delay.front().rqst && d_delay.front().addr == -1)
+                dut->dcache_pgft = d_delay.front().wena ? 2 : 1;
+            else
+                dut->dcache_pgft = 0;
             if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv)
                 reserved[d_delay.front().addr] = 1;
             // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
             uint64_t bitwidth = 8 * (1 << (d_delay.front().bits & 3));
             uint64_t mask = bitwidth < 64 ? (1llu << bitwidth) - 1 : ~0llu;
-            dut->dcache_rdat &= mask;
-            if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
-                dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
-            if (d_delay.front().rqst && d_delay.front().wena)
+            if (!dut->dcache_pgft)
             {
-                if (d_delay.front().rsrv != 1 || reserved[d_delay.front().addr])
+                dut->dcache_rdat &= mask;
+                if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
+                    dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
+                if (d_delay.front().rqst && d_delay.front().wena)
                 {
-                    uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
-                    uint8_t width = 1 << (d_delay.front().bits & 3);
-                    for (int j = 0; j < width; j++)
-                        memory[addr + j] = DTOB(data, j);
-                    stores.push({addr, data, width});
-                    if (d_delay.front().rsrv == 1)
-                        reserved[addr] = dut->dcache_rdat = 0;
+                    if (d_delay.front().rsrv != 1 || reserved[d_delay.front().addr])
+                    {
+                        uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
+                        uint8_t width = 1 << (d_delay.front().bits & 3);
+                        for (int j = 0; j < width; j++)
+                            memory[addr + j] = DTOB(data, j);
+                        stores.push({addr, data, width});
+                        if (d_delay.front().rsrv == 1)
+                            reserved[addr] = dut->dcache_rdat = 0;
+                    }
+                    else
+                        dut->dcache_rdat = 1;
                 }
-                else
-                    dut->dcache_rdat = 1;
             }
             i_delay.pop(), d_delay.pop();
             dut->eval(), (trace && i >= cmd.mintime) ? trace->dump(st++), 0 : 0; // evaluate again
@@ -448,7 +464,7 @@ int main(int argc, char **argv)
                     curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
                 if (sim->get_csraddr() != -1)
                     printf("[Info]     %s: 0x%016lx\n", sim->get_csrname(curcsr.addr), curcsr.data);
-                if (sim->get_mwwidth())
+                if (curstore.width)
                     printf("[Info]     mem%d@0x%lx: 0x%0*lx\n",
                            curstore.width, curstore.addr,
                            curstore.width * 2, curstore.data);
@@ -532,6 +548,16 @@ int main(int argc, char **argv)
                     for (int i = 0; i < retval; i++)
                         memory[arg1 + i] = buf[i];
                     delete[] buf;
+                }
+                else if (which == 0x50) // sysfstat
+                {
+                    uint64_t arg0, arg1;
+                    struct stat s;
+                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // memory address
+                    retval = fstat(arg0, &s);
+                    for (int i = 0; i < sizeof(s); i++)
+                        memory[arg1 + i] = *((uint8_t *)&s + i);
                 }
                 else if (which == 0x5d) // exit
                     exitcall = 1, exitcode = (DLE(memory, magic_mem + 8) << 1) | 1;
