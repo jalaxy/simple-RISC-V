@@ -1001,13 +1001,14 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     logic [3:0][`lgCQSZ-1:0] cqwaddr;
     logic [3:0] cqinfowena, cqnpcwena, cqcausewena, cqvalwena;
     cqinfo_t [3:0] cqinfow; logic [3:0][63:0] cqnpcw;
-    logic [3:0][6:0] cqcausew; logic [3:0][64:0] cqvalw;
+    logic [3:0][6:0] cqcauser, cqcausew; logic [3:0][64:0] cqvalw;
     always_comb for (int i = 0; i < 4; i++) if (late_done[i][`lgCQSZ]) begin
         cqwaddr[i] = late_done[i][`lgCQSZ-1:0];
         cqinfowena[i] = 0; cqinfow[i] = 0;
         cqvalwena[i]  = 1; cqvalw[i]  = late_val[i];
-        cqnpcwena[i]   = late_npc[i][64];  cqnpcw[i]   = late_npc[i][63:0];
-        cqcausewena[i] = late_cause[i][6]; cqcausew[i] = late_cause[i];
+        cqnpcwena[i] = late_npc[i][64]; cqnpcw[i] = late_npc[i][63:0];
+        cqcausewena[i] = ~cqcauser[i][6] & late_cause[i][6]; // cause priority
+        cqcausew[i] = late_cause[i];
     end else begin
         cqwaddr[i] = rear[i];
         cqinfowena[i] = cqpush[i]; cqvalwena[i] = cqpush[i];
@@ -1021,8 +1022,9 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     regfile #(.dwidth(64), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqnpc_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqfnpc),
             .waddr(cqwaddr), .wvalue(cqnpcw), .wena(cqnpcwena));
-    regfile #(.dwidth(7), .rports(4), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
-        cqcause_inst(.clk(clk), .rst(rst), .raddr(front[3:0]), .rvalue(cqfcause),
+    regfile #(.dwidth(7), .rports(8), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
+        cqcause_inst(.clk(clk), .rst(rst),
+            .raddr({cqwaddr, front[3:0]}), .rvalue({cqcauser, cqfcause}),
             .waddr(cqwaddr), .wvalue(cqcausew), .wena(cqcausewena));
     regfile #(.dwidth(65), .rports(12), .wports(4), .awidth(`lgCQSZ), .depth(`CQSZ))
         cqval_inst(.clk(clk), .rst(rst),
@@ -1034,7 +1036,7 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
             if (late_done[j] == {1'b1, front[i]}) begin
                 cqdata[i] = late_val[j];
                 if (late_npc[j][64]) cqnpc[i] = late_npc[j][63:0];
-                if (late_cause[j][6]) cqcause[i] = late_cause[j];
+                if (~cqcauser[j][6] & late_cause[j][6]) cqcause[i] = late_cause[j];
             end
         if (cqinfo[i].ret[2]) cqnpc[i] = cqinfo[i].ret[1:0] == 2'b01 ? sepc : mepc;
     end

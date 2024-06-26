@@ -520,6 +520,27 @@ int main(int argc, char **argv)
                     arg0 = DLE(memory, magic_mem + 8); // file descriptor
                     retval = close(arg0);
                 }
+                else if (which == 0x3e) // syslseek
+                {
+                    uint64_t arg0, arg1, arg2;
+                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // pointer
+                    arg2 = DLE(memory, magic_mem + 24); // directive
+                    retval = lseek(arg0, arg1, arg2);
+                }
+                else if (which == 0x3f) // sysread
+                {
+                    uint64_t arg0, arg1, arg2;
+                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
+                    arg1 = DLE(memory, magic_mem + 16); // memory address
+                    arg2 = DLE(memory, magic_mem + 24); // max read size
+                    uint8_t *buf = new (std::nothrow) uint8_t[arg1];
+                    if (!buf)
+                        return printf("[Error] Memory allocation failed.\n"), 1;
+                    retval = read(arg0, buf, arg2);
+                    for (int i = 0; i < retval; i++)
+                        memory[arg1 + i] = buf[i];
+                }
                 else if (which == 0x40) // syswrite
                 {
                     uint64_t arg0, arg1, arg2;
