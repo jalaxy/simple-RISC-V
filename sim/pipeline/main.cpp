@@ -201,16 +201,13 @@ int main(int argc, char **argv)
         printf("    -pc: output PC trace\n");
         return 0;
     }
-    if (cmd.debug)
-    {
-        printf("[Info] Running simulation in %s mode with:\n[Info]     ",
-               cmd.filetype == 0 ? "dump" : "elf");
-        for (int i = 0; i < cmd.args.size(); i++)
-            printf(" %s", cmd.args[i]);
-        printf("\n");
-        if (cmd.vcd)
-            printf("[Info] Recording waveform in file: %s\n", cmd.vcd);
-    }
+    printf("[Info] Running simulation in %s mode with:\n[Info]     ",
+           cmd.filetype == 0 ? "dump" : "elf");
+    for (int i = 0; i < cmd.args.size(); i++)
+        printf(" %s", cmd.args[i]);
+    printf("\n");
+    if (cmd.vcd)
+        printf("[Info] Recording waveform in file: %s\n", cmd.vcd);
 
     // Load and set reset code in memory
     std::map<uint64_t, uint8_t> memory, reserved;
@@ -552,6 +549,8 @@ int main(int argc, char **argv)
                         return printf("[Error] Memory allocation failed.\n"), 1;
                     for (int i = 0; i < arg2; i++)
                         buf[i] = memory[arg1 + i];
+                    fflush(stdout);
+                    fflush(stderr);
                     retval = write(arg0, buf, arg2);
                     delete[] buf;
                 }
@@ -581,7 +580,7 @@ int main(int argc, char **argv)
                         memory[arg1 + i] = *((uint8_t *)&s + i);
                 }
                 else if (which == 0x5d) // exit
-                    exitcall = 1, exitcode = (DLE(memory, magic_mem + 8) << 1) | 1;
+                    exitcall = 1, exitcode = DLE(memory, magic_mem + 8);
                 else if (which == 0x7db) // pk-sysgetmainvars
                 {
                     // buffer format: argc(64) argv[0](64) argv[1](64) ...
@@ -618,7 +617,7 @@ int main(int argc, char **argv)
         memory[htif.fromhost] = 1;
         cmd.debug ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
-    if (cmd.debug && exitcall)
+    if (exitcall)
         printf("[Info] Exit with code %d.\n", exitcode);
     else if (cmd.debug)
     {
@@ -636,13 +635,10 @@ int main(int argc, char **argv)
             }
         printf("[Info] Maximum cycle %d reached.\n", cmd.maxtime);
     }
-    if (cmd.debug)
-    {
-        printf("[Info] Statistics:\n");
-        printf("[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
-               dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
-               dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
-    }
+    printf("[Info] Statistics:\n");
+    printf("[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
+           dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
+           dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);
