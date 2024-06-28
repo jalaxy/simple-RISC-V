@@ -60,7 +60,7 @@ simulator::simulator(const uint64_t &initpc, const std::map<uint64_t, uint8_t> &
     csr[0x144] = {"sip", 0};
     csr[0x180] = {"satp", 0};
     csr[0x300] = {"mstatus", 0};
-    csr[0x301] = {"misa", 0};
+    csr[0x301] = {"misa", 0x800000000004112d};
     csr[0x302] = {"medeleg", 0};
     csr[0x303] = {"mideleg", 0};
     csr[0x304] = {"mie", 0};

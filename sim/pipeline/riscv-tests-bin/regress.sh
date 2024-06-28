@@ -22,6 +22,6 @@ for i in ${!pids[@]}; do
     echo "****************************************************************"
     cat ${names[i]}
 done
-for name in $names; do
+for name in ${names[@]}; do
     rm $name
 done

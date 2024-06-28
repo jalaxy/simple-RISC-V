@@ -19,6 +19,7 @@ module stats(
     output logic      [63:0] dcache_wdat,
     output logic             dcache_flsh,
     // stats
+    output logic        cmtena[3:0],
     output logic [63:0] cmtpc[3:0],
     output logic  [6:0] cmtaddr[3:0],
     output logic [63:0] cmtdata[3:0],
@@ -41,12 +42,13 @@ module stats(
         dcache_wdat, dcache_flsh);
 
     // monitor registers change
-    always_comb for (int i = 0; i < 4; i++) {cmtpc[i], cmtaddr[i], cmtdata[i]} =
-        pipeline_inst.wb_stage_inst.cqpop[i] &
-            ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6] ?
-            {pipeline_inst.wb_stage_inst.cqinfo[i].pc,
-             pipeline_inst.wb_stage_inst.cqinfo[i].rda,
-             pipeline_inst.wb_stage_inst.cqdata[i][63:0]} : 0;
+    always_comb for (int i = 0; i < 4; i++)
+        {cmtena[i], cmtpc[i], cmtaddr[i], cmtdata[i]} = {
+            pipeline_inst.wb_stage_inst.cqpop[i] &
+                ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6],
+            pipeline_inst.wb_stage_inst.cqinfo[i].pc,
+            pipeline_inst.wb_stage_inst.cqinfo[i].rda,
+            pipeline_inst.wb_stage_inst.cqdata[i][63:0]};
     always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
         pipeline_inst.csr_inst.addr, pipeline_inst.csr_inst.wres};
 
