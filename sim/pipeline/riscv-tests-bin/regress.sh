@@ -2,7 +2,7 @@
 echo "ISA tests errors:"
 bashdir=$(dirname $BASH_SOURCE)
 for file in $bashdir/isa/*; do
-    $bashdir/../obj_dir/Vstats -elf $file > /dev/null
+    $bashdir/../obj_dir/Vstats -elf $file >/dev/null 2>&1
     exitcode=$?
     if [ $exitcode -ne 0 ]; then
         echo "$file exited with code $exitcode"
@@ -13,7 +13,7 @@ pids=()
 names=()
 for file in $bashdir/*.riscv; do
     touch /tmp/$(basename $file)
-    $bashdir/../obj_dir/Vstats -elf $file > /tmp/$(basename $file) &
+    $bashdir/../obj_dir/Vstats -elf $file >/tmp/$(basename $file) 2>&1 &
     pids+=($!)
     names+=(/tmp/$(basename $file))
 done

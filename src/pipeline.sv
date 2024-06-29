@@ -180,22 +180,22 @@ module pipeline(
     output logic [63:0] csr_satp,
 
     output logic         icache_rqst,
-    output logic [63:0]  icache_addr,
+    output logic  [63:0] icache_addr,
     output logic         icache_flsh,
     input  logic         icache_done,
     input  logic         icache_pgft,
     input  logic [127:0] icache_data,
 
-    output logic [`lgCQSZ:0] dcache_rqst,
-    output logic       [1:0] dcache_rsrv,
-    output logic             dcache_wena,
-    output logic      [63:0] dcache_addr,
-    output logic       [2:0] dcache_bits,
-    input  logic [`lgCQSZ:0] dcache_done,
-    input  logic       [1:0] dcache_pgft,
-    input  logic      [63:0] dcache_rdat,
-    output logic      [63:0] dcache_wdat,
-    output logic             dcache_flsh
+    output logic  [7:0] dcache_rqst,
+    output logic  [1:0] dcache_rsrv,
+    output logic        dcache_wena,
+    output logic [63:0] dcache_addr,
+    output logic  [2:0] dcache_bits,
+    input  logic  [7:0] dcache_done,
+    input  logic  [1:0] dcache_pgft,
+    input  logic [63:0] dcache_rdat,
+    output logic [63:0] dcache_wdat,
+    output logic        dcache_flsh
 );
     pc_if_t data_pc_if; logic get_pc_if;
     if_id_t [3:0] data_if_id; logic [3:0] get_if_id;
@@ -1205,16 +1205,16 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     input logic [3:0][`lgCQSZ:0] addr_done, input logic [3:0][63:0] addr_val,
     output logic [11:0] csr_addr, output logic csr_wena, output logic [2:0] csr_func,
     input logic [63:0] csr_rval, output logic [63:0] csr_wval, input logic csr_excp,
-    output logic [`lgCQSZ:0] dcache_rqst,
-    output logic       [1:0] dcache_rsrv,
-    output logic             dcache_wena,
-    output logic      [63:0] dcache_addr,
-    output logic       [2:0] dcache_bits,
-    input  logic [`lgCQSZ:0] dcache_done,
-    input  logic       [1:0] dcache_pgft,
-    input  logic      [63:0] dcache_rdat,
-    output logic      [63:0] dcache_wdat,
-    output logic             dcache_flsh
+    output logic  [7:0] dcache_rqst,
+    output logic  [1:0] dcache_rsrv,
+    output logic        dcache_wena,
+    output logic [63:0] dcache_addr,
+    output logic  [2:0] dcache_bits,
+    input  logic  [7:0] dcache_done,
+    input  logic  [1:0] dcache_pgft,
+    input  logic [63:0] dcache_rdat,
+    output logic [63:0] dcache_wdat,
+    output logic        dcache_flsh
 );
     lsu_rqst_t [`LSQSZ-1:0] lsqrqst; lsu_rqst_t [`LSQSZ+3:0] lsq; lsu_rqst_t rqstf;
     logic [`LSQSZ-1:0] lsqsent, lsqmisa; logic [`LSQSZ+3:0] lsqmi;
@@ -1349,7 +1349,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     always_comb fromfwd = ~fromdc & |fwdnum;
     always_comb fromcsr = ~fromdc & ~fromfwd & rqstf.id[`lgCQSZ] & rqstf.csr & cqtop;
     always_comb dcrqst = fromth ? thrqst : (fromlsq ? rqstf : 0);
-    always_comb dcache_rqst = dcrqst.csr ? 0 : dcrqst.id;
+    always_comb dcache_rqst = dcrqst.csr ? 0 : 8'(dcrqst.id);
     always_comb dcache_rsrv = dcrqst.rsrv;
     always_comb dcache_wena = dcrqst.wena;
     always_comb dcache_bits = dcrqst.bits;
@@ -1360,10 +1360,10 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     always_comb csr_wena = fromcsr;
     always_comb csr_func = lsqrqst[front[0]].bits;
     always_comb csr_wval = lsqrqst[front[0]].wdat[63:0];
-    always_comb if (fromdc)  {done, rdata} = {dcache_done, 1'b0, dcache_rdat};
-        else    if (fromfwd) {done, rdata} = {fwdid,       1'b0, fwdval};
-        else    if (fromcsr) {done, rdata} = {lsqrqst[front[0]].id, 1'b0, csr_rval};
-        else                 {done, rdata} = 0;
+    always_comb if (fromdc) {done, rdata} = {dcache_done[`lgCQSZ:0], 1'd0, dcache_rdat};
+        else   if (fromfwd) {done, rdata} = {fwdid, 1'd0, fwdval};
+        else   if (fromcsr) {done, rdata} = {lsqrqst[front[0]].id, 1'd0, csr_rval};
+        else                {done, rdata} = 0;
     always_comb if (csr_excp) cause = {1'b1, 6'd2};
         else if (fromdc & dcache_pgft[1]) cause = {1'b1, 6'd15};
         else if (fromdc & dcache_pgft[0]) cause = {1'b1, 6'd13};

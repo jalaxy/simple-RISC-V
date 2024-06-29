@@ -68,7 +68,7 @@ typedef struct struct_csr
 extern const uint8_t dtb_spike[1161]; // HTIF device tree
 int intr = 0;
 
-void intrhandler(int) { printf("[Info] Interrupted.\n"), intr = 1; }
+void intrhandler(int) { fprintf(stderr, "[Info] Interrupted.\n"), intr = 1; }
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
@@ -205,13 +205,13 @@ int main(int argc, char **argv)
         printf("    -pc: output PC trace\n");
         return 0;
     }
-    printf("[Info] Running simulation in %s mode with:\n[Info]     ",
-           cmd.filetype == 0 ? "dump" : "elf");
+    fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
+            cmd.filetype == 0 ? "dump" : "elf");
     for (int i = 0; i < cmd.args.size(); i++)
-        printf(" %s", cmd.args[i]);
-    printf("\n");
+        fprintf(stderr, " %s", cmd.args[i]);
+    fprintf(stderr, "\n");
     if (cmd.vcd)
-        printf("[Info] Recording waveform in file: %s\n", cmd.vcd);
+        fprintf(stderr, "[Info] Recording waveform in file: %s\n", cmd.vcd);
 
     // Load and set reset code in memory
     std::map<uint64_t, uint8_t> memory, reserved;
@@ -221,7 +221,7 @@ int main(int argc, char **argv)
     uint64_t pkargaddr = 0x80020000; // proxy kernel arguments address
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
-        return printf("[Error] Unable to open file %s.\n", cmd.filename), 1;
+        return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.filename), 1;
     if (cmd.filetype == 0) // direct dumped hex code
     {
         int code;
@@ -237,11 +237,11 @@ int main(int argc, char **argv)
             exit((perror("fread"), 1));
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
             elf_h.e_ident[EI_CLASS] != ELFCLASS64)
-            return printf("[Error] Not 64-bit ELF format.\n"), 1;
+            return fprintf(stderr, "[Error] Not 64-bit ELF format.\n"), 1;
         if (elf_h.e_type != ET_EXEC && elf_h.e_type != ET_DYN)
-            return printf("[Error] Not an executable file.\n"), 1;
+            return fprintf(stderr, "[Error] Not an executable file.\n"), 1;
         if (elf_h.e_machine != EM_RISCV)
-            return printf("[Error] Not RISC-V architecture.\n"), 1;
+            return fprintf(stderr, "[Error] Not RISC-V architecture.\n"), 1;
         // sections from ELF file
         Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
         fseek(fp, elf_h.e_shoff, SEEK_SET);
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
         if (htif.fromhost == 0 || htif.tohost == 0)
         {
             htif = {0x100000, 0x100008, 0x100010}; // default htif addresses
-            printf("[Info] HTIF address not specified, set to default.\n");
+            fprintf(stderr, "[Info] HTIF address not specified, set to default.\n");
         }
         delete[] shdr;
         fclose(fp);
@@ -294,7 +294,7 @@ int main(int argc, char **argv)
         {
             fp = fopen(cmd.dtb, "r");
             if (!fp)
-                return printf("[Error] Unable to open file %s.\n", cmd.dtb), 1;
+                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.dtb), 1;
             fseek(fp, 0, SEEK_END);
             int sz = ftell(fp);
             rewind(fp);
@@ -304,7 +304,7 @@ int main(int argc, char **argv)
         }
         else
         {
-            printf("[Info] Using default device tree (spike).\n");
+            fprintf(stderr, "[Info] Using default device tree (spike).\n");
             for (int i = 0; i < sizeof(dtb_spike) / sizeof(dtb_spike[0]); i++)
                 memory[dtbaddr + i] = dtb_spike[i];
         }
@@ -456,34 +456,37 @@ int main(int argc, char **argv)
                                    curcsr.addr, curcsr.data);
             if ((!check || cmd.step) && curcommit.cycle >= cmd.mintime)
             {
-                printf(check ? "[Info] Cycle %d:\n" : "[Info] Difference found at cycle %d:\n", curcommit.cycle);
-                printf("[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
-                printf("[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                       curcommit.addr % 32, curcommit.data);
+                fprintf(stderr, check ? "[Info] Cycle %d:\n" : "[Info] Difference found at cycle %d:\n",
+                        curcommit.cycle);
+                fprintf(stderr, "[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
+                fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                        curcommit.addr % 32, curcommit.data);
                 if (curstore.width < 8)
                     curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
                 if (sim->get_csraddr() != -1)
-                    printf("[Info]     %s: 0x%016lx\n", sim->get_csrname(curcsr.addr), curcsr.data);
+                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                            sim->get_csrname(curcsr.addr), curcsr.data);
                 if (curstore.width)
-                    printf("[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                           curstore.width, curstore.addr,
-                           curstore.width * 2, curstore.data);
-                printf("[Info] SIM:\n[Info]     pc: 0x%016lx    %s\n", sim->get_pc(), sim->get_asmcode());
-                printf("[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                       curcommit.addr % 32, sim->get_arreg()[curcommit.addr]);
+                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                            curstore.width, curstore.addr,
+                            curstore.width * 2, curstore.data);
+                fprintf(stderr, "[Info] SIM:\n[Info]     pc: 0x%016lx    %s\n",
+                        sim->get_pc(), sim->get_asmcode());
+                fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                        curcommit.addr % 32, sim->get_arreg()[curcommit.addr]);
                 if (sim->get_csraddr() != -1)
-                    printf("[Info]     %s: 0x%016lx\n",
-                           sim->get_csrname(sim->get_csraddr()), sim->get_csrdata());
+                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                            sim->get_csrname(sim->get_csraddr()), sim->get_csrdata());
                 if (sim->get_mwwidth())
-                    printf("[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                           sim->get_mwwidth(), sim->get_mwaddr(),
-                           sim->get_mwwidth() * 2, sim->get_mwdata());
-                printf("[Info] Press Enter to continue...\n[Info] ");
+                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                            sim->get_mwwidth(), sim->get_mwaddr(),
+                            sim->get_mwwidth() * 2, sim->get_mwdata());
+                fprintf(stderr, "[Info] Press Enter to continue...\n[Info] ");
                 getchar();
             }
         }
         if (cmt_check & cmd.pc & commits.front().cycle > cmd.mintime)
-            printf("[Info] %d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
+            fprintf(stderr, "[Info] %d: 0x%016lx\n", commits.front().cycle, commits.front().pc);
         if (cmt_check)
             commits.pop();
         // HTIF requests handler
@@ -508,7 +511,7 @@ int main(int argc, char **argv)
                     arg4 = DLE(memory, magic_mem + 40); // mode
                     char *filename = new (std::nothrow) char[arg2];
                     if (!filename)
-                        return printf("[Error] Memory allocation failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
                     for (int i = 0; i < arg2; i++)
                         filename[i] = memory[arg1 + i];
                     retval = openat(arg0, filename, arg3, arg4);
@@ -536,7 +539,7 @@ int main(int argc, char **argv)
                     arg2 = DLE(memory, magic_mem + 24); // max read size
                     uint8_t *buf = new (std::nothrow) uint8_t[arg1];
                     if (!buf)
-                        return printf("[Error] Memory allocation failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
                     retval = read(arg0, buf, arg2);
                     for (int i = 0; i < retval; i++)
                         memory[arg1 + i] = buf[i];
@@ -549,7 +552,7 @@ int main(int argc, char **argv)
                     arg2 = DLE(memory, magic_mem + 24); // write size
                     uint8_t *buf = new (std::nothrow) uint8_t[arg2];
                     if (!buf)
-                        return printf("[Error] Memory allocation failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
                     for (int i = 0; i < arg2; i++)
                         buf[i] = memory[arg1 + i];
                     fflush(NULL);
@@ -565,7 +568,7 @@ int main(int argc, char **argv)
                     arg3 = DLE(memory, magic_mem + 32); // read offset
                     uint8_t *buf = new (std::nothrow) uint8_t[arg2];
                     if (!buf)
-                        return printf("[Error] Memory allocation failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
                     retval = pread(arg0, buf, arg2, arg3);
                     for (int i = 0; i < retval; i++)
                         memory[arg1 + i] = buf[i];
@@ -604,7 +607,7 @@ int main(int argc, char **argv)
                         retval = -1;
                 }
                 else
-                    printf("[Info] Unhandled proxied system call 0x%lx@0x%lx\n", which, dut->epc);
+                    fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx@0x%lx\n", which, dut->epc);
                 for (int i = 0; i < 8; i++)
                     memory[magic_mem + i] = DTOB(retval, i);
             }
@@ -612,15 +615,15 @@ int main(int argc, char **argv)
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
             putchar(tohost_dat);
         else
-            printf("[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
-                   tohost_dev, tohost_cmd, tohost_dat);
+            fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
+                    tohost_dev, tohost_cmd, tohost_dat);
         for (int i = 0; i < 8; i++)
             memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
         memory[htif.fromhost] = 1;
         sim ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
     if (exitcall)
-        printf("[Info] Exit with code %d.\n", exitcode);
+        fprintf(stderr, "[Info] Exit with code %d.\n", exitcode);
     else if (sim)
     {
         // final status check
@@ -629,18 +632,20 @@ int main(int argc, char **argv)
         for (int i = 0; i < 64; i++)
             if (sim->get_arreg()[i] != dut->arregs[i])
             {
-                printf("[Info] Difference found at maximum cycle:\n");
-                printf("[Info]     DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, dut->arregs[i]);
-                printf("[Info]     SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f', i % 32, sim->get_arreg()[i]);
-                printf("[Info] Press Enter to continue...\n");
+                fprintf(stderr, "[Info] Difference found at maximum cycle:\n");
+                fprintf(stderr, "[Info]     DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f',
+                        i % 32, dut->arregs[i]);
+                fprintf(stderr, "[Info]     SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f',
+                        i % 32, sim->get_arreg()[i]);
+                fprintf(stderr, "[Info] Press Enter to continue...\n");
                 getchar();
             }
-        printf("[Info] Maximum cycle %d reached.\n", cmd.maxtime);
+        fprintf(stderr, "[Info] Maximum cycle %d reached.\n", cmd.maxtime);
     }
-    printf("[Info] Statistics:\n");
-    printf("[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
-           dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
-           dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
+    fprintf(stderr, "[Info] Statistics:\n");
+    fprintf(stderr, "[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
+            dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
+            dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
 
     // Clean
     delete (trace ? trace->close(), trace : NULL);
