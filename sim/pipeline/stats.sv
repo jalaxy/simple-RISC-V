@@ -1,6 +1,7 @@
 module stats(
     input  logic         clk,
     input  logic         rst,
+    // memory
     output logic [63:0]  csr_satp,
     output logic         icache_rqst,
     output logic [63:0]  icache_addr,

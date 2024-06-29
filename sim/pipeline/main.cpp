@@ -6,6 +6,7 @@
 #include <verilated_vcd_c.h>
 #include <elf.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include "Vstats.h"
 #include "simulator.h"
@@ -65,6 +66,9 @@ typedef struct struct_csr
 } csrcmt_t;
 
 extern const uint8_t dtb_spike[1161]; // HTIF device tree
+int intr = 0;
+
+void intrhandler(int) { printf("[Info] Interrupted.\n"), intr = 1; }
 
 void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
 {
@@ -244,15 +248,13 @@ int main(int argc, char **argv)
         if (fread(shdr, sizeof(Elf64_Shdr) * elf_h.e_shnum, 1, fp) < 0)
             exit((perror("fread"), 1));
         for (int i = 0; i < elf_h.e_shnum; i++)
-            if (shdr[i].sh_type == SHT_PROGBITS && (shdr[i].sh_flags & SHF_ALLOC))
+            if (shdr[i].sh_type != SHT_NOBITS && (shdr[i].sh_flags & SHF_ALLOC))
             {
                 fseek(fp, shdr[i].sh_offset, SEEK_SET);
                 for (int j = 0; j < shdr[i].sh_size; j++)
                     if (fread(&memory[shdr[i].sh_addr + j], 1, 1, fp) < 0)
                         exit((perror("fread"), 1));
             }
-            else if (shdr[i].sh_type == SHT_NOBITS)
-                ;
             else if (shdr[i].sh_type == SHT_SYMTAB)
             {
                 // check section name
@@ -348,8 +350,10 @@ int main(int argc, char **argv)
     std::queue<csrcmt_t> csrs;
     std::map<uint64_t, int> stalls;
     int i = 0, exitcall = 0, exitcode = 0;
+    signal(SIGINT, intrhandler);
     while (i < cmd.maxtime)
     {
+        exitcall |= intr;
         int cmt_check = commits.size() > 1 || exitcall;
         if (commits.empty() && exitcall)
             break;
@@ -443,7 +447,7 @@ int main(int argc, char **argv)
                 curstore = stores.front(), stores.pop();
             else
                 curstore = {0, 0, 0};
-            if (sim->get_csraddr() != -1)
+            if (sim->get_csraddr() != -1 && !csrs.empty())
                 curcsr = csrs.front(), csrs.pop();
             else
                 curcsr = {(uint64_t)-1, 0};

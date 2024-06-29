@@ -1477,6 +1477,7 @@ module csr(input logic clk, input logic rst,
                 sstatus[4] <= 1;                        // UPIE  -> 1
             end
         if (rst) level <= 2'b11;
+        eout <= 0;
         // M-level CSR
                                         // ZY XWVU TSRQ PONM LKJI HGFE DCBA
                                         //          S      M    I   F  DC A
@@ -1487,10 +1488,10 @@ module csr(input logic clk, input logic rst,
             misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
             if (wres[5]) {misa[3], misa[16]} <= 0;
         end
-        if (rst) mvendorid <= 0; else if (wena & addr == 12'hf11) eout <= 1;
-        if (rst) marchid <= 0; else if (wena & addr == 12'hf12) eout <= 1;
-        if (rst) mimpid <= 0; else if (wena & addr == 12'hf13) eout <= 1;
-        if (rst) mhartid <= 0; else if (wena & addr == 12'hf13) eout <= 1;
+        if (rst) mvendorid <= 0; // else if (wena & addr == 12'hf11) eout <= 1;
+        if (rst) marchid <= 0;   // else if (wena & addr == 12'hf12) eout <= 1;
+        if (rst) mimpid <= 0;    // else if (wena & addr == 12'hf13) eout <= 1;
+        if (rst) mhartid <= 0;   // else if (wena & addr == 12'hf13) eout <= 1;
         if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
         else if (wena & addr == 12'h300) begin
             mstatus <= wres;
@@ -1542,14 +1543,15 @@ module csr(input logic clk, input logic rst,
         if (rst) scause <= 0; else if (wena & addr == 12'h142) scause <= wres;
         if (rst) stval <= 0; else if (wena & addr == 12'h143) stval <= wres;
         if (rst) satp <= 0; else if (wena & addr == 12'h180) satp <= wres;
-        if (rst) eout <= 0;
 
         if (wena & addr == 12'h005) utvec <= wres;
     end
-    always_comb csr_tvec = trapintos ? stvec : mtvec;
-    always_comb csr_mepc = mepc;
-    always_comb csr_sepc = sepc;
-    always_comb csr_satp = level == 2'b11 ? 64'd0 : satp;
+    always_comb if (trapintos)
+             csr_tvec = wena & addr == 12'h105 ? wres & ~64'd2 : stvec;
+        else csr_tvec = wena & addr == 12'h305 ? wres & ~64'd2 : mtvec;
+    always_comb csr_mepc = wena & addr == 12'h341 ? wres : mepc;
+    always_comb csr_sepc = wena & addr == 12'h141 ? wres : sepc;
+    always_comb csr_satp = level == 2'b11 ? 64'd0 : satp; // may not need forwarding
 endmodule
 
 module ci2i(input logic [31:0] ci, output logic [31:0] i);
