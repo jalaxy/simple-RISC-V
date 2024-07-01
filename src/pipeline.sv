@@ -222,7 +222,7 @@ module pipeline(
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
     logic [6:0] cause; logic [63:0] epc, tval, nret; logic [2:0] ret;
-    logic [63:0] csr_tvec, csr_mepc, csr_sepc;
+    logic satp_flush; logic [63:0] csr_tvec, csr_mepc, csr_sepc;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -249,7 +249,7 @@ module pipeline(
         .late_done(late_done), .late_val(late_val),
         .pt_done(pt_done), .pt_data(pt_data), .pt_npc(pt_npc), .ena_arb(pt_ena),
         .addr_done(addr_done), .addr_val(addr_val), .level(csr_inst.level));
-    wb_stage wb_stage_inst(.clk(clk), .rst(rst), .redir(redir),
+    wb_stage wb_stage_inst(.clk(clk), .rst(rst), .satp_flush(satp_flush), .redir(redir),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
         .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .frontid(frontid), .nextid(nextid),
@@ -284,7 +284,7 @@ module pipeline(
     csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
         .rval(csr_rval), .wval(csr_wval), .func(csr_func), .eout(csr_excp),
         .nret(nret), .ret(ret), .ein(redir & cause[6]),
-        .epc(epc), .tval(tval), .cause(cause[5:0]),
+        .epc(epc), .tval(tval), .cause(cause[5:0]), .satp_flush(satp_flush),
         .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
         .csr_sepc(csr_sepc), .csr_satp(csr_satp));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
@@ -968,7 +968,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
     end
 endmodule
 
-module wb_stage(input logic clk, input logic rst, output logic redir,
+module wb_stage(input logic clk, input logic rst,
+    input logic satp_flush, output logic redir,
     input ex_wb_t [3:0] in_ex, output logic [3:0] get_ex,
     output xx_pc_t out_pc, input logic ena_pc,
     output logic [`lgCQSZ:0] frontid, output logic [`lgCQSZ:0] nextid,
@@ -1048,10 +1049,18 @@ module wb_stage(input logic clk, input logic rst, output logic redir,
     always_comb cqredir[0] = |num &
         cqinfo[0].pc != lastnpc | lastinfo.fencei | cqexcep[0];
     always_comb cqpatup[0] = cqredir[0] | lastvalid & lastinfo.patupd;
-    always_comb for (int i = 1; i < 4; i++) cqexcep[i] = cqcause[i][6] & cqvalid[i] &
-        cqinfo[i].pc == cqnpc[i - 1];
-    always_comb for (int i = 1; i < 4; i++) cqredir[i] = cqexcep[i] | cqvalid[i] &
-        cqinfo[i].pc != cqnpc[i - 1] & ~cqdata[i - 1][64] | cqinfo[i - 1].fencei;
+    always_comb for (int i = 1; i < 4; i++) begin
+        cqexcep[i] = cqcause[i][6] & cqvalid[i] &
+            cqinfo[i].pc == cqnpc[i - 1] & ~satp_flush;
+        for (int j = 0; j < i; j++) if (cqinfo[j].ret[2]) cqexcep[i] = 0;
+    end
+    always_comb begin
+        for (int i = 1; i < 4; i++) cqredir[i] = cqexcep[i] | cqvalid[i] &
+            cqinfo[i].pc != cqnpc[i - 1] & ~cqdata[i - 1][64] | cqinfo[i - 1].fencei;
+        for (int i = 0; i < 4; i++) for (int j = 0; j < i; j++) // level may change
+            if (cqinfo[j].ret[2]) cqredir[i] = 1;
+        if (satp_flush) cqredir[1] = 1; // csr_satp may change
+    end
     always_comb for (int i = 1; i < 4; i++)
         cqpatup[i] = cqredir[i] | cqvalid[i - 1] & cqinfo[i - 1].patupd;
     always_comb begin cqpatup_ena = ena_pc; cqpop_accum = 1; 
@@ -1398,6 +1407,7 @@ module csr(input logic clk, input logic rst,
     input logic [63:0] nret, output logic eout,
     input logic ein, input logic [63:0] epc, logic [63:0] tval,
     input logic [5:0] cause, input logic [2:0] ret,
+    output logic satp_flush,
     output logic [63:0] csr_tvec, output logic [63:0] csr_mepc,
     output logic [63:0] csr_sepc, output logic [63:0] csr_satp
 );
@@ -1411,7 +1421,9 @@ module csr(input logic clk, input logic rst,
     logic [63:0] sstatus, stvec, sip, sie, scounteren, sscratch;
     logic [63:0] satp, sepc, scause, stval;
     logic [63:0] utvec;
-    always_comb trapintos = (level == 2'b00 | level == 2'b01) & medeleg[cause];
+    always_comb if (ret[2])
+            trapintos = ~(&ret[1:0] & &mstatus) & medeleg[cause];
+        else trapintos = ~level[1] & medeleg[cause];
     always_comb case (func[1:0])
         2'b00: wres = 0;
         2'b01: wres = wval;
@@ -1443,18 +1455,6 @@ module csr(input logic clk, input logic rst,
     endcase
     always_ff @(posedge clk) begin
         // switch priority mode
-        if (ein)
-            if (trapintos) begin
-                level <= 2'b01; // trap into S mode
-                sepc <= epc;
-                stval <= tval;
-                scause <= {58'd0, cause};
-            end else begin
-                level <= 2'b11; // trap into M mode
-                mepc <= epc;
-                mtval <= tval;
-                mcause <= {58'd0, cause};
-            end
         if (ret[2])
             if (ret[1:0] == 2'b11) begin    // MRET
                 level <= mstatus[12:11];    // level -> MPP
@@ -1475,6 +1475,20 @@ module csr(input logic clk, input logic rst,
                 mstatus[4] <= 1;                        // UPIE  -> 1
                 sstatus[0] <= sstatus[4];               // UIE   -> UPIE
                 sstatus[4] <= 1;                        // UPIE  -> 1
+            end
+        if (ein)
+            if (trapintos) begin
+                level <= 2'b01; // trap into S mode
+                sepc <= epc;
+                stval <= tval;
+                scause <= {58'd0, cause};
+                sstatus[8] <= level[0];
+            end else begin
+                level <= 2'b11; // trap into M mode
+                mepc <= epc;
+                mtval <= tval;
+                mcause <= {58'd0, cause};
+                mstatus[12:11] <= level;
             end
         if (rst) level <= 2'b11;
         eout <= 0;
@@ -1546,6 +1560,7 @@ module csr(input logic clk, input logic rst,
 
         if (wena & addr == 12'h005) utvec <= wres;
     end
+    always_comb satp_flush = wena & addr == 12'h180;
     always_comb if (trapintos)
              csr_tvec = wena & addr == 12'h105 ? wres & ~64'd2 : stvec;
         else csr_tvec = wena & addr == 12'h305 ? wres & ~64'd2 : mtvec;
