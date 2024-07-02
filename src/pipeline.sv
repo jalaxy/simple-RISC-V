@@ -1093,8 +1093,10 @@ module wb_stage(input logic clk, input logic rst,
     always_comb begin nret = 0; for (int i = 0; i < 4; i++)
         if (cqpop[i] & ~cqinfo[i].rda[6]) nret++; end
     always_comb frontid = cqinfo[0].pc == lastnpc ? {1'b1, front[0]} : 0;
-    always_comb begin nextid = 0; for (int i = 3; i >= 0; i--)
-        if (~cqpop[i] & cqvalid[i] & ~cqredir[i]) nextid = {1'b1, front[i]}; end
+    always_comb begin nextid = 0;
+        for (int i = 3; i >= 0; i--)
+            if (~cqpop[i] & cqvalid[i] & ~cqredir[i]) nextid = {1'b1, front[i]};
+            else if (cqredir[i]) nextid = 0; end
     always_ff @(posedge clk) if (rst | redir) lastvalid <= 0;
         else for (int i = 0; i < 4; i++)
             if (cqpop[i]) {lastvalid, lastinfo} <= {1'b1, cqinfo[i]};
@@ -1421,9 +1423,7 @@ module csr(input logic clk, input logic rst,
     logic [63:0] sstatus, stvec, sip, sie, scounteren, sscratch;
     logic [63:0] satp, sepc, scause, stval;
     logic [63:0] utvec;
-    always_comb if (ret[2])
-            trapintos = ~(&ret[1:0] & &mstatus) & medeleg[cause];
-        else trapintos = ~level[1] & medeleg[cause];
+    always_comb trapintos = ~level[1] & medeleg[cause];
     always_comb case (func[1:0])
         2'b00: wres = 0;
         2'b01: wres = wval;

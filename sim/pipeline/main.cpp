@@ -2,6 +2,7 @@
 #include <map>
 #include <queue>
 #include <algorithm>
+#include <sstream>
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include <elf.h>
@@ -23,47 +24,61 @@
 #define BIT(dw, i) BITS(dw, i, i)
 #define NOP ((uint64_t)0x13)
 
-typedef struct struct_cmd
+typedef struct
 {
     const char *filename = 0, *vcd = 0, *dtb = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, debug = 0, step = 0, pc = 0;
+    uint8_t help = 0, filetype = 0, debug = 0, step = 0, pc = 0, spike = 0;
     int maxtime = INT32_MAX, mintime = 0;
+    uint64_t entry = -1;
 } cmd_t;
 
-typedef struct struct_htif
+typedef struct
 {
     uint64_t fromhost = 0, tohost = 0, lock = 0;
 } htif_t;
 
-typedef struct struct_icache_req
+typedef struct
 {
     uint8_t rqst = 0;
     uint64_t addr = 0;
 } icache_req_t;
 
-typedef struct struct_dcache_req
+typedef struct
 {
     uint8_t rqst = 0, bits = 0, wena = 0, rsrv = 0;
     uint64_t addr = 0, wdata = 0, vaddr = 0;
 } dcache_req_t;
 
-typedef struct struct_commit
+typedef struct
 {
     int cycle, addr;
     uint64_t pc, data;
 } commit_t;
 
-typedef struct struct_store
+typedef struct
 {
     uint64_t addr, data;
     uint8_t width;
 } store_t;
 
-typedef struct struct_csr
+typedef struct
 {
     uint64_t addr, data;
 } csrcmt_t;
+
+typedef struct
+{
+    uint16_t valid, level;
+    uint64_t pc;
+    uint32_t ir;
+    uint16_t rega;
+    uint64_t regd;
+    uint64_t memra, memrd, memwa, memwd;
+    uint16_t memww;
+    uint16_t csra;
+    uint64_t csrd;
+} spike_cmt_t;
 
 extern const uint8_t dtb_spike[1161]; // HTIF device tree
 int intr = 0;
@@ -148,6 +163,63 @@ uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr, 
     return (ppn << 12) | offset;
 }
 
+spike_cmt_t parse_spike_log(FILE *spike)
+{
+    spike_cmt_t cmt = {.valid = 1};
+    char s[1024];
+    if (fgets(s, 1024, spike) == NULL)
+        cmt.valid = 0, fprintf(stderr, "[Error] fgets() failed");
+    std::stringstream ss(s);
+    ss >> s;                  // core
+    ss >> s;                  // 0:
+    ss >> cmt.level;          // level
+    ss >> std::hex >> cmt.pc; // pc
+    ss >> s[0];               // (
+    ss >> std::hex >> cmt.ir; // ir
+    ss >> s[0];               // )
+    ss >> s;
+    cmt.csra = cmt.memra = -1;
+    cmt.rega = cmt.memww = 0;
+    while (!ss.eof())
+    {
+        if (s[0] == 'x')
+        {
+            cmt.rega = strtol(s + 1, 0, 10);
+            ss >> std::hex >> cmt.regd >> s;
+        }
+        else if (s[0] == 'f')
+        {
+            cmt.rega = strtol(s + 1, 0, 10) + 32;
+            ss >> std::hex >> cmt.regd >> s;
+        }
+        else if (s[0] == 'c')
+        {
+            cmt.csra = strtol(s + 1, 0, 10);
+            ss >> std::hex >> cmt.csrd >> s;
+        }
+        else if (s[0] == 'm')
+        {
+            uint64_t addr;
+            ss >> std::hex >> addr >> s;
+            if (s[0] == '0' && s[1] == 'x')
+            {
+                cmt.memwa = addr;
+                cmt.memwd = strtol(s, 0, 0);
+                cmt.memww = strlen(s) / 2 - 1;
+                ss >> s;
+            }
+            else
+                cmt.memra = addr;
+        }
+        else if (!ss.eof())
+        {
+            fprintf(stderr, "[Info] spike log file unhandled string %s\n", s);
+            ss >> s;
+        }
+    }
+    return cmt;
+}
+
 int main(int argc, char **argv)
 {
     // Read command line
@@ -186,6 +258,8 @@ int main(int argc, char **argv)
                 cmd.help = 1;
             else if (strcmp(argv[i] + j, "pc") == 0)
                 cmd.pc = 1;
+            else if (strcmp(argv[i] + j, "spike") == 0)
+                cmd.spike = 1;
         }
         else if (cmd.filename == NULL)
             cmd.filename = argv[i], cmd.args.push_back(argv[i]);
@@ -205,6 +279,7 @@ int main(int argc, char **argv)
         printf("    -d: debug mode\n");
         printf("    -d -s: debug mode with step\n");
         printf("    -pc: output PC trace\n");
+        printf("    -spike: compare with spike\n");
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
@@ -309,6 +384,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "[Info] Using default device tree (spike).\n");
             for (int i = 0; i < sizeof(dtb_spike) / sizeof(dtb_spike[0]); i++)
                 memory[dtbaddr + i] = dtb_spike[i];
+            if (cmd.spike)
+                cmd.dtb = "spike.dtb";
         }
         // start section: jump from reset address to ELF entry
         // a1 -> dtb address
@@ -320,15 +397,23 @@ int main(int argc, char **argv)
             ini_code.push_back(0x8093 | (DTOB(elf_h.e_entry, 7 - i) << 20));
             ini_code.push_back(i == 7 ? 0x8067 : 0x809093); // ret : slli ra, ra, 8
         }
+        cmd.entry = elf_h.e_entry;
     }
     for (int i = 0; i < 32; i++)
         ini_code.push_back(NOP);
     for (int i = 0; i < ini_code.size(); i++)
         for (int j = 0; j < 4; j++) // reset address is 0x400000
             memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
+    char spike_cmd[1024];
+    sprintf(spike_cmd, "spike --dtb=%s --log-commits", cmd.dtb);
+    for (auto i : cmd.args)
+        strcat(spike_cmd, " "), strcat(spike_cmd, i);
+    strcat(spike_cmd, " 2>&1 1>/dev/null");
 
     // Simulation
-    simulator *sim = cmd.debug ? new (std::nothrow) simulator(0x400000, memory) : 0;
+    simulator *sim = cmd.debug || cmd.spike ? new (std::nothrow) simulator(0x400000, memory) : 0;
+    FILE *spike = cmd.spike ? popen(spike_cmd, "r") : 0;
+    spike_cmt_t spike_cmt = spike ? parse_spike_log(spike) : (spike_cmt_t){0};
     Vstats *dut = new (std::nothrow) Vstats;
     VerilatedVcdC *trace = NULL;
     if (cmd.vcd)
@@ -344,6 +429,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < 8; i++)
         dut->clk = !dut->clk, dut->eval(), trace ? trace->dump(st++), 0 : 0;
     dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+    if (spike)
+        while (spike_cmt.valid && spike_cmt.pc != cmd.entry)
+            spike_cmt = parse_spike_log(spike);
     // clock and memory loop
     std::queue<icache_req_t> i_delay;
     std::queue<dcache_req_t> d_delay;
@@ -438,8 +526,76 @@ int main(int argc, char **argv)
             }
             i++;
         }
+        static int start = 0, pcdiff = 0;
+        if (!commits.empty() && commits.front().pc == cmd.entry)
+            start = 1;
+        // spike checker
+        if (spike && cmt_check && start)
+        {
+            commit_t curcommit = commits.front();
+            store_t curstore = {0, 0, 0};
+            csrcmt_t curcsr = {-1llu, 0llu};
+            int err = pcdiff = spike_cmt.pc != curcommit.pc;
+            if (spike_cmt.rega != (uint16_t)-1)
+                err |= curcommit.addr != spike_cmt.rega ||
+                       curcommit.addr && curcommit.data != spike_cmt.regd;
+            if (spike_cmt.memww)
+            {
+                err |= stores.empty() ||
+                       stores.front().addr != spike_cmt.memwa ||
+                       stores.front().data != spike_cmt.memwd ||
+                       stores.front().width != spike_cmt.memww;
+                if (!stores.empty())
+                {
+                    curstore = stores.front();
+                    stores.pop();
+                }
+            }
+            if (spike_cmt.csra != (uint16_t)-1)
+            {
+                // err |= csrs.front().addr != spike_cmt.csra || csrs.front().data != spike_cmt.csrd;
+                if (!csrs.empty())
+                {
+                    curcsr = csrs.front();
+                    csrs.pop();
+                }
+            }
+            if (!spike_cmt.valid)
+                err = 0;
+            if ((err || cmd.step) && curcommit.cycle > cmd.mintime)
+            {
+                if (curstore.width < 8)
+                    curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
+                fprintf(stderr, "[Info] Difference found at cycle %d:\n", curcommit.cycle);
+                fprintf(stderr, "[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
+                if (curcommit.addr)
+                    fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                            curcommit.addr % 32, curcommit.data);
+                if (curcsr.addr != -1)
+                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                            sim->get_csrname(curcsr.addr), curcsr.data);
+                if (curstore.width)
+                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                            curstore.width, curstore.addr,
+                            curstore.width * 2, curstore.data);
+                fprintf(stderr, "[Info] SIM-SPIKE:\n[Info]     pc: 0x%016lx\n", spike_cmt.pc);
+                if (spike_cmt.rega)
+                    fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", spike_cmt.rega < 32 ? 'x' : 'f',
+                            spike_cmt.rega % 32, spike_cmt.regd);
+                if (spike_cmt.csra != uint16_t(-1))
+                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                            sim->get_csrname(spike_cmt.csra), spike_cmt.csrd);
+                if (spike_cmt.memww)
+                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                            spike_cmt.memww, spike_cmt.memwa,
+                            spike_cmt.memww * 2, spike_cmt.memwd);
+                fprintf(stderr, "[Info] Press Enter to continue...\n[Info] ");
+                getchar();
+            }
+            spike_cmt = parse_spike_log(spike);
+        }
         // simulator checker
-        if (sim && cmt_check)
+        if (sim && !spike && cmt_check)
         {
             sim->step();
             commit_t curcommit = commits.front();
@@ -490,7 +646,7 @@ int main(int argc, char **argv)
         if (cmt_check & cmd.pc & commits.front().cycle > cmd.mintime)
             fprintf(stderr, "[Info] c: %d  v: 0x%016lx  p: 0x%016lx\n",
                     commits.front().cycle, commits.front().pc, paddr(memory, dut->csr_satp, commits.front().pc));
-        if (cmt_check)
+        if (cmt_check && !(spike && pcdiff))
             commits.pop();
         // HTIF requests handler
         uint64_t tohost_dev = DLE(memory, htif.tohost) >> 56;
@@ -651,6 +807,13 @@ int main(int argc, char **argv)
             dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
 
     // Clean
+    if (spike)
+    {
+        char buffer[1024];
+        while (fread(buffer, 1024, 1, spike) > 0)
+            ;
+        pclose(spike);
+    }
     delete (trace ? trace->close(), trace : NULL);
     delete sim;
     delete dut;
