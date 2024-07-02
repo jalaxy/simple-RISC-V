@@ -28,6 +28,7 @@ module stats(
     output logic [11:0] cmtcsraddr,
     output logic [63:0] cmtcsrval,
     output logic [63:0] arregs[63:0],
+    output logic  [1:0] level,
     output logic [63:0] cycle,
     output logic [63:0] instret,
     output logic [63:0] epc,
@@ -61,6 +62,7 @@ module stats(
         arregs[i] = dupregs[pipeline_inst.wb_stage_inst.regs_inst.sel[i]][i];
 
     // other stats
+    always_comb level = pipeline_inst.csr_inst.level;
     always_comb cycle = pipeline_inst.csr_inst.mcycle;
     always_comb instret = pipeline_inst.csr_inst.minstret;
     always_comb epc = pipeline_inst.csr_inst.mepc;

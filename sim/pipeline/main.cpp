@@ -58,7 +58,7 @@ typedef struct
 
 typedef struct
 {
-    uint64_t addr, data;
+    uint64_t addr, vaddr, data;
     uint8_t width;
 } store_t;
 
@@ -168,10 +168,14 @@ spike_cmt_t parse_spike_log(FILE *spike)
     spike_cmt_t cmt = {.valid = 1};
     char s[1024];
     if (fgets(s, 1024, spike) == NULL)
-        cmt.valid = 0, fprintf(stderr, "[Error] fgets() failed");
+        cmt.valid = 0, fprintf(stderr, "[Info] End of spike log\n"), getchar();
     std::stringstream ss(s);
-    ss >> s;                  // core
-    ss >> s;                  // 0:
+    ss >> s; // core
+    if (strcmp(s, "core"))
+        return cmt = {.valid = 0};
+    ss >> s; // 0:
+    if (strcmp(s, "0:"))
+        return cmt = {.valid = 0};
     ss >> cmt.level;          // level
     ss >> std::hex >> cmt.pc; // pc
     ss >> s[0];               // (
@@ -184,17 +188,17 @@ spike_cmt_t parse_spike_log(FILE *spike)
     {
         if (s[0] == 'x')
         {
-            cmt.rega = strtol(s + 1, 0, 10);
+            cmt.rega = strtoull(s + 1, 0, 10);
             ss >> std::hex >> cmt.regd >> s;
         }
         else if (s[0] == 'f')
         {
-            cmt.rega = strtol(s + 1, 0, 10) + 32;
+            cmt.rega = strtoull(s + 1, 0, 10) + 32;
             ss >> std::hex >> cmt.regd >> s;
         }
         else if (s[0] == 'c')
         {
-            cmt.csra = strtol(s + 1, 0, 10);
+            cmt.csra = strtoull(s + 1, 0, 10);
             ss >> std::hex >> cmt.csrd >> s;
         }
         else if (s[0] == 'm')
@@ -204,7 +208,7 @@ spike_cmt_t parse_spike_log(FILE *spike)
             if (s[0] == '0' && s[1] == 'x')
             {
                 cmt.memwa = addr;
-                cmt.memwd = strtol(s, 0, 0);
+                cmt.memwd = strtoull(s, 0, 0);
                 cmt.memww = strlen(s) / 2 - 1;
                 ss >> s;
             }
@@ -214,7 +218,9 @@ spike_cmt_t parse_spike_log(FILE *spike)
         else if (!ss.eof())
         {
             fprintf(stderr, "[Info] spike log file unhandled string %s\n", s);
+            getchar();
             ss >> s;
+            return cmt = {.valid = 0};
         }
     }
     return cmt;
@@ -294,8 +300,8 @@ int main(int argc, char **argv)
     std::map<uint64_t, uint8_t> memory, reserved;
     std::vector<uint32_t> ini_code;
     htif_t htif = {0, 0, 0};
-    uint64_t dtbaddr = 0x10000000;   // [0-0x7ffff]000, or modify initial code
-    uint64_t pkargaddr = 0x80020000; // proxy kernel arguments address
+    uint64_t dtbaddr = 0x1020;       // -0x80000000 - 0x7fffffff
+    uint64_t pkargaddr = 0x8000d428; // proxy kernel arguments address (args.2997) (may change)
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
         return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.filename), 1;
@@ -390,6 +396,7 @@ int main(int argc, char **argv)
         // start section: jump from reset address to ELF entry
         // a1 -> dtb address
         ini_code.push_back(0x5b7 | dtbaddr & 0xfffff000); // lui a1, `dtbaddr >> 12`
+        ini_code.push_back(0x58593 | dtbaddr << 20);      // addi a1, a1, `dtbaddr & 0xfff`
         // ra -> entry point
         ini_code.push_back(0x93); // addi ra, zero, 0
         for (int i = 0; i < 8; i++)
@@ -503,7 +510,7 @@ int main(int argc, char **argv)
                         uint8_t width = 1 << (d_delay.front().bits & 3);
                         for (int j = 0; j < width; j++)
                             memory[addr + j] = DTOB(data, j);
-                        stores.push({addr, data, width});
+                        stores.push({addr, d_delay.front().vaddr, data, width});
                         if (d_delay.front().rsrv == 1)
                             reserved[addr] = dut->dcache_rdat = 0;
                     }
@@ -526,7 +533,7 @@ int main(int argc, char **argv)
             }
             i++;
         }
-        static int start = 0, pcdiff = 0;
+        static int start = 0, pcdiff = 0, pcdiffoutput = 0;
         if (!commits.empty() && commits.front().pc == cmd.entry)
             start = 1;
         // spike checker
@@ -535,62 +542,80 @@ int main(int argc, char **argv)
             commit_t curcommit = commits.front();
             store_t curstore = {0, 0, 0};
             csrcmt_t curcsr = {-1llu, 0llu};
-            int err = pcdiff = spike_cmt.pc != curcommit.pc;
-            if (spike_cmt.rega != (uint16_t)-1)
-                err |= curcommit.addr != spike_cmt.rega ||
-                       curcommit.addr && curcommit.data != spike_cmt.regd;
-            if (spike_cmt.memww)
+            pcdiff = spike_cmt.valid && spike_cmt.pc != curcommit.pc;
+            if (pcdiff && !pcdiffoutput)
             {
-                err |= stores.empty() ||
-                       stores.front().addr != spike_cmt.memwa ||
-                       stores.front().data != spike_cmt.memwd ||
-                       stores.front().width != spike_cmt.memww;
-                if (!stores.empty())
+                pcdiffoutput = 1;
+                if (curcommit.cycle > cmd.mintime)
                 {
-                    curstore = stores.front();
-                    stores.pop();
+                    fprintf(stderr, "[Info] PC difference detected\n");
+                    fprintf(stderr, "[Info] -------- Press Enter to continue --------\n");
+                    getchar();
                 }
             }
-            if (spike_cmt.csra != (uint16_t)-1)
+            else if (!pcdiff)
             {
-                // err |= csrs.front().addr != spike_cmt.csra || csrs.front().data != spike_cmt.csrd;
-                if (!csrs.empty())
-                {
-                    curcsr = csrs.front();
-                    csrs.pop();
-                }
-            }
-            if (!spike_cmt.valid)
-                err = 0;
-            if ((err || cmd.step) && curcommit.cycle > cmd.mintime)
-            {
-                if (curstore.width < 8)
-                    curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
-                fprintf(stderr, "[Info] Difference found at cycle %d:\n", curcommit.cycle);
-                fprintf(stderr, "[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
-                if (curcommit.addr)
-                    fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                            curcommit.addr % 32, curcommit.data);
-                if (curcsr.addr != -1)
-                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                            sim->get_csrname(curcsr.addr), curcsr.data);
-                if (curstore.width)
-                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                            curstore.width, curstore.addr,
-                            curstore.width * 2, curstore.data);
-                fprintf(stderr, "[Info] SIM-SPIKE:\n[Info]     pc: 0x%016lx\n", spike_cmt.pc);
-                if (spike_cmt.rega)
-                    fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", spike_cmt.rega < 32 ? 'x' : 'f',
-                            spike_cmt.rega % 32, spike_cmt.regd);
-                if (spike_cmt.csra != uint16_t(-1))
-                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                            sim->get_csrname(spike_cmt.csra), spike_cmt.csrd);
+                pcdiffoutput = 0;
+                int err = 0;
+                if (spike_cmt.rega != (uint16_t)-1)
+                    err |= curcommit.addr != spike_cmt.rega ||
+                           curcommit.addr && curcommit.data != spike_cmt.regd;
                 if (spike_cmt.memww)
-                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                            spike_cmt.memww, spike_cmt.memwa,
-                            spike_cmt.memww * 2, spike_cmt.memwd);
-                fprintf(stderr, "[Info] Press Enter to continue...\n[Info] ");
-                getchar();
+                {
+                    if (!stores.empty() && stores.front().width < 8)
+                        stores.front().data &= ~((uint64_t)-1 << (8 * stores.front().width));
+                    err |= stores.empty() ||
+                           stores.front().vaddr != spike_cmt.memwa ||
+                           stores.front().data != spike_cmt.memwd ||
+                           stores.front().width != spike_cmt.memww;
+                    if (!stores.empty())
+                    {
+                        curstore = stores.front();
+                        stores.pop();
+                    }
+                }
+                if (spike_cmt.csra != (uint16_t)-1)
+                {
+                    // err |= csrs.front().addr != spike_cmt.csra || csrs.front().data != spike_cmt.csrd;
+                    if (!csrs.empty())
+                    {
+                        curcsr = csrs.front();
+                        csrs.pop();
+                    }
+                }
+                if (!spike_cmt.valid)
+                    err = 0;
+                if ((err || cmd.step) && curcommit.cycle > cmd.mintime)
+                {
+                    static char levelch[4] = {'U', 'S', 'H', 'M'};
+                    fprintf(stderr, "[Info] Cycle %d:\n", curcommit.cycle);
+                    fprintf(stderr, "[Info] DUT:               %c mode\n[Info]     pc: 0x%016lx\n",
+                            levelch[dut->level], curcommit.pc);
+                    if (curcommit.addr)
+                        fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
+                                curcommit.addr % 32, curcommit.data);
+                    if (curcsr.addr != -1)
+                        fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                                sim->get_csrname(curcsr.addr), curcsr.data);
+                    if (curstore.width)
+                        fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                                curstore.width, curstore.vaddr,
+                                curstore.width * 2, curstore.data);
+                    fprintf(stderr, "[Info] SIM-SPIKE:         %c mode\n[Info]     pc: 0x%016lx\n",
+                            levelch[spike_cmt.level], spike_cmt.pc);
+                    if (spike_cmt.rega)
+                        fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", spike_cmt.rega < 32 ? 'x' : 'f',
+                                spike_cmt.rega % 32, spike_cmt.regd);
+                    if (spike_cmt.csra != uint16_t(-1))
+                        fprintf(stderr, "[Info]     %s: 0x%016lx\n",
+                                sim->get_csrname(spike_cmt.csra), spike_cmt.csrd);
+                    if (spike_cmt.memww)
+                        fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
+                                spike_cmt.memww, spike_cmt.memwa,
+                                spike_cmt.memww * 2, spike_cmt.memwd);
+                    fprintf(stderr, "[Info] -------- Press Enter to continue --------\n");
+                    getchar();
+                }
             }
             spike_cmt = parse_spike_log(spike);
         }
@@ -715,6 +740,8 @@ int main(int argc, char **argv)
                     for (int i = 0; i < arg2; i++)
                         buf[i] = memory[arg1 + i];
                     fflush(NULL);
+                    if (arg0 = 2)
+                        arg0 = 1; // redirect stderr of program to stdout for debugging
                     retval = write(arg0, buf, arg2);
                     delete[] buf;
                 }
@@ -772,7 +799,7 @@ int main(int argc, char **argv)
             }
         }
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
-            putchar(tohost_dat);
+            putchar(tohost_dat), fflush(stdout);
         else
             fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                     tohost_dev, tohost_cmd, tohost_dat);
@@ -783,7 +810,7 @@ int main(int argc, char **argv)
     }
     if (exitcall)
         fprintf(stderr, "[Info] Exit with code %d.\n", exitcode);
-    else if (sim)
+    else if (sim && !spike)
     {
         // final status check
         for (int i = sim->csr[0xb00].val; i < cmd.maxtime; i++)

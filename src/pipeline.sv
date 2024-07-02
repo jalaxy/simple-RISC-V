@@ -1494,13 +1494,13 @@ module csr(input logic clk, input logic rst,
         eout <= 0;
         // M-level CSR
                                         // ZY XWVU TSRQ PONM LKJI HGFE DCBA
-                                        //          S      M    I   F  DC A
-        if (rst) misa <= {2'h2, 36'h0, 26'b00_0000_0100_0001_0001_0010_1101};
+                                        //       U  S      M    I   F  DC A
+        if (rst) misa <= {2'h2, 36'h0, 26'b00_0001_0100_0001_0001_0010_1101};
         else if (wena & addr == 12'h301) begin
             misa[0] <= wres[0]; misa[3:2] <= wres[3:2]; misa[4] <= ~wres[8];
             misa[8:5] <= wres[8:5]; misa[13:12] <= wres[13:12]; misa[16] <= wres[16];
             misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
-            if (wres[5]) {misa[3], misa[16]} <= 0;
+            if (~wres[5]) {misa[3], misa[16]} <= 0;
         end
         if (rst) mvendorid <= 0; // else if (wena & addr == 12'hf11) eout <= 1;
         if (rst) marchid <= 0;   // else if (wena & addr == 12'hf12) eout <= 1;
@@ -1509,7 +1509,8 @@ module csr(input logic clk, input logic rst,
         if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
         else if (wena & addr == 12'h300) begin
             mstatus <= wres;
-            mstatus[63] <= mstatus[16:15] == 2'b11 | mstatus[14:13] == 2'b11;
+            mstatus[35:32] <= 4'b1010; // SXL/UXL
+            mstatus[63] <= wres[16:15] == 2'b11 | wres[14:13] == 2'b11;
             {mstatus[62:36], mstatus[31:23]} <= 0;
             {mstatus[10:9], mstatus[6], mstatus[2]} <= 0;
         end
@@ -1541,7 +1542,8 @@ module csr(input logic clk, input logic rst,
         if (rst) sstatus <= {32'h2, 19'h1, 13'h0};
         else if (wena & addr == 12'h100) begin
             sstatus <= wres;
-            sstatus[63] <= sstatus[16:15] == 2'b11 | sstatus[14:13] == 2'b11;
+            sstatus[33:32] <= 2'b10; // UXL
+            sstatus[63] <= wres[16:15] == 2'b11 | wres[14:13] == 2'b11;
             {sstatus[62:34], sstatus[31:20]} <= 0;
             {sstatus[12:9], sstatus[7:6], sstatus[3:2]} <= 0;
         end
