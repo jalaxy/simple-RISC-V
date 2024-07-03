@@ -88,8 +88,9 @@
 `define EX_ECALL  6'd47
 `define EX_EBREAK 6'd48
 `define EX_RET    6'd49
-`define EX_INV    6'd50
-`define EX_END    6'd51
+`define EX_WFI    6'd50
+`define EX_INV    6'd51
+`define EX_END    6'd52
 
 typedef struct packed {
     logic valid, branch;
@@ -595,6 +596,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             exop[0][`EX_ECALL] = ir == 32'h00000073;
             exop[0][`EX_EBREAK] = ir == 32'h00100073;
             exop[0][`EX_RET] = (ir & ~(32'd3 << 28)) == 32'h00200073;
+            exop[0][`EX_WFI] = ir == 32'h10500073;
             if (ir[1:0] != 2'b11) exop[0] = 0;
             if (~|exop[0]) exop[0][`EX_INV] = 1;
         end
@@ -1040,11 +1042,13 @@ module wb_stage(input logic clk, input logic rst,
                 if (~cqcauser[j][6] & late_cause[j][6]) cqcause[i] = late_cause[j];
             end
         if (cqinfo[i].ret[2]) cqnpc[i] = cqinfo[i].ret[1:0] == 2'b01 ? sepc : mepc;
+// if (intr_taken) cqcause[0] = {1'b1, intr[5:0]};
     end
     always_comb for (int i = 0; i < 4; i++) get_ex[i] = ~in_ex[i].valid | cqpush[i];
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) rear[i] = front[i] + num[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) cqvalid[i] = i[`lgCQSZ:0] < num;
+// always_comb intr_taken = |num & intr[6] & cqinfo[0].pc == lastnpc;
     always_comb cqexcep[0] = |num & cqcause[0][6] & cqinfo[0].pc == lastnpc;
     always_comb cqredir[0] = |num &
         cqinfo[0].pc != lastnpc | lastinfo.fencei | cqexcep[0];
@@ -1251,6 +1255,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
                 rqst[i].addr[63:3] == lsq[j].addr[63:3])
                 through[i] = 0;
         if (rqst[i].aqrl[0] | rqst[i].csr) through[i] = 0;
+        if (rqst[i].addr == 65'h0200bff8 | rqst[i].addr == 65'h02004000) through[i] = 0;
         fwd[i] = 0; fwddata[i] = 0;
         for (int j = 0; j < `LSQSZ + i; j++)
             if (lsq[j].id[`lgCQSZ] & lsq[j].wena)
@@ -1294,16 +1299,37 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
             lsqsent[i] <= through[2'(i - 32'(rear))] | fwd[2'(i - 32'(rear))];
             for (int j = 0; j < 4; j++)
                 if (rqst[2'(i - 32'(rear))].addr[64] &
-                    rqst[2'(i - 32'(rear))].addr[`lgCQSZ:0] == addr_done[j])
+                    rqst[2'(i - 32'(rear))].addr[`lgCQSZ:0] == addr_done[j]) begin
                     lsqrqst[i].addr <= 65'(addr_val[j]);
+                    if (addr_val[j] == 64'h0200bff8) // CLINT mapping mtime
+                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                            {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c0};
+                    if (addr_val[j] == 64'h02004000) // CLINT mapping mtimecmp
+                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                            {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c1};
+                end
             for (int j = 0; j < 4; j++)
                 if (rqst[2'(i - 32'(rear))].wdat[64] &
                     rqst[2'(i - 32'(rear))].wdat[`lgCQSZ:0] == late_done[j])
                     lsqrqst[i].wdat <= late_val[j];
+            if (rqst[2'(i - 32'(rear))].addr == 65'h0200bff8) // CLINT mapping mtime
+                {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                    {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c0};
+            if (rqst[2'(i - 32'(rear))].addr == 65'h02004000) // CLINT mapping mtimecmp
+                {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                    {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c1};
         end else begin
             for (int j = 0; j < 4; j++)
-                if (lsqrqst[i].addr[64] &lsqrqst[i].addr[`lgCQSZ:0] == addr_done[j])
+                if (lsqrqst[i].addr[64] & lsqrqst[i].addr[`lgCQSZ:0] == addr_done[j])
+                begin
                     lsqrqst[i].addr <= 65'(addr_val[j]);
+                    if (addr_val[j] == 64'h0200bff8) // CLINT mapping mtime
+                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                            {1'b1, 3'(lsqrqst[i].wena), 65'h7c0};
+                    if (addr_val[j] == 64'h02004000) // CLINT mapping mtimecmp
+                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
+                            {1'b1, 3'(lsqrqst[i].wena), 65'h7c1};
+                end
             for (int j = 0; j < 4; j++)
                 if (lsqrqst[i].wdat[64] & lsqrqst[i].wdat[`lgCQSZ:0] == late_done[j])
                     lsqrqst[i].wdat <= late_val[j];
@@ -1417,7 +1443,7 @@ module csr(input logic clk, input logic rst,
     logic [63:0] wres; logic trapintos;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
     logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, mie;
-    logic [63:0] mtime, mtimecmp; // memory mapped
+    logic [63:0] mtime, mtimecmp;
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
     logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
     logic [63:0] sstatus, stvec, sip, sie, scounteren, sscratch;
@@ -1425,7 +1451,7 @@ module csr(input logic clk, input logic rst,
     logic [63:0] utvec;
     always_comb trapintos = ~level[1] & medeleg[cause];
     always_comb case (func[1:0])
-        2'b00: wres = 0;
+        2'b00: wres = rval; // not write
         2'b01: wres = wval;
         2'b10: wres = wval | rval;
         2'b11: wres = ~wval & rval;
@@ -1435,6 +1461,7 @@ module csr(input logic clk, input logic rst,
     else if (addr > 12'h322 & addr < 12'h340)
         rval = mhpmevent[addr[4:0]];
     else case (addr)
+        // M-mode
         12'h301: rval = misa;          12'hf11: rval = mvendorid;
         12'hf12: rval = marchid;       12'hf13: rval = mimpid;
         12'hf14: rval = mhartid;       12'h300: rval = mstatus;
@@ -1444,14 +1471,19 @@ module csr(input logic clk, input logic rst,
         12'hb02: rval = minstret;      12'h306: rval = mcounteren;
         12'h320: rval = mcountinhibit; 12'h340: rval = mscratch;
         12'h341: rval = mepc;          12'h342: rval = mcause;
-        12'h343: rval = mtval;         12'h180: rval = satp;
+        12'h343: rval = mtval;
+        // S-mode
+        12'h180: rval = satp;
         12'h100: rval = sstatus;       12'h105: rval = stvec;
         12'h144: rval = sip;
         12'h104: rval = sie;           12'h106: rval = scounteren;
         12'h140: rval = sscratch;      12'h141: rval = sepc;
         12'h142: rval = scause;        12'h143: rval = stval;
-        default: rval = 0;
+        // U-mode
         12'h005: rval = utvec;
+        // memory-mapped (redirect to custom space)
+        12'h7c0: rval = mtime;         12'h7c1: rval = mtimecmp;
+        default: rval = 0;
     endcase
     always_ff @(posedge clk) begin
         // switch priority mode
@@ -1559,10 +1591,18 @@ module csr(input logic clk, input logic rst,
         if (rst) scause <= 0; else if (wena & addr == 12'h142) scause <= wres;
         if (rst) stval <= 0; else if (wena & addr == 12'h143) stval <= wres;
         if (rst) satp <= 0; else if (wena & addr == 12'h180) satp <= wres;
-
         if (wena & addr == 12'h005) utvec <= wres;
+        if (rst) mtime <= 0; else if (wena & addr == 12'h7c0) mtime <= wres;
+        else mtime <= mtime + 1;
+        if (rst) mtimecmp <= 0; else if (wena & addr == 12'h7c1) mtimecmp <= wres;
+        // time interrupt generation
+        if (mtime >= mtimecmp & ~mip[7]) mip[7] <= 1;
+        else if (wena & addr == 12'h7c1) mip[7] <= 0;
+// if (intr_taken) mip[intr[5:0]] <= 0;
     end
     always_comb satp_flush = wena & addr == 12'h180;
+// always_comb begin intr = 0;
+//     for (int i = 0; i < 12; i++) if (mip[i] & mie[i]) intr = {1'b1, 6'(i)}; end
     always_comb if (trapintos)
              csr_tvec = wena & addr == 12'h105 ? wres & ~64'd2 : stvec;
         else csr_tvec = wena & addr == 12'h305 ? wres & ~64'd2 : mtvec;

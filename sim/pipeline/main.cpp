@@ -28,7 +28,7 @@ typedef struct
 {
     const char *filename = 0, *vcd = 0, *dtb = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 0, debug = 0, step = 0, pc = 0, spike = 0;
+    uint8_t help = 0, filetype = 1, debug = 0, step = 0, pc = 0, spike = 0;
     int maxtime = INT32_MAX, mintime = 0;
     uint64_t entry = -1;
 } cmd_t;
@@ -275,10 +275,10 @@ int main(int argc, char **argv)
         printf("Not enough arguments.\n"), cmd.help = 1;
     if (cmd.help)
     {
-        printf("Usage: exec [options] file\n");
+        printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
-        printf("    -dump: (default) input file as hex hump\n");
-        printf("    -elf: (force) input file as RISC-V ELF executable\n");
+        printf("    -dump: (force) input file as hex hump\n");
+        printf("    -elf: (default) input file as RISC-V ELF executable\n");
         printf("    -w `waveform`: output waveform to `waveform`\n");
         printf("    -dtb `binary`: specify device tree binary.\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");

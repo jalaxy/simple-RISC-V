@@ -12,7 +12,7 @@ VERILATOR_TOP = stats
 VERILATOR_FLAGS = -cc -exe -assert -top-module $(VERILATOR_TOP)\
 	-trace -trace-structs -trace-max-array 256
 
-all: obj_dir/V$(VERILATOR_TOP) usercode
+all: run usercode
 
 # Verilator bin target
 obj_dir/V$(VERILATOR_TOP) : obj_dir $(VERILATOR_CPP) $(VERILATOR_H)
@@ -26,6 +26,9 @@ obj_dir : $(VERILATOR_V)
 usercode :
 	$(MAKE) -C usercode
 
+run : obj_dir/V$(VERILATOR_TOP)
+	ln -fs obj_dir/V$(VERILATOR_TOP) run
+
 clean :
-	$(RM) -r obj_dir
+	$(RM) -r obj_dir run
 	$(MAKE) -C usercode clean
