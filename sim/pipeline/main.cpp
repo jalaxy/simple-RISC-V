@@ -439,6 +439,8 @@ int main(int argc, char **argv)
     if (spike)
         while (spike_cmt.valid && spike_cmt.pc != cmd.entry)
             spike_cmt = parse_spike_log(spike);
+    for (int i = 0; i < 8; i++)
+        memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
     // clock and memory loop
     std::queue<icache_req_t> i_delay;
     std::queue<dcache_req_t> d_delay;
@@ -450,8 +452,11 @@ int main(int argc, char **argv)
     signal(SIGINT, intrhandler);
     while (i < cmd.maxtime)
     {
-        exitcall |= intr;
+        if (intr)
+            break;
         int cmt_check = commits.size() > 1 || exitcall;
+        static commit_t lastcmt = {0, 0, 0, 0};
+        static store_t laststore = {0, 0, 0, 0};
         if (commits.empty() && exitcall)
             break;
         if (commits.size() <= 1 && !exitcall)
@@ -532,10 +537,14 @@ int main(int argc, char **argv)
                 stalls[dut->stallpc]++;
             }
             i++;
+            if (i % 1000000 == 0)
+                fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: %lx\n", lastcmt.cycle, lastcmt.pc);
         }
         static int start = 0, pcdiff = 0, pcdiffoutput = 0;
         if (!commits.empty() && commits.front().pc == cmd.entry)
             start = 1;
+        if (!commits.empty())
+            lastcmt = commits.front();
         // spike checker
         if (spike && cmt_check && start)
         {
@@ -669,8 +678,13 @@ int main(int argc, char **argv)
             }
         }
         if (cmt_check & cmd.pc & commits.front().cycle > cmd.mintime)
+        {
             fprintf(stderr, "[Info] c: %d  v: 0x%016lx  p: 0x%016lx\n",
                     commits.front().cycle, commits.front().pc, paddr(memory, dut->csr_satp, commits.front().pc));
+            fprintf(stderr, "[Debug] htif-lock: %lx fromhost: %lx %lx tohost: %lx %lx\n",
+                    DLE(memory, htif.lock), htif.fromhost, DLE(memory, htif.fromhost),
+                    htif.tohost, DLE(memory, htif.tohost));
+        }
         if (cmt_check && !(spike && pcdiff))
             commits.pop();
         // HTIF requests handler
@@ -796,6 +810,9 @@ int main(int argc, char **argv)
                     fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx@0x%lx\n", which, dut->epc);
                 for (int i = 0; i < 8; i++)
                     memory[magic_mem + i] = DTOB(retval, i);
+                for (int i = 0; i < 8; i++)
+                    memory[htif.fromhost + i] = 0;
+                memory[htif.fromhost] = 1;
             }
         }
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
@@ -804,8 +821,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                     tohost_dev, tohost_cmd, tohost_dat);
         for (int i = 0; i < 8; i++)
-            memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
-        memory[htif.fromhost] = 1;
+            memory[htif.tohost + i] = 0;
         sim ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
     if (exitcall)

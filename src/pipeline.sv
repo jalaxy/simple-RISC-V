@@ -783,12 +783,14 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
         end
         for (int i = 0; i < 4; i++) if (get_pt_g[i])
             if (rqst_g[i].mul) begin
-                mul_rqst[mul_i] = rqst_g[i].out[`MULLEN-1:0]; mul_i++; get_pt[i] = 1;
+                mul_rqst[mul_i] = rqst_g[i].out[`MULLEN-1:0]; mul_i++; get_pt[3-i] = 1;
             end else if (rqst_g[i].div) begin
-                div_rqst[div_i] = rqst_g[i].out[`DIVLEN-1:0]; div_i++; get_pt[i] = 1;
+                div_rqst[div_i] = rqst_g[i].out[`DIVLEN-1:0]; div_i++; get_pt[3-i] = 1;
             end else if (rqst_g[i].fpu) begin
-                fpu_rqst[fpu_i] = rqst_g[i].out[`FPULEN-1:0]; fpu_i++; get_pt[i] = 1;
-            end else get_pt[i] = 1;
+                fpu_rqst[fpu_i] = rqst_g[i].out[`FPULEN-1:0]; fpu_i++; get_pt[3-i] = 1;
+            end else get_pt[3-i] = 1;
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < i; j++) if (~get_pt[j]) get_pt[i] = 0;
     end
     always_ff @(posedge clk) for (int i = 0; i < 4; i++)
         if (rst | redir) out_wb[i].valid <= 0;
@@ -1171,7 +1173,7 @@ module pending_table(input logic clk, input logic rst, input logic flush,
             .waddr(in_idx), .wvalue(in_dat), .wena(in_ena));
     always_comb begin out_ena = 0; out_idx = 0; i0 = 0; valid_fwd = valid;
         for (int i = 0; i < `PTSZ; i++) if (valid[i] & ~a_fwd[i][64] & ~b_fwd[i][64])
-            if (i0 < 4 & (ena_ex[i0[1:0]] | ~out_ex[i0[1:0]].valid)) begin
+            if (i0 < 4 & (ena_ex[i0[1:0]] | ~out_ex[3 - 32'(i0[1:0])].valid)) begin
                 out_ena[i0[1:0]] = 1; out_idx[i0[1:0]] = i[`lgPTSZ-1:0];
                 valid_fwd[i] = 0; i0++;
             end end
@@ -1196,7 +1198,7 @@ module pending_table(input logic clk, input logic rst, input logic flush,
             out_ex[i] <= out_dat[3 - i];
             out_ex[i].a <= a_fwd[out_idx[3 - i]];
             out_ex[i].b <= b_fwd[out_idx[3 - i]];
-        end else if (ena_ex[i]) out_ex[i].valid <= 0;
+        end else if (ena_ex[3 - i]) out_ex[i].valid <= 0;
     always_ff @(posedge clk)
         if (rst | flush) for (int i = 0; i < `PTSZ; i++) valid[i] <= 0;
         else begin
@@ -1446,59 +1448,57 @@ module csr(input logic clk, input logic rst,
     output logic [63:0] csr_sepc, output logic [63:0] csr_satp
 );
     logic [1:0] level; // 00 -> U  01 -> S  11 -> M
-    logic [63:0] wres; logic trapintos;
+    logic [63:0] wres; logic [64:0] val; logic trapintos;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
     logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, mie;
     logic [63:0] mtime, mtimecmp, tick;
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
     logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
-    logic [63:0] sstatus, stvec, sip, sie, scounteren, sscratch;
+    logic [63:0] stvec, scounteren, sscratch;
     logic [63:0] satp, sepc, scause, stval;
-    logic [63:0] utvec;
-    always_comb trapintos = ~level[1] & medeleg[cause[5:0]];
+    logic [63:0] fcsr, utvec;
+    always_comb if (cause[63]) trapintos = ~level[1] & mideleg[cause[5:0]];
+        else trapintos = ~level[1] & medeleg[cause[5:0]];
     always_comb case (func[1:0])
         2'b00: wres = rval; // not write
         2'b01: wres = wval;
         2'b10: wres = wval | rval;
         2'b11: wres = ~wval & rval;
     endcase
-    always_comb begin
-        sstatus = mstatus;
-        sstatus[62:34] = 0; sstatus[31:20] = 0;
-        sstatus[12:9]  = 0; sstatus[7:6]   = 0; sstatus[3:2] = 0;
-        sip = mip; sip[63:10] = 0; sip[7:6] = 0; sip[3:2] = 0;
-        sie = mie; sie[63:10] = 0; sie[7:6] = 0; sie[3:2] = 0;
-    end
     always_comb if (addr > 12'hb02 & addr < 12'hb20)
-        rval = mhpmcounter[addr[4:0]];
+        val = 65'(mhpmcounter[addr[4:0]]);
     else if (addr > 12'h322 & addr < 12'h340)
-        rval = mhpmevent[addr[4:0]];
+        val = 65'(mhpmevent[addr[4:0]]);
     else case (addr)
         // M-mode
-        12'h301: rval = misa;          12'hf11: rval = mvendorid;
-        12'hf12: rval = marchid;       12'hf13: rval = mimpid;
-        12'hf14: rval = mhartid;       12'h300: rval = mstatus;
-        12'h305: rval = mtvec;         12'h302: rval = medeleg;
-        12'h303: rval = mideleg;       12'h344: rval = mip;
-        12'h304: rval = mie;           12'hb00: rval = mcycle;
-        12'hb02: rval = minstret;      12'h306: rval = mcounteren;
-        12'h320: rval = mcountinhibit; 12'h340: rval = mscratch;
-        12'h341: rval = mepc;          12'h342: rval = mcause;
-        12'h343: rval = mtval;
+        12'h301: val = 65'(misa);          12'hf11: val = 65'(mvendorid);
+        12'hf12: val = 65'(marchid);       12'hf13: val = 65'(mimpid);
+        12'hf14: val = 65'(mhartid);       12'h300: val = 65'(mstatus);
+        12'h305: val = 65'(mtvec);         12'h302: val = 65'(medeleg);
+        12'h303: val = 65'(mideleg);       12'h344: val = 65'(mip);
+        12'h304: val = 65'(mie);           12'hb00: val = 65'(mcycle);
+        12'hb02: val = 65'(minstret);      12'h306: val = 65'(mcounteren);
+        12'h320: val = 65'(mcountinhibit); 12'h340: val = 65'(mscratch);
+        12'h341: val = 65'(mepc);          12'h342: val = 65'(mcause);
+        12'h343: val = 65'(mtval);
         // S-mode
-        12'h180: rval = satp;
-        12'h100: rval = sstatus;       12'h105: rval = stvec;
-        12'h144: rval = sip;
-        12'h104: rval = sie;           12'h106: rval = scounteren;
-        12'h140: rval = sscratch;      12'h141: rval = sepc;
-        12'h142: rval = scause;        12'h143: rval = stval;
+        12'h180: val = 65'(satp);
+        12'h100: val = 65'(mstatus);       12'h105: val = 65'(stvec);
+        12'h144: val = 65'(mip);
+        12'h104: val = 65'(mie);           12'h106: val = 65'(scounteren);
+        12'h140: val = 65'(sscratch);      12'h141: val = 65'(sepc);
+        12'h142: val = 65'(scause);        12'h143: val = 65'(stval);
         // U-mode
-        12'h005: rval = utvec;         12'hc00: rval = mcycle;
-        12'hc01: rval = mtime;         12'hc02: rval = minstret;
+        12'h001: val = 65'(fcsr[4:0]);     12'h002: val = 65'(fcsr[7:5]);
+        12'h003: val = 65'(fcsr);          12'h005: val = 65'(utvec);
+        12'hc00: val = 65'(mcycle);        12'hc01: val = 65'(mtime);
+        12'hc02: val = 65'(minstret);
         // memory-mapped (redirect to custom space)
-        12'h7c0: rval = mtime;         12'h7c1: rval = mtimecmp;
-        default: rval = 0;
+        12'h7c0: val = 65'(mtime);         12'h7c1: val = 65'(mtimecmp);
+        default: val = {1'b1, 64'd0};
     endcase
+    always_comb rval = val[63:0];
+    always_comb eout = wena & val[64];
     always_ff @(posedge clk) begin
         // switch priority mode
         if (ret[2])
@@ -1536,7 +1536,6 @@ module csr(input logic clk, input logic rst,
                 mstatus[3] <= 0;          // MIE -> 0
             end
         if (rst) level <= 2'b11;
-        eout <= 0;
         // M-level CSR
                                         // ZY XWVU TSRQ PONM LKJI HGFE DCBA
                                         //       U  S      M    I   F  DC A
@@ -1547,10 +1546,8 @@ module csr(input logic clk, input logic rst,
             misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
             if (~wres[5]) {misa[3], misa[16]} <= 0;
         end
-        if (rst) mvendorid <= 0; // else if (wena & addr == 12'hf11) eout <= 1;
-        if (rst) marchid <= 0;   // else if (wena & addr == 12'hf12) eout <= 1;
-        if (rst) mimpid <= 0;    // else if (wena & addr == 12'hf13) eout <= 1;
-        if (rst) mhartid <= 0;   // else if (wena & addr == 12'hf13) eout <= 1;
+        if (rst) mvendorid <= 0; if (rst) marchid <= 0;
+        if (rst) mimpid    <= 0; if (rst) mhartid <= 0;
         if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
         else if (wena & (addr == 12'h300 | addr == 12'h100)) begin
             mstatus <= wres;
@@ -1600,7 +1597,7 @@ module csr(input logic clk, input logic rst,
         if (rst) mip <= 0; else if (mtime >= mtimecmp & ~mip[7]) mip[7] <= 1;
         else if (wena & addr == 12'h7c1) mip[7] <= 0; // clear when writing mtimecmp
     end
-    always_ff @(posedge clk) if (rst | tick == 100) tick <= 0; else tick <= tick + 1;
+    always_ff @(posedge clk) if (rst | tick == 10) tick <= 0; else tick <= tick + 1;
     always_comb begin intr = 0;
         for (int i = 0; i < 12; i++) if (mip[i] & mie[i])
             if (~mideleg[i] & (level < 3 | level == 3 & mstatus[3]) |

@@ -33,7 +33,8 @@ module stats(
     output logic [63:0] instret,
     output logic [63:0] epc,
     output logic [63:0] stallpc,
-    output logic [63:0] misp
+    output logic [63:0] misp,
+    output logic [63:0] debug[1:0]
 );
     // instantiate
     pipeline pipeline_inst(clk, rst, csr_satp,
@@ -72,6 +73,8 @@ module stats(
             stallpc = pipeline_inst.wb_stage_inst.cqinfo[i].pc; end
     always_ff @(posedge clk) if (rst) misp <= 0;
         else if (pipeline_inst.redir) misp <= misp + 1;
+    always_comb debug[0] = pipeline_inst.csr_inst.mie;
+    always_comb debug[1] = pipeline_inst.csr_inst.mtimecmp;
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
@@ -149,7 +152,7 @@ module div(input logic clk, input logic rst, input logic flush,
 
 // should be un-pipelined
 
-`define divlatency 16
+`define divlatency 6
     logic [`divlatency-1:0][63:0] r_q;
     logic [`divlatency-1:0][`lgCQSZ:0] valid;
     logic [63:0] res;

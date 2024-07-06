@@ -17,8 +17,8 @@
             reg = <0>;
             status = "okay";
             compatible = "riscv";
-            riscv,isa = "rv64imafdc";
-            mmu-type = "riscv,sv39";
+            riscv,isa = "rv64imafdc_zicntr_zihpm";
+            mmu-type = "riscv,sv57";
             riscv,pmpregions = <16>;
             riscv,pmpgranularity = <4>;
             clock-frequency = <1000000000>;
