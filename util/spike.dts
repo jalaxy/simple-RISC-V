@@ -6,7 +6,9 @@
     compatible = "ucbbar,spike-bare-dev";
     model = "ucbbar,spike-bare";
     chosen {
-        bootargs = "console=hvc0 earlycon=sbi";
+        linux,initrd-start = <0xfe60fe00>;
+        linux,initrd-end   = <0xfffff000>;
+        bootargs = "root=/dev/ram console=hvc0 earlycon=sbi";
     };
     cpus {
         #address-cells = <1>;

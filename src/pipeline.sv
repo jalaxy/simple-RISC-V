@@ -109,6 +109,7 @@ typedef struct packed {
     logic [`lgCQSZ:0] cqid;
     logic [2:0] delta;
     logic [63:0] pc;
+    logic [31:0] ir;
     logic [17:0] pat;
     logic [`EX_END-1:0] exop;
     logic [1:0][6:0] rsa;
@@ -126,6 +127,7 @@ typedef struct packed {
     logic [6:0] cause;
     logic [64:0] rd;
     logic [63:0] npc, pc;
+    logic [31:0] ir;
     logic mem, patupd, b, c, fencei;
     logic [6:0] rda;
     logic [17:0] pat;
@@ -139,6 +141,7 @@ typedef struct packed {
 } xx_pc_t;
 typedef struct packed {
     logic [63:0] pc;
+    logic [31:0] ir;
     logic mem, patupd, b, c, fencei;
     logic [6:0] rda;
     logic [17:0] pat;
@@ -637,6 +640,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             res[g][0].pf = in_if[g].pf;
             res[g][0].delta = |exop[1] ? 3'd0 : delta;
             res[g][0].pc = in_if[g].pc;
+            res[g][0].ir = in_if[g].ir;
             res[g][0].pat = in_if[g].pat;
             res[g][0].a = a[0];
             res[g][0].b = b[0];
@@ -677,6 +681,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             res[g][1].valid = |exop[1];
             res[g][1].delta = |exop[2] ? 3'd0 : delta;
             res[g][1].pc = in_if[g].pc;
+            res[g][1].ir = in_if[g].ir;
             res[g][1].pat = in_if[g].pat;
             res[g][1].a = a[1];
             res[g][1].b = b[1];
@@ -696,6 +701,7 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             res[g][2].valid = |exop[2];
             res[g][2].delta = delta;
             res[g][2].pc = in_if[g].pc;
+            res[g][2].ir = in_if[g].ir;
             res[g][2].pat = in_if[g].pat;
             res[g][2].a = a[2];
             res[g][2].b = b[2];
@@ -946,6 +952,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             out_wb_g[g].c = ~in.delta[2];
             out_wb_g[g].fencei = op[`EX_FENCEI];
             out_wb_g[g].pc = in.pc;
+            out_wb_g[g].ir = in.ir;
             out_wb_g[g].pat = in.pat;
             out_wb_g[g].npc = jump ? jpc : in.pc + {61'd0, in.delta};
             if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 4'd2, level};
@@ -1051,7 +1058,7 @@ module wb_stage(input logic clk, input logic rst,
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) rear[i] = front[i] + num[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) cqvalid[i] = i[`lgCQSZ:0] < num;
-    always_comb intr_taken = |num & intr[6] & cqinfo[0].pc == lastnpc;
+    always_comb intr_taken = |num & intr[6] & ~cqinfo[0].mem & cqinfo[0].pc == lastnpc;
     always_comb cqexcep[0] = |num & cqcause[0][6] & cqinfo[0].pc == lastnpc;
     always_comb cqredir[0] = |num &
         cqinfo[0].pc != lastnpc | lastinfo.fencei | cqexcep[0] | intr_taken;
@@ -1092,6 +1099,7 @@ module wb_stage(input logic clk, input logic rst,
                 cause = 64'(cqcause[i][5:0]);
                 if (cause == 13 | cause == 15) tval = cqdata[i][63:0]; // L/S PF
                 else if (cause == 12) tval = cqinfo[i].pc; // I PF 
+                else if (cause == 2) tval = 64'(cqinfo[i].ir); // invalid instruction
             end else excep = 0;
         excep &= redir;
         if (intr_taken) begin
@@ -1112,9 +1120,8 @@ module wb_stage(input logic clk, input logic rst,
         else for (int i = 0; i < 4; i++)
             if (cqpop[i]) {lastvalid, lastinfo} <= {1'b1, cqinfo[i]};
     always_ff @(posedge clk) if (rst) lastnpc <= `RST_PC;
-        else if (~cqpop[0] & cqexcep[0] | intr_taken) lastnpc <= tvec;
-        else for (int i = 0; i < 4; i++) if (cqpop[i])
-            lastnpc <= i < 3 & cqexcep[i + 1] ? tvec : cqnpc[i];
+        else if (redir) lastnpc <= out_pc.npc;
+        else for (int i = 0; i < 4; i++) if (cqpop[i]) lastnpc <= cqnpc[i];
     always_ff @(posedge clk) if (rst | redir) {cqfront, num} <= 0;
         else {cqfront, num} <= {front[numout], num + numin - numout};
     always_ff @(posedge clk)

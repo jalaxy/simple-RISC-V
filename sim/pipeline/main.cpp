@@ -26,7 +26,7 @@
 
 typedef struct
 {
-    const char *filename = 0, *vcd = 0, *dtb = 0;
+    const char *filename = 0, *vcd = 0, *dtb = 0, *initrd = 0;
     std::vector<const char *> args;
     uint8_t help = 0, filetype = 1, debug = 0, step = 0, pc = 0, spike = 0;
     int maxtime = INT32_MAX, mintime = 0;
@@ -54,6 +54,8 @@ typedef struct
 {
     int cycle, addr;
     uint64_t pc, data;
+    uint32_t ir;
+    uint64_t ra, sp;
 } commit_t;
 
 typedef struct
@@ -142,6 +144,8 @@ uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr, 
     vpn[4] = BITS(vaddr, 48, 56);
     if (satp >> 60 == 8) // sv39
         start = 2;
+    else if (satp >> 60 == 9) // sv48
+        start = 3;
     else if (satp >> 60 == 10) // sv57
         start = 4;
     for (int i = start; i >= 0; i--)
@@ -242,6 +246,8 @@ int main(int argc, char **argv)
                 cmd.filetype = 1;
             else if (strcmp(argv[i] + j, "dtb") == 0)
                 cmd.dtb = argv[++i];
+            else if (strcmp(argv[i] + j, "initrd") == 0)
+                cmd.initrd = argv[++i];
             else if (strcmp(argv[i] + j, "w") == 0)
                 cmd.vcd = argv[++i];
             else if (strcmp(argv[i] + j, "t") == 0)
@@ -300,7 +306,8 @@ int main(int argc, char **argv)
     std::map<uint64_t, uint8_t> memory, reserved;
     std::vector<uint32_t> ini_code;
     htif_t htif = {0, 0, 0};
-    uint64_t dtbaddr = 0x1020;       // -0x80000000 - 0x7fffffff
+    uint64_t dtbaddr = 0x1020; // -0x80000000 - 0x7fffffff
+    uint64_t initrdaddr = 0xfe60fe00;
     uint64_t pkargaddr = 0x8000d428; // proxy kernel arguments address (args.2997) (may change)
     FILE *fp = fopen(cmd.filename, "r");
     if (!fp)
@@ -392,6 +399,18 @@ int main(int argc, char **argv)
                 memory[dtbaddr + i] = dtb_spike[i];
             if (cmd.spike)
                 cmd.dtb = "spike.dtb";
+        }
+        if (cmd.initrd)
+        {
+            fp = fopen(cmd.initrd, "r");
+            if (!fp)
+                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.initrd), 1;
+            fseek(fp, 0, SEEK_END);
+            int sz = ftell(fp);
+            rewind(fp);
+            for (int i = 0; i < sz; i++)
+                if (fread(&memory[initrdaddr + i], 1, 1, fp) < 0)
+                    exit((perror("fread"), 1));
         }
         // start section: jump from reset address to ELF entry
         // a1 -> dtb address
@@ -527,7 +546,8 @@ int main(int argc, char **argv)
             dut->eval(), (trace && i >= cmd.mintime) ? trace->dump(st++), 0 : 0; // evaluate again
             for (int j = 0; j < sizeof(dut->cmtena) / sizeof(dut->cmtena[0]); j++)
                 if (dut->cmtena[j] && !(cmd.filetype == 0 && !dut->cmtpc[j])) // dump mode mtvec is 0x0
-                    commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j]});
+                    commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j], dut->cmtir[j],
+                                  dut->arregs[1], dut->arregs[2]});
             if (dut->cmtcsrena)
                 csrs.push({dut->cmtcsraddr, dut->cmtcsrval});
             if (dut->stallpc)
@@ -538,7 +558,8 @@ int main(int argc, char **argv)
             }
             i++;
             if (i % 1000000 == 0)
-                fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: %lx\n", lastcmt.cycle, lastcmt.pc);
+                fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
+                        lastcmt.cycle, lastcmt.pc, lastcmt.ir);
         }
         static int start = 0, pcdiff = 0, pcdiffoutput = 0;
         if (!commits.empty() && commits.front().pc == cmd.entry)
@@ -677,14 +698,19 @@ int main(int argc, char **argv)
                 getchar();
             }
         }
-        if (cmt_check & cmd.pc & commits.front().cycle > cmd.mintime)
-        {
-            fprintf(stderr, "[Info] c: %d  v: 0x%016lx  p: 0x%016lx\n",
-                    commits.front().cycle, commits.front().pc, paddr(memory, dut->csr_satp, commits.front().pc));
-            fprintf(stderr, "[Debug] htif-lock: %lx fromhost: %lx %lx tohost: %lx %lx\n",
-                    DLE(memory, htif.lock), htif.fromhost, DLE(memory, htif.fromhost),
-                    htif.tohost, DLE(memory, htif.tohost));
-        }
+        else if (!sim && !stores.empty())
+            stores.pop();
+        if (cmd.pc && i > cmd.mintime && dut->debug[0])
+            fprintf(stderr, "[Debug] cycle: %d cause: %ld  epc: 0x%lx  tval: 0x%lx\n",
+                    i, dut->debug[1], dut->debug[2], dut->debug[3]);
+        if (cmd.pc && i > cmd.mintime && ~stores.empty())
+            fprintf(stderr, "[Debug] cycle: %d  vaddr: %lx  paddr: %lx  wval: %lx",
+                    i, stores.front().vaddr, stores.front().addr, stores.front().data);
+        if (cmt_check && cmd.pc && commits.front().cycle > cmd.mintime)
+            fprintf(stderr, "[Info] c: %d  v: 0x%016lx  p: 0x%016lx  i: 0x%08x  ra: 0x%lx  sp: 0x%lx\n",
+                    commits.front().cycle, commits.front().pc,
+                    paddr(memory, dut->csr_satp, commits.front().pc), commits.front().ir,
+                    commits.front().ra, commits.front().sp);
         if (cmt_check && !(spike && pcdiff))
             commits.pop();
         // HTIF requests handler
@@ -817,11 +843,25 @@ int main(int argc, char **argv)
         }
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
             putchar(tohost_dat), fflush(stdout);
+        else if (tohost_dev == 1 && tohost_cmd == 0) // console_read
+            for (int i = 0; i < 8; i++)
+                memory[htif.fromhost + i] = 0;
         else
             fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                     tohost_dev, tohost_cmd, tohost_dat);
         for (int i = 0; i < 8; i++)
             memory[htif.tohost + i] = 0;
+        fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+        char ch; // receive character from stdin
+        if (DLE(memory, htif.fromhost) == 0 && (ch = getchar()) != EOF)
+        {
+            memory[htif.fromhost + 7] = 1;
+            memory[htif.fromhost + 6] = 0;
+            for (int i = 1; i < 6; i++)
+                memory[htif.fromhost] = 0;
+            memory[htif.fromhost] = ch;
+        }
+        fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
         sim ? sim->get_mem()[htif.fromhost] = 1 : 0;
     }
     if (exitcall)

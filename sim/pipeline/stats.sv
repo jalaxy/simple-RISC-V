@@ -22,6 +22,7 @@ module stats(
     // stats
     output logic        cmtena[3:0],
     output logic [63:0] cmtpc[3:0],
+    output logic [31:0] cmtir[3:0],
     output logic  [6:0] cmtaddr[3:0],
     output logic [63:0] cmtdata[3:0],
     output logic        cmtcsrena,
@@ -34,7 +35,7 @@ module stats(
     output logic [63:0] epc,
     output logic [63:0] stallpc,
     output logic [63:0] misp,
-    output logic [63:0] debug[1:0]
+    output logic [63:0] debug[3:0]
 );
     // instantiate
     pipeline pipeline_inst(clk, rst, csr_satp,
@@ -46,10 +47,11 @@ module stats(
 
     // monitor registers change
     always_comb for (int i = 0; i < 4; i++)
-        {cmtena[i], cmtpc[i], cmtaddr[i], cmtdata[i]} = {
+        {cmtena[i], cmtpc[i], cmtir[i], cmtaddr[i], cmtdata[i]} = {
             pipeline_inst.wb_stage_inst.cqpop[i] &
                 ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6],
             pipeline_inst.wb_stage_inst.cqinfo[i].pc,
+            pipeline_inst.wb_stage_inst.cqinfo[i].ir,
             pipeline_inst.wb_stage_inst.cqinfo[i].rda,
             pipeline_inst.wb_stage_inst.cqdata[i][63:0]};
     always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
@@ -73,8 +75,10 @@ module stats(
             stallpc = pipeline_inst.wb_stage_inst.cqinfo[i].pc; end
     always_ff @(posedge clk) if (rst) misp <= 0;
         else if (pipeline_inst.redir) misp <= misp + 1;
-    always_comb debug[0] = pipeline_inst.csr_inst.mie;
-    always_comb debug[1] = pipeline_inst.csr_inst.mtimecmp;
+    always_comb debug[0] = 64'(pipeline_inst.csr_inst.ein);
+    always_comb debug[1] = 64'(pipeline_inst.csr_inst.cause);
+    always_comb debug[2] = 64'(pipeline_inst.csr_inst.epc);
+    always_comb debug[3] = 64'(pipeline_inst.csr_inst.tval);
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,
