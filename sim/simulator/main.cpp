@@ -18,11 +18,21 @@ typedef struct
 
 void print(const status_t &status, const delta_t &delta)
 {
-    fprintf(stderr, "[Info] i@%lx: %s\n", status.pc, disas(status.ir).c_str());
+    char s[256];
+    sprintf(s, "[Info] cycle %ld: i@%lx: %s",
+            (uint64_t)status.csr.at("mcycle"), status.pc, disas(status.ir).c_str());
+    if (strlen(s) < 63)
+    {
+        for (int i = strlen(s); i < 63; i++)
+            s[i] = ' ';
+        s[63] = 0;
+    }
+    fputs(s, stderr);
     if (delta.gprw)
-        fprintf(stderr, "[Info]     %s: %lx\n", gprname[delta.gpra], delta.gprv);
+        fprintf(stderr, " %s: %lx", gprname[delta.gpra], delta.gprv);
     if (delta.memw)
-        fprintf(stderr, "[Info]     d%d@%lx: %lx\n", delta.memw, delta.mema, delta.memv);
+        fprintf(stderr, " d%d@%lx: %lx", delta.memw, delta.mema, delta.memv);
+    fprintf(stderr, "\n");
 }
 
 void dumpmem(uint8_t *mem, uint64_t addr, uint64_t size)
@@ -91,7 +101,7 @@ int main(int argc, char *argv[])
                 i += 2;
             }
             else if (strcmp(argv[i] + j, "d") == 0)
-                cmd.help = 1;
+                cmd.debug = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
         }
@@ -150,31 +160,14 @@ int main(int argc, char *argv[])
             return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
     }
 
-    disasmem(&mem[0x80000000], 64);
-
     /* Simulate */
     status_t s = {.pc = entry, .mem = mem};
-    while (true)
+    while (s.csr["mcycle"] < cmd.maxtime)
     {
         delta_t d = next(s);
-        print(s, d);
-        s.pc = d.pc;
-        s.level = d.level;
-        if (d.gprw)
-            s.gpr[d.gpra] = d.gprv;
-        if (d.memw && s.mem.issegfault(s.mem[d.mema]))
-            fprintf(stderr, "[Warning] Attempt to access undefined memory@%lx\n", d.mema);
-        else if (d.memw == 1)
-            s.mem.ui8(d.mema) = d.memv;
-        else if (d.memw == 2)
-            s.mem.ui16(d.mema) = d.memv;
-        else if (d.memw == 4)
-            s.mem.ui32(d.mema) = d.memv;
-        else if (d.memw == 8)
-            s.mem.ui64(d.mema) = d.memv;
-        for (auto i : d.csr)
-            s.csr[i.first] = i.second;
-        getchar();
+        if (cmd.debug && s.csr["mcycle"] > cmd.mintime)
+            print(s, d);
+        apply(s, d);
     }
 
     return 0;

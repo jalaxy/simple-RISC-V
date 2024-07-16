@@ -18,15 +18,15 @@ bits::bits(float f)
     if (range(23, 30) == 0x0ff && range(0, 22))
         this->data = 0xffff'ffff'7fc0'0000ul;
 }
-bits::operator uint64_t() { return data; }
-bits::operator double() { return *(double *)&data; }
-bits::operator float() { return *(float *)&data; }
-uint8_t bits::operator[](uint8_t i) { return (data >> i) & 1; }
+bits::operator uint64_t() const { return data; }
+bits::operator double() const { return *(double *)&data; }
+bits::operator float() const { return *(float *)&data; }
+uint8_t bits::operator[](uint8_t i) const { return (data >> i) & 1; }
 uint64_t bits::operator++(int) { return data++; }
 bits &bits::operator>>=(int x) { return this->data >>= x, *this; }
 bits &bits::operator|=(uint64_t x) { return this->data |= x, *this; }
-bits bits::range(uint8_t s, uint8_t e) { return data << 63 - e >> 63 - e + s; }
-int64_t bits::sext(int w) { return ((data >> w - 1) & 1 ? -1ull << w : 0) | data & ~(-1ull << w); }
+bits bits::range(uint8_t s, uint8_t e) const { return data << 63 - e >> 63 - e + s; }
+int64_t bits::sext(int w) const { return ((data >> w - 1) & 1 ? -1ull << w : 0) | data & ~(-1ull << w); }
 void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ((1 << e - s + 1) - 1) << s) |= x << s; }
 void bits::write(uint8_t i, uint64_t x) { (data &= 1 << i) |= x << i; }
 
@@ -1336,15 +1336,24 @@ delta_t next(status_t &status)
     return ret;
 }
 
-/**
- * @brief check validity of current status
- * @param status previous status
- * @param delta status delta to check
- * @retval whether the delta is valid
- */
-inline bool check(const status_t &status, delta_t delta)
+void apply(status_t &s, delta_t &d)
 {
-    return true;
+    s.pc = d.pc;
+    s.level = d.level;
+    if (d.gprw)
+        s.gpr[d.gpra] = d.gprv;
+    if (d.memw && s.mem.issegfault(s.mem[d.mema]))
+        fprintf(stderr, "[Warning] Attempt to access undefined memory@%lx\n", d.mema);
+    else if (d.memw == 1)
+        s.mem.ui8(d.mema) = d.memv;
+    else if (d.memw == 2)
+        s.mem.ui16(d.mema) = d.memv;
+    else if (d.memw == 4)
+        s.mem.ui32(d.mema) = d.memv;
+    else if (d.memw == 8)
+        s.mem.ui64(d.mema) = d.memv;
+    for (auto i : d.csr)
+        s.csr[i.first] = i.second;
 }
 
 const char *gprname[64] = {
