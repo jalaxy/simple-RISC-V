@@ -1,4 +1,4 @@
-CXXFLAGS = -g -s
+CXXFLAGS = -O2
 OBJ = status.o main.o
 
 main : $(OBJ)

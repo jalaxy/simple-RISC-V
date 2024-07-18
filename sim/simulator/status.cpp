@@ -27,8 +27,8 @@ bits &bits::operator>>=(int x) { return this->data >>= x, *this; }
 bits &bits::operator|=(uint64_t x) { return this->data |= x, *this; }
 bits bits::range(uint8_t s, uint8_t e) const { return data << 63 - e >> 63 - e + s; }
 int64_t bits::sext(int w) const { return ((data >> w - 1) & 1 ? -1ull << w : 0) | data & ~(-1ull << w); }
-void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ((1 << e - s + 1) - 1) << s) |= x << s; }
-void bits::write(uint8_t i, uint64_t x) { (data &= 1 << i) |= x << i; }
+void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ~((1 << e - s + 1) - 1 << s)) |= x << s; }
+void bits::write(uint8_t i, uint64_t x) { (data &= ~(1 << i)) |= x << i; }
 
 memory::memory() {}
 memory::memory(const memory &b) { *this = b; }
@@ -37,23 +37,46 @@ memory::~memory()
     for (auto p : ptr)
         delete[] p;
 }
-bool memory::copy(uint8_t *ptr, uint64_t size, uint64_t base)
-{
-    this->base.push_back(base);
-    this->size.push_back(size);
-    this->ptr.push_back(new (std::nothrow) uint8_t[size]);
-    memcpy(this->ptr.back(), ptr, size);
-    if (this->ptr.back() == 0)
-        return this->size.back() = 0, false;
-    return true;
-}
 bool memory::add(uint64_t size, uint64_t base)
 {
+    size = (size + base % 4096 + 4095) / 4096 * 4096;
+    base = base / 4096 * 4096;
+    for (int i = 0; i < this->size.size(); i++)
+        if (this->base[i] <= base && this->base[i] + this->size[i] >= base + size)
+            return true;
+        else if (this->base[i] <= base && this->base[i] + this->size[i] >= base)
+            size += base - this->base[i], base = this->base[i];
+        else if (this->base[i] <= base + size && this->base[i] + this->size[i] >= base + size)
+            size += this->base[i] + this->size[i] - base - size;
     this->base.push_back(base);
     this->size.push_back(size);
     this->ptr.push_back(new (std::nothrow) uint8_t[size]);
     if (this->ptr.back() == 0)
         return this->size.back() = 0, false;
+    for (int i = 0; i < this->size.size() - 1; i++)
+        if (this->base[i] >= base && this->base[i] + this->size[i] <= base + size)
+        {
+            memcpy(this->ptr.back() + this->base[i] - base, this->ptr[i], this->size[i]);
+            delete[] this->ptr[i];
+            this->base.erase(this->base.begin() + i);
+            this->size.erase(this->size.begin() + i);
+            this->ptr.erase(this->ptr.begin() + i);
+        }
+    return true;
+}
+bool memory::copy(uint8_t *ptr, uint64_t size, uint64_t base)
+{
+    if (!add(size, base))
+        return false;
+    memcpy(&(*this)[base], ptr, size);
+    return true;
+}
+bool memory::read(FILE *fp, uint64_t size, uint64_t base)
+{
+    if (!add(size, base))
+        return false;
+    if (fread(&(*this)[base], size, 1, fp) < 0)
+        return false;
     return true;
 }
 uint8_t &memory::operator[](uint64_t addr)
@@ -73,7 +96,7 @@ uint8_t &memory::ui8(uint64_t addr) { return (*this)[addr]; }
 uint16_t &memory::ui16(uint64_t addr) { return *(uint16_t *)&(*this)[addr]; }
 uint32_t &memory::ui32(uint64_t addr) { return *(uint32_t *)&(*this)[addr]; }
 uint64_t &memory::ui64(uint64_t addr) { return *(uint64_t *)&(*this)[addr]; }
-bool memory::issegfault(uint8_t &x) { return &x == &segfault; }
+bool memory::issegfault(const uint8_t &x) { return &x == &segfault; }
 
 /**
  * @brief address translation
@@ -114,9 +137,9 @@ inline uint64_t paddr(memory &mem, bits satp, bits vaddr, uint8_t wena = 0)
             pte.write(6, 1);
             if (wena)
                 pte.write(7, 1);
+            mem.ui64((ppn << 12) + (vpn[i] << 3)) = pte;
             for (int j = 0; j < i; j++)
                 ppn |= vpn[j] << (j * 9); // super page
-            mem.ui64((ppn << 12) + (vpn[i] << 3)) = pte;
             break;
         }
     }
@@ -141,7 +164,7 @@ std::string disas(uint32_t ir)
                     (inst.range(7, 10) << 6) | (inst.range(11, 12) << 4) | (inst[5] << 3) | (inst[6] << 2));
         return ret;
     case 0b00100: // C.FLD
-        sprintf(ret, "c.fld %s, %lu(%s)", gprname[inst.range(2, 4) + 8],
+        sprintf(ret, "c.fld %s, %lu(%s)", gprname[inst.range(2, 4) + 8 + 32],
                 (inst.range(5, 6) << 6) | (inst.range(10, 12) << 3), gprname[inst.range(7, 9) + 8]);
         return ret;
     case 0b01000: // C.LW
@@ -153,7 +176,7 @@ std::string disas(uint32_t ir)
                 (inst.range(5, 6) << 6) | (inst.range(10, 12) << 3), gprname[inst.range(7, 9) + 8]);
         return ret;
     case 0b10100: // C.FSD
-        sprintf(ret, "c.fsd %s, %lu(%s)", gprname[inst.range(2, 4) + 8],
+        sprintf(ret, "c.fsd %s, %lu(%s)", gprname[inst.range(2, 4) + 8 + 32],
                 (inst.range(5, 6) << 6) | (inst.range(10, 12) << 3), gprname[inst.range(7, 9) + 8]);
         return ret;
     case 0b11000: // C.SW
@@ -218,7 +241,7 @@ std::string disas(uint32_t ir)
             sprintf(ret, "c.slli %s, %lu", gprname[inst.range(7, 11)], (inst[12] << 5) | inst.range(2, 6));
         return ret;
     case 0b00110: // C.FLDSP
-        sprintf(ret, "c.fldsp %s, %lu(sp)", gprname[inst.range(7, 11)],
+        sprintf(ret, "c.fldsp %s, %lu(sp)", gprname[inst.range(7, 11) + 32],
                 (inst.range(2, 4) << 6) | (inst[12] << 5) | (inst.range(5, 6) << 3));
         return ret;
     case 0b01010: // C.LWSP
@@ -242,7 +265,7 @@ std::string disas(uint32_t ir)
             sprintf(ret, "c.add %s, %s", gprname[inst.range(7, 11)], gprname[inst.range(2, 6)]);
         return ret;
     case 0b10110: // C.FSDSP
-        sprintf(ret, "c.fsdsp %s, %lu(sp)", gprname[inst.range(2, 6)],
+        sprintf(ret, "c.fsdsp %s, %lu(sp)", gprname[inst.range(2, 6) + 32],
                 (inst.range(7, 9) << 6) | (inst.range(10, 12) << 3));
         return ret;
     case 0b11010: // C.SWSP
@@ -272,7 +295,7 @@ std::string disas(uint32_t ir)
     case 0b0000111: // LOAD-FP
         imm = inst.range(20, 31).sext(12);
         if (funct3 == 2 || funct3 == 3)
-            sprintf(ret, "f%s %s, %ld(%s)", lnames[funct3], fd, imm, fs1);
+            sprintf(ret, "f%s %s, %ld(%s)", lnames[funct3], fd, imm, xs1);
         break;
     case 0b0001111: // MISC-MEM
         switch (funct3)
@@ -417,7 +440,7 @@ std::string disas(uint32_t ir)
             sprintf(ret, "fdiv.%c %s, %s, %s", inst[25] ? 'd' : 's', fd, fs1, fs2);
             break;
         case 0b01011:
-            sprintf(ret, "fsqrt.%c %s, %s, %s", inst[25] ? 'd' : 's', fd, fs1, fs2);
+            sprintf(ret, "fsqrt.%c %s, %s", inst[25] ? 'd' : 's', fd, fs1);
             break;
         case 0b00100:
             if (funct3 == 0)
@@ -442,11 +465,11 @@ std::string disas(uint32_t ir)
                 sprintf(ret, "feq.%c %s, %s, %s", inst[25] ? 'd' : 's', xd, fs1, fs2);
             break;
         case 0b01000:
-            sprintf(ret, "fcvt.%s %s, %s", inst[25] ? "d.s" : "s.d", fd, xs1);
+            sprintf(ret, "fcvt.%s %s, %s", inst[25] ? "d.s" : "s.d", fd, fs1);
             break;
         case 0b11000: // FCVT.I.F
-            sprintf(ret, "fcvt.%c.%c%s %s, %s",
-                    inst[21] ? 'l' : 'w', inst[25] ? 'd' : 's', inst[20] ? "u" : "", xd, fs1);
+            sprintf(ret, "fcvt.%c%s.%c %s, %s",
+                    inst[21] ? 'l' : 'w', inst[20] ? "u" : "", inst[25] ? 'd' : 's', xd, fs1);
             break;
         case 0b11010: // FCVT.F.I
             sprintf(ret, "fcvt.%c.%c%s %s, %s",
@@ -490,6 +513,14 @@ std::string disas(uint32_t ir)
                     xd, csrname[inst.range(20, 31)], inst[14] ? immname : xs1);
         else if ((ir & ~(1 << 20)) == 0x73)
             sprintf(ret, inst[20] ? "ebreak" : "ecall");
+        else if (ir == 0x30200073)
+            sprintf(ret, "mret");
+        else if (ir == 0x10200073)
+            sprintf(ret, "sret");
+        else if (ir == 0x12000073)
+            sprintf(ret, "sfence.vma");
+        else if (ir == 0x10500073)
+            sprintf(ret, "wfi");
         break;
     }
     return ret;
@@ -503,7 +534,7 @@ std::string disas(uint32_t ir)
  * @param cause  exception cause
  * @retval newly generated delta on current status and delta
  */
-inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cause)
+inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cause, uint64_t val = 0)
 {
     delta_t &ret = del;
     ret.gprw = ret.memw = 0;
@@ -513,6 +544,7 @@ inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cau
         ret.pc = status.csr["stvec"];
         ret.csr["sepc"] = status.pc;
         ret.csr["scause"] = cause;
+        ret.csr["stval"] = val;
         ret.csr["mstatus"] = status.csr["mstatus"];
         ret.csr["mstatus"].write(8, status.level & 1);
         ret.csr["mstatus"].write(5, status.csr["mstatus"][1]);
@@ -524,6 +556,7 @@ inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cau
         ret.pc = status.csr["mtvec"];
         ret.csr["mepc"] = status.pc;
         ret.csr["mcause"] = cause;
+        ret.csr["mtval"] = val;
         ret.csr["mstatus"] = status.csr["mstatus"];
         ret.csr["mstatus"].write(11, 12, status.level);
         ret.csr["mstatus"].write(7, status.csr["mstatus"][3]);
@@ -543,28 +576,24 @@ delta_t next(status_t &status)
     delta_t ret;
     ret.level = status.level;
     ret.gprw = ret.memw = 0;
-    ret.csr.clear();
-    ret.csr["mcycle"] = status.csr["mcycle"] + 1;
-    ret.csr["minstret"] = status.csr["minstret"] + 1;
-    if (ret.csr["mcycle"] % 128 == 0)
-        ret.csr["mtime"] = status.csr["mtime"] + 1;
 
     /* interrupt */
     bool mintena = status.level < 3 || status.level == 3 && status.csr["mstatus"][3];
     bool sintena = status.level < 1 || status.level == 1 && status.csr["mstatus"][1];
-    for (int i = 0; i < 64; i++)
-        if (status.csr["mie"] & status.csr["mip"])
-            if (status.csr["mideleg"][i] && sintena)
-                return genx(status, ret, 1, (1ull << 63) | i);
-            else if (!status.csr["mideleg"][i] && mintena)
-                return genx(status, ret, 3, (1ull << 63) | i);
+    if (status.csr["mie"] & status.csr["mip"])
+        for (int i = 0; i < 64; i++)
+            if (status.csr["mie"][i] && status.csr["mip"][i])
+                if (status.csr["mideleg"][i] && sintena)
+                    return genx(status, ret, 1, (1ull << 63) | i);
+                else if (!status.csr["mideleg"][i] && mintena)
+                    return genx(status, ret, 3, (1ull << 63) | i);
 
     /* fetch instruction and decode compressed instruction */
     bits medeleg = status.level <= 1 ? status.csr["medeleg"] : bits();
     uint64_t satp = status.level == 3 ? 0 : (uint64_t)status.csr["satp"];
     uint64_t ppc = paddr(status.mem, satp, status.pc, 0);
     if (ppc == -1)
-        return genx(status, ret, medeleg[12] ? 1 : 3, 12); // instruction PF
+        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc); // instruction PF
     bits idata = status.mem.ui64(ppc), ir;
     status.ir = idata[0] && idata[1] ? idata : idata.range(0, 15);
     ret.pc = status.pc + (idata.range(0, 1) == 3 ? 4 : 2);
@@ -865,24 +894,25 @@ delta_t next(status_t &status)
         ir |= 0x23;
         break;
     default:
-        ir = idata;
+        ir = idata.range(0, 31);
         break;
     }
 
     /* execute */
     uint8_t funct3 = ir.range(12, 14);
     uint64_t rs1 = status.gpr[ir.range(15, 19)], rs2 = status.gpr[ir.range(20, 24)];
-    double ds1 = status.gpr[ir.range(15, 19) + 32], ds2 = status.gpr[ir.range(20, 24) + 32],
-           ds3 = status.gpr[ir.range(27, 31) + 32];
-    float ss1 = status.gpr[ir.range(15, 19) + 32], ss2 = status.gpr[ir.range(20, 24) + 32],
-          ss3 = status.gpr[ir.range(27, 31) + 32];
+    double ds1 = (double)status.gpr[ir.range(15, 19) + 32], ds2 = (double)status.gpr[ir.range(20, 24) + 32],
+           ds3 = (double)status.gpr[ir.range(27, 31) + 32];
+    float ss1 = (float)status.gpr[ir.range(15, 19) + 32], ss2 = (float)status.gpr[ir.range(20, 24) + 32],
+          ss3 = (float)status.gpr[ir.range(27, 31) + 32];
     int64_t imm;
-    uint64_t pa;
+    uint64_t va, pa;
     switch (ir.range(0, 6)) // opcode
     {
     case 0b0000011: // LOAD
-        if ((pa = paddr(status.mem, satp, rs1 + ir.range(20, 31).sext(12), 0)) == -1)
-            return genx(status, ret, medeleg[13] ? 1 : 3, 13); // load PF
+        va = rs1 + ir.range(20, 31).sext(12);
+        if ((pa = paddr(status.mem, satp, va, 0)) == -1)
+            return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
         ret.gprv = status.mem.ui64(pa);
@@ -900,8 +930,9 @@ delta_t next(status_t &status)
             ret.gprv = (uint32_t)ret.gprv;
         break;
     case 0b0000111: // LOAD-FP
-        if ((pa = paddr(status.mem, satp, rs1 + ir.range(20, 31).sext(12), 0)) == -1)
-            return genx(status, ret, medeleg[13] ? 1 : 3, 13); // load PF
+        va = rs1 + ir.range(20, 31).sext(12);
+        if ((pa = paddr(status.mem, satp, va, 0)) == -1)
+            return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         if (funct3 == 0b010) // FLW
@@ -956,11 +987,12 @@ delta_t next(status_t &status)
         break;
     case 0b0100011: // STORE
     case 0b0100111: // STORE-FP
-        if ((pa = paddr(status.mem, satp, rs1 + bits(ir.range(25, 31) << 5 | ir.range(7, 11)).sext(12), 1)) == -1)
-            return genx(status, ret, medeleg[15] ? 1 : 3, 15); // store PF
+        va = rs1 + bits(ir.range(25, 31) << 5 | ir.range(7, 11)).sext(12);
+        if ((pa = paddr(status.mem, satp, va, 1)) == -1)
+            return genx(status, ret, medeleg[15] ? 1 : 3, 15, va); // store PF
         ret.memw = 1 << ir.range(12, 13);
         ret.mema = pa;
-        ret.memv = ir[2] ? (bits)ds2 : (bits)rs2;
+        ret.memv = status.gpr[ir.range(20, 24) + (ir[2] ? 32 : 0)];
         if (ret.memw < 8)
             ret.memv &= ~(-1ull << 8 * ret.memw);
         break;
@@ -969,27 +1001,27 @@ delta_t next(status_t &status)
         {
         case 0b00010: // LR
             if ((pa = paddr(status.mem, satp, rs1, 0)) == -1)
-                return genx(status, ret, medeleg[13] ? 1 : 3, 13); // load PF
+                return genx(status, ret, medeleg[13] ? 1 : 3, 13, rs1); // load PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
             ret.gprv = status.mem.ui64(rs1);
-            ret.memw = 0x80000000 | (1 << ir.range(12, 13));
+            ret.memw = 0x80 | (1 << ir.range(12, 13));
             ret.mema = pa;
             if (funct3 == 0b010) // LR.W
                 ret.gprv = (int64_t)(int32_t)ret.gprv;
             break;
         case 0b00011: // SC
             if ((pa = paddr(status.mem, satp, rs1, 1)) == -1)
-                return genx(status, ret, medeleg[15] ? 1 : 3, 15); // store PF
+                return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // store PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            if (status.rsrv[rs1 + 0] && status.rsrv[rs1 + 1] &&
-                status.rsrv[rs1 + 2] && status.rsrv[rs1 + 3] &&
-                (funct3 == 0b010 || status.rsrv[rs1 + 4] && status.rsrv[rs1 + 5] &&
-                                        status.rsrv[rs1 + 6] && status.rsrv[rs1 + 7]))
+            if (status.rsrv[pa + 0] && status.rsrv[pa + 1] &&
+                status.rsrv[pa + 2] && status.rsrv[pa + 3] &&
+                (funct3 == 0b010 || status.rsrv[pa + 4] && status.rsrv[pa + 5] &&
+                                        status.rsrv[pa + 6] && status.rsrv[pa + 7]))
             {
                 ret.gprv = 0;
-                ret.memw = 0xc0000000 | (1 << ir.range(12, 13));
+                ret.memw = 0xc0 | (1 << ir.range(12, 13));
                 ret.mema = pa;
                 ret.memv = rs2;
                 if (ret.memw & 0xf < 8)
@@ -1000,7 +1032,7 @@ delta_t next(status_t &status)
             break;
         default:
             if ((pa = paddr(status.mem, satp, rs1, 1)) == -1)
-                return genx(status, ret, medeleg[15] ? 1 : 3, 15); // AMO PF
+                return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // AMO PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
             ret.gprv = status.mem.ui64(rs1);
@@ -1098,7 +1130,7 @@ delta_t next(status_t &status)
         break;
     case 0b0111011: // OP-32
         ret.gprw = 1;
-        ret.gpra - ir.range(7, 11);
+        ret.gpra = ir.range(7, 11);
         if (ir[25])
         {
             if (funct3 == 0b000) // MULW
@@ -1119,7 +1151,7 @@ delta_t next(status_t &status)
                 ret.gprv = bits(uint64_t(rs2 == 0 ? (uint32_t)rs1 : (uint32_t)rs1 % (uint32_t)rs2)).sext(32);
         }
         else if (funct3 == 0b000)
-            if (ir[30]) // SUBWs
+            if (ir[30]) // SUBW
                 ret.gprv = (int32_t)rs1 - (int32_t)rs2;
             else // ADDW
                 ret.gprv = (int32_t)rs1 + (int32_t)rs2;
@@ -1312,27 +1344,53 @@ delta_t next(status_t &status)
         break;
     case 0b1110011: // SYSTEM
         if (ir.range(12, 13))
-        {
+        { // CSRR[WSC]
+            uint16_t addr = ir.range(20, 31);
+            if (csrname.find(addr) == csrname.end())
+                return genx(status, ret, medeleg[2] ? 1 : 3, 2, status.ir);
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.csr[csrname[ir.range(20, 31)]];
+            ret.gprv = status.csr[csrname[addr]];
             rs1 = ir[14] ? (uint64_t)ir.range(15, 19) : rs1;
             if (ir.range(12, 13) == 1) // CSRRW
-                ret.csr[csrname[ir.range(20, 31)]] = rs1;
+                ret.csr[csrname[addr]] = rs1;
             else if (ir.range(12, 13) == 2) // CSRRS
-                ret.csr[csrname[ir.range(20, 31)]] = ret.gprv | rs1;
+                ret.csr[csrname[addr]] = ret.gprv | rs1;
             else if (ir.range(12, 13) == 3) // CSRRC
-                ret.csr[csrname[ir.range(20, 31)]] = ret.gprv & ~rs1;
+                ret.csr[csrname[addr]] = ret.gprv & ~rs1;
         }
-        else if ((ir & ~(1ull << 20)) == 0x73)
+        else if ((ir & ~(1 << 20)) == 0x73) // ECALL / EBREAK
             return genx(status, ret, medeleg[ir[20] ? 3 : 11] ? 1 : 3, ir[20] ? 3 : 11);
+        else if (ir == 0x30200073) // MRET
+        {
+            ret.pc = status.csr["mepc"];
+            ret.level = status.csr["mstatus"].range(11, 12);
+            ret.csr["mstatus"] = status.csr["mstatus"];
+            ret.csr["mstatus"].write(11, 12, 0);
+            ret.csr["mstatus"].write(3, status.csr["mstatus"][7]);
+            ret.csr["mstatus"].write(7, 1);
+        }
+        else if (ir == 0x10200073) // SRET
+        {
+            ret.pc = status.csr["sepc"];
+            ret.level = status.csr["mstatus"][8];
+            ret.csr["mstatus"] = status.csr["mstatus"];
+            ret.csr["mstatus"].write(8, 0);
+            ret.csr["mstatus"].write(1, status.csr["mstatus"][5]);
+            ret.csr["mstatus"].write(5, 1);
+        }
         break;
     default:
         return genx(status, ret, medeleg[2] ? 1 : 3, 2);
     }
+
+    /* return status delta */
     if (ret.gpra == 0)
         ret.gprw = 0;
-
+    ret.csr["mcycle"] = status.csr["mcycle"] + 1;
+    ret.csr["minstret"] = status.csr["minstret"] + 1;
+    if (ret.csr["mcycle"] % 128 == 0)
+        ret.csr["mtime"] = status.csr["mtime"] + 1;
     return ret;
 }
 
@@ -1342,9 +1400,22 @@ void apply(status_t &s, delta_t &d)
     s.level = d.level;
     if (d.gprw)
         s.gpr[d.gpra] = d.gprv;
+    if (d.memw >> 4 == 0x8) // LR
+    {
+        d.memw &= 0xf;
+        for (int i = 0; i < d.memw; i++)
+            s.rsrv[d.mema + i] = 1;
+        d.memw = 0;
+    }
+    else if (d.memw >> 4 == 0xc) // SC
+    {
+        d.memw &= 0xf;
+        for (int i = 0; i < d.memw; i++)
+            s.rsrv[d.mema + i] = 0;
+    }
     if (d.memw && s.mem.issegfault(s.mem[d.mema]))
-        fprintf(stderr, "[Warning] Attempt to access undefined memory@%lx\n", d.mema);
-    else if (d.memw == 1)
+        s.mem.add(1, d.mema);
+    if (d.memw == 1)
         s.mem.ui8(d.mema) = d.memv;
     else if (d.memw == 2)
         s.mem.ui16(d.mema) = d.memv;

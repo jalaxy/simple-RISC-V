@@ -41,13 +41,14 @@ public:
     memory();
     memory(const memory &);
     ~memory();
-    bool copy(uint8_t *, uint64_t, uint64_t);
     bool add(uint64_t, uint64_t);
+    bool copy(uint8_t *, uint64_t, uint64_t);
+    bool read(FILE *, uint64_t, uint64_t);
     uint8_t &ui8(uint64_t);
     uint16_t &ui16(uint64_t);
     uint32_t &ui32(uint64_t);
     uint64_t &ui64(uint64_t);
-    bool issegfault(uint8_t &);
+    bool issegfault(const uint8_t &);
     uint8_t &operator[](uint64_t);
     memory &operator=(const memory &);
 };
