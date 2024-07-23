@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/signal.h>
 #include "status.h"
 
 typedef struct
@@ -19,6 +20,9 @@ typedef struct
 {
     uint64_t fromhost = 0, tohost = 0, lock = 0;
 } htifaddr_t;
+
+int interrupt = 0;
+void intrhandler(int) { fprintf(stderr, "[Info] Interrupted.\n"), interrupt = 1; }
 
 void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size)
 {
@@ -61,9 +65,9 @@ void disasmem(const uint8_t *mem, uint64_t size)
 
 void print(status_t &status, const delta_t &delta)
 {
-    char s[256];
-    sprintf(s, "[Debug] cycle %ld: i@%lx: %s",
-            (uint64_t)status.csr.at("mcycle"), status.pc, disas(status.ir).c_str());
+    char s[256], lch[4] = {'U', 'S', 'H', 'M'};
+    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", (uint64_t)status.csr.at("mcycle"),
+            lch[status.level & 3], status.pc, status.ir, disas(status.ir).c_str());
     if (strlen(s) < 63)
     {
         for (int i = strlen(s); i < 63; i++)
@@ -74,7 +78,7 @@ void print(status_t &status, const delta_t &delta)
     if (delta.gprw)
         fprintf(stderr, " %s: %lx", gprname[delta.gpra], delta.gprv);
     if (delta.memw && delta.memw >> 4 != 0x8)
-        fprintf(stderr, " d%d@%lx: %lx", delta.memw, delta.mema, delta.memv);
+        fprintf(stderr, " d%d@%lx: %lx", delta.memw & 0xf, delta.mema, delta.memv);
     fprintf(stderr, "\n");
 }
 
@@ -156,13 +160,14 @@ int main(int argc, char *argv[])
     htifaddr_t htifaddr;
     uint64_t dtbaddr = 0x1020; // -0x80000000 - 0x7fffffff
     uint64_t initrdaddr = 0xfe60fe00;
-    uint64_t pkargaddr = 0x8000d428; // proxy kernel arguments address (args.2997) (may change)
     if (cmd.filetype == 0)
     {
         /* ELF format */
         /* Read and check ELF header */
         Elf64_Ehdr elf_h; // ELF header
         FILE *fp = fopen(cmd.elf, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.elf), 1;
         if (fread(&elf_h, sizeof(elf_h), 1, fp) < 0)
             return fprintf(stderr, "[Error] Fread failed.\n"), 1;
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
@@ -295,13 +300,26 @@ int main(int argc, char *argv[])
     /* Simulate */
     status_t s = {.pc = entry, .mem = mem};
     uint8_t exitcall = 0, exitcode = 0;
-    while (!exitcall && s.csr["mcycle"] < cmd.maxtime)
+    uint64_t cycle = 0;
+    s.mem.add(0xc0000, 0x2000000);                     // CLINT area
+    s.mem.ui64(s.csr["mtime"] = 0x200bff8) = 0;        // mtime
+    s.mem.ui64(s.csr["mtimecmp"] = 0x2004000) = -1ull; // mtimecmp
+    signal(SIGINT, intrhandler);
+    while (!interrupt && !exitcall && cycle < cmd.maxtime)
     {
+        /* set interrupts */
+        if (cycle % 10 == 0) // increase mtime
+            s.mem.ui64(s.csr["mtime"])++;
+        s.csr["mip"].write(7, s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]));
+
         /* get next status */
         delta_t d = next(s);
-        if (cmd.debug && s.csr["mcycle"] >= cmd.mintime)
-            print(s, d);
+        if (cycle >= cmd.mintime)
+            cmd.debug ? print(s, d), 0 : 0;
         apply(s, d);
+        if ((cycle + 1) % 1000000 == 0)
+            fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
+                    (int)cycle, s.pc, s.ir);
 
         /* handle HTIF requests */
         uint64_t tohost_dev = s.mem[htifaddr.tohost + 7];
@@ -384,15 +402,15 @@ int main(int argc, char *argv[])
                     arg0 = s.mem.ui64(magic_mem + 8);  // argument buffer address
                     arg1 = s.mem.ui64(magic_mem + 16); // argument buffer size
                     s.mem.ui64(arg0) = cmd.args.size();
-                    uint64_t addr = pkargaddr;
+                    uint64_t addr = arg0 + (cmd.args.size() + 1) * 8;
                     for (int i = 0; i < cmd.args.size(); i++)
                     {
-                        s.mem.ui64(arg0 + (i + 1) * 8) = s.mem.ui64(addr);
-                        if (addr - pkargaddr + strlen(cmd.args[i]) + 1 <= arg1)
+                        s.mem.ui64(arg0 + (i + 1) * 8) = addr;
+                        if (addr - arg0 + strlen(cmd.args[i]) + 1 <= arg1)
                             memcpy(&s.mem[addr], cmd.args[i], strlen(cmd.args[i]) + 1);
                         addr += strlen(cmd.args[i]) + 1;
                     }
-                    if (addr - pkargaddr >= arg1)
+                    if (addr - arg0 >= arg1)
                         retval = -1;
                 }
                 else
@@ -415,10 +433,13 @@ int main(int argc, char *argv[])
         if (s.mem.ui64(htifaddr.fromhost) == 0 && (ch = getchar()) != EOF)
             s.mem.ui64(htifaddr.fromhost) = (1ull << 56) | ch;
         fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
+
+        /* cycle increment */
+        cycle++;
     }
     if (cmd.filetype == 1 && cmd.debug)
         disasmem(&s.mem[entry], dumpsz), print(s, 0x10010000, 256);
 
-    fprintf(stderr, "[Info] Exited with code %hhd\n", exitcode);
+    fprintf(stderr, "[Info] Exited with code %hhu at cycle %lu\n", exitcode, (uint64_t)s.csr["mcycle"]);
     return exitcode;
 }

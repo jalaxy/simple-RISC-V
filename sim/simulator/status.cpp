@@ -1,6 +1,7 @@
 #include "status.h"
 #include <cstring>
 #include <cmath>
+#include <fenv.h>
 
 bits::bits() { this->data = 0; }
 bits::bits(uint64_t ui) { this->data = ui; }
@@ -61,6 +62,7 @@ bool memory::add(uint64_t size, uint64_t base)
             this->base.erase(this->base.begin() + i);
             this->size.erase(this->size.begin() + i);
             this->ptr.erase(this->ptr.begin() + i);
+            i--;
         }
     return true;
 }
@@ -103,10 +105,11 @@ bool memory::issegfault(const uint8_t &x) { return &x == &segfault; }
  * @param mem   pointer of memory
  * @param satp  CSR satp
  * @param vaddr virtual address
- * @param wena  whether a memory-write request
+ * @param perm  the permission required ([7..0]: ----XWR-, [9,8]: SU)
+ * @param adpf  raise page fault when violate access/dirty bits
  * @retval physical adderss
  */
-inline uint64_t paddr(memory &mem, bits satp, bits vaddr, uint8_t wena = 0)
+inline uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm = 0, bool adpf = 1)
 {
     uint64_t ppn, vpn[5], offset;
     int start = -1;
@@ -128,16 +131,26 @@ inline uint64_t paddr(memory &mem, bits satp, bits vaddr, uint8_t wena = 0)
         start = 4;
     for (int i = start; i >= 0; i--)
     {
-        bits pte = mem.ui64((ppn << 12) + (vpn[i] << 3));
+        bits &pte = *(bits *)&mem.ui64((ppn << 12) + (vpn[i] << 3));
         ppn = pte.range(10, 53);
-        if (pte[0] == 0)
+        if (pte[0] == 0) // invalid entry
             return -1;
         if (pte[1] || pte[3]) // pte.r = 1 or pte.x = 1 -> leaf node
         {
-            pte.write(6, 1);
-            if (wena)
-                pte.write(7, 1);
-            mem.ui64((ppn << 12) + (vpn[i] << 3)) = pte;
+            if ((pte.range(0, 7) | perm.range(0, 7)) != pte.range(0, 7)) // check permission
+                return -1;
+            if (perm[8] && !pte[4] || perm[9] && pte[4]) // U bit
+                return -1;
+            if (!adpf) // A/D bit
+            {
+                pte.write(6, 1); // A bit
+                if (perm[2])
+                    pte.write(7, 1); // D bit
+            }
+            else if (!pte[6] || perm[2] && !pte[7])
+                return -1;
+            if (i > 0 && bits(ppn).range(0, i * 9 - 1)) // misaligned super page
+                return -1;
             for (int j = 0; j < i; j++)
                 ppn |= vpn[j] << (j * 9); // super page
             break;
@@ -506,11 +519,59 @@ std::string disas(uint32_t ir)
         break;
     case 0b1110011: // SYSTEM
         static char cname[4] = {0, 'w', 's', 'c'}, immname[16];
+        static std::map<uint16_t, const char *> csrnamefull = {
+            {0x004, "uie"},
+            {0x005, "utvec"},
+            {0x040, "uscratch"},
+            {0x041, "uepc"},
+            {0x042, "ucause"},
+            {0x043, "utval"},
+            {0x044, "uip"},
+            {0xc00, "cycle"},
+            {0xc01, "time"},
+            {0xc02, "instret"},
+            {0xc03, "hpmcounter3"},
+            {0xc04, "hpmcounter4"},
+            {0xc05, "hpmcounter5"},
+            {0xc06, "hpmcounter6"},
+            {0xc07, "hpmcounter7"},
+            {0xc08, "hpmcounter8"},
+            {0xc09, "hpmcounter9"},
+            {0xc0a, "hpmcounter10"},
+            {0xc0b, "hpmcounter11"},
+            {0xc0c, "hpmcounter12"},
+            {0xc0d, "hpmcounter13"},
+            {0xc0e, "hpmcounter14"},
+            {0xc0f, "hpmcounter15"},
+            {0xc10, "hpmcounter16"},
+            {0xc11, "hpmcounter17"},
+            {0xc12, "hpmcounter18"},
+            {0xc13, "hpmcounter19"},
+            {0xc14, "hpmcounter20"},
+            {0xc15, "hpmcounter21"},
+            {0xc16, "hpmcounter22"},
+            {0xc17, "hpmcounter23"},
+            {0xc18, "hpmcounter24"},
+            {0xc19, "hpmcounter25"},
+            {0xc1a, "hpmcounter26"},
+            {0xc1b, "hpmcounter27"},
+            {0xc1c, "hpmcounter28"},
+            {0xc1d, "hpmcounter29"},
+            {0xc1e, "hpmcounter30"},
+            {0xc1f, "hpmcounter31"},
+            {0x100, "sstatus"},
+            {0x102, "sedeleg"},
+            {0x103, "sideleg"},
+            {0x104, "sie"},
+            {0x144, "sip"}};
+        std::map<uint16_t, const char *> *pnames = &csrname;
+        if (pnames->find(inst.range(20, 31)) == pnames->end())
+            pnames = &csrnamefull;
         sprintf(immname, "%lu", (uint64_t)inst.range(15, 19));
         if (inst.range(12, 13))
             sprintf(ret, "csrr%c%s %s, %s, %s",
                     cname[inst.range(12, 13)], inst[14] ? "i" : "",
-                    xd, csrname[inst.range(20, 31)], inst[14] ? immname : xs1);
+                    xd, (*pnames)[inst.range(20, 31)], inst[14] ? immname : xs1);
         else if ((ir & ~(1 << 20)) == 0x73)
             sprintf(ret, inst[20] ? "ebreak" : "ecall");
         else if (ir == 0x30200073)
@@ -523,6 +584,10 @@ std::string disas(uint32_t ir)
             sprintf(ret, "wfi");
         break;
     }
+    if (ir == 0x00c02013)
+        sprintf(ret, "[instruction page fault]");
+    if (ir == 0x00002013)
+        sprintf(ret, "[instruction address misaligned]");
     return ret;
 }
 
@@ -576,6 +641,7 @@ delta_t next(status_t &status)
     delta_t ret;
     ret.level = status.level;
     ret.gprw = ret.memw = 0;
+    status.pc &= ~1ull;
 
     /* interrupt */
     bool mintena = status.level < 3 || status.level == 3 && status.csr["mstatus"][3];
@@ -590,11 +656,29 @@ delta_t next(status_t &status)
 
     /* fetch instruction and decode compressed instruction */
     bits medeleg = status.level <= 1 ? status.csr["medeleg"] : bits();
+    uint64_t su = status.level == 0 ? 0x100 : (status.level == 1 ? 0x200 : 0);
     uint64_t satp = status.level == 3 ? 0 : (uint64_t)status.csr["satp"];
-    uint64_t ppc = paddr(status.mem, satp, status.pc, 0);
+    uint64_t ppc = paddr(status.mem, satp, status.pc, su | 8); // require X permission
+    bits idata = status.mem.ui32(ppc), ir;
     if (ppc == -1)
-        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc); // instruction PF
-    bits idata = status.mem.ui64(ppc), ir;
+    {
+        status.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
+        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc);
+    }
+    if ((status.pc & 0xfff) == 0xffe) // beyond page
+        idata = idata & 0xffff | (status.mem.ui32(ppc = paddr(status.mem, satp, status.pc + 2, su | 8)) << 16);
+    if (ppc == -1)
+    {
+        status.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
+        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc + 2);
+    }
+    if (status.csr["mstatus"][17] && status.csr["mstatus"].range(11, 12) < 3) // MPRV bit in mstatus
+    {
+        satp = (uint64_t)status.csr["satp"];
+        su = status.csr["mstatus"].range(11, 12) == 1 ? 0x200 : 0x100;
+    }
+    if (status.csr["mstatus"][18] && su == 0x200) // SUM bit in mstatus
+        su = 0;
     status.ir = idata[0] && idata[1] ? idata : idata.range(0, 15);
     ret.pc = status.pc + (idata.range(0, 1) == 3 ? 4 : 2);
     switch ((idata.range(13, 15) << 2) | idata.range(0, 1))
@@ -899,7 +983,7 @@ delta_t next(status_t &status)
     }
 
     /* execute */
-    uint8_t funct3 = ir.range(12, 14);
+    uint8_t funct3 = ir.range(12, 14), fs = status.csr["mstatus"].range(13, 14);
     uint64_t rs1 = status.gpr[ir.range(15, 19)], rs2 = status.gpr[ir.range(20, 24)];
     double ds1 = (double)status.gpr[ir.range(15, 19) + 32], ds2 = (double)status.gpr[ir.range(20, 24) + 32],
            ds3 = (double)status.gpr[ir.range(27, 31) + 32];
@@ -911,7 +995,7 @@ delta_t next(status_t &status)
     {
     case 0b0000011: // LOAD
         va = rs1 + ir.range(20, 31).sext(12);
-        if ((pa = paddr(status.mem, satp, va, 0)) == -1)
+        if ((pa = paddr(status.mem, satp, va, su | 2)) == -1)      // require R permission
             return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
@@ -930,8 +1014,10 @@ delta_t next(status_t &status)
             ret.gprv = (uint32_t)ret.gprv;
         break;
     case 0b0000111: // LOAD-FP
+        if (!fs)
+            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
         va = rs1 + ir.range(20, 31).sext(12);
-        if ((pa = paddr(status.mem, satp, va, 0)) == -1)
+        if ((pa = paddr(status.mem, satp, va, su | 2)) == -1)
             return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
@@ -985,10 +1071,12 @@ delta_t next(status_t &status)
             else // SRLIW
                 ret.gprv = (int64_t)(int32_t)((uint32_t)rs1 >> (imm &= 0x3f));
         break;
-    case 0b0100011: // STORE
     case 0b0100111: // STORE-FP
+        if (!fs)
+            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+    case 0b0100011: // STORE
         va = rs1 + bits(ir.range(25, 31) << 5 | ir.range(7, 11)).sext(12);
-        if ((pa = paddr(status.mem, satp, va, 1)) == -1)
+        if ((pa = paddr(status.mem, satp, va, su | 4)) == -1)      // require W permission
             return genx(status, ret, medeleg[15] ? 1 : 3, 15, va); // store PF
         ret.memw = 1 << ir.range(12, 13);
         ret.mema = pa;
@@ -1000,18 +1088,18 @@ delta_t next(status_t &status)
         switch (ir.range(27, 31))
         {
         case 0b00010: // LR
-            if ((pa = paddr(status.mem, satp, rs1, 0)) == -1)
+            if ((pa = paddr(status.mem, satp, rs1, su | 2)) == -1)
                 return genx(status, ret, medeleg[13] ? 1 : 3, 13, rs1); // load PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.mem.ui64(rs1);
+            ret.gprv = status.mem.ui64(pa);
             ret.memw = 0x80 | (1 << ir.range(12, 13));
             ret.mema = pa;
             if (funct3 == 0b010) // LR.W
                 ret.gprv = (int64_t)(int32_t)ret.gprv;
             break;
         case 0b00011: // SC
-            if ((pa = paddr(status.mem, satp, rs1, 1)) == -1)
+            if ((pa = paddr(status.mem, satp, rs1, su | 4)) == -1)
                 return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // store PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
@@ -1031,15 +1119,16 @@ delta_t next(status_t &status)
                 ret.gprv = 1;
             break;
         default:
-            if ((pa = paddr(status.mem, satp, rs1, 1)) == -1)
+            if ((pa = paddr(status.mem, satp, rs1, su | 4)) == -1)
                 return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // AMO PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.mem.ui64(rs1);
+            ret.gprv = status.mem.ui64(pa);
             ret.memw = 1 << ir.range(12, 13);
             ret.mema = pa;
             if (funct3 == 0b010) // AMO*.W
-                ret.memv = (int64_t)(int32_t)ret.gprv, rs2 = (int64_t)(int32_t)rs2;
+                ret.gprv = (int64_t)(int32_t)ret.gprv, rs2 = (int64_t)(int32_t)rs2;
+            ret.memv = ret.gprv;
             if (ir.range(27, 31) == 0b00001) // AMOSWAP
                 ret.memv = rs2;
             if (ir.range(27, 31) == 0b00000) // AMOADD
@@ -1058,8 +1147,6 @@ delta_t next(status_t &status)
                 ret.memv = rs2 < ret.gprv ? (uint64_t)rs2 : ret.gprv;
             if (ir.range(27, 31) == 0b11100) // AMOMAXU
                 ret.memv = rs2 > ret.gprv ? (uint64_t)rs2 : ret.gprv;
-            if (funct3 == 0b010) // AMO*.W
-                ret.gprv = (int64_t)(int32_t)ret.gprv;
             if (ret.memw < 8)
                 ret.memv &= ~((uint64_t)-1 << (8 * ret.memw));
             break;
@@ -1167,6 +1254,8 @@ delta_t next(status_t &status)
     case 0b1000111: // MSUB
     case 0b1001011: // NMSUB
     case 0b1001111: // NMADD
+        if (!fs)
+            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         if (ir.range(2, 3) == 0)
@@ -1179,6 +1268,8 @@ delta_t next(status_t &status)
             ret.gprv = ir[25] ? bits(-ds1 * ds2 - ds3) : bits(-ss1 * ss2 - ss3);
         break;
     case 0b1010011: // OP-FP
+        if (!fs)
+            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         switch (ir.range(27, 31))
@@ -1346,21 +1437,36 @@ delta_t next(status_t &status)
         if (ir.range(12, 13))
         { // CSRR[WSC]
             uint16_t addr = ir.range(20, 31);
+            if (addr >= 0xc00 && addr < 0xc20) // shadowed counters
+                if (status.level == 3 ||
+                    status.csr["mcounteren"][addr & 0x1f] &&
+                        (status.level == 2 || status.csr["scounteren"][addr & 0x1f]))
+                    addr -= 0x100;
+            if (addr == 0x100 || addr == 0x144 || addr == 0x104) // sstatus/sip/sie
+                addr += 0x200;
             if (csrname.find(addr) == csrname.end())
-                return genx(status, ret, medeleg[2] ? 1 : 3, 2, status.ir);
+                return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
             ret.gprv = status.csr[csrname[addr]];
             rs1 = ir[14] ? (uint64_t)ir.range(15, 19) : rs1;
+            uint64_t wvalue;
             if (ir.range(12, 13) == 1) // CSRRW
-                ret.csr[csrname[addr]] = rs1;
+                wvalue = rs1;
             else if (ir.range(12, 13) == 2) // CSRRS
-                ret.csr[csrname[addr]] = ret.gprv | rs1;
+                wvalue = ret.gprv | rs1;
             else if (ir.range(12, 13) == 3) // CSRRC
-                ret.csr[csrname[addr]] = ret.gprv & ~rs1;
+                wvalue = ret.gprv & ~rs1;
+            if (ir.range(20, 31).range(8, 9) > status.level) // check level
+                return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            if (ir.range(20, 31) >= 0xc00 && ir.range(20, 31) < 0xc20) // write read-only counters
+                if (wvalue != ret.gprv)
+                    return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            ret.csr[csrname[addr]] = wvalue;
         }
         else if ((ir & ~(1 << 20)) == 0x73) // ECALL / EBREAK
-            return genx(status, ret, medeleg[ir[20] ? 3 : 11] ? 1 : 3, ir[20] ? 3 : 11);
+            return genx(status, ret, medeleg[ir[20] ? 3 : status.level + 8] ? 1 : 3,
+                        ir[20] ? 3 : status.level + 8);
         else if (ir == 0x30200073) // MRET
         {
             ret.pc = status.csr["mepc"];
@@ -1381,7 +1487,7 @@ delta_t next(status_t &status)
         }
         break;
     default:
-        return genx(status, ret, medeleg[2] ? 1 : 3, 2);
+        return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
     }
 
     /* return status delta */
@@ -1389,8 +1495,10 @@ delta_t next(status_t &status)
         ret.gprw = 0;
     ret.csr["mcycle"] = status.csr["mcycle"] + 1;
     ret.csr["minstret"] = status.csr["minstret"] + 1;
-    if (ret.csr["mcycle"] % 128 == 0)
-        ret.csr["mtime"] = status.csr["mtime"] + 1;
+    if (ret.csr.find("misa") != ret.csr.end()) // some WARL csr fields
+        ret.csr.at("misa") = 0x14112d | (1ull << 63);
+    if (ret.csr.find("mstatus") != ret.csr.end()) // some WARL csr fields
+        ret.csr.at("mstatus").write(30, 32, 0xa);
     return ret;
 }
 
@@ -1441,56 +1549,12 @@ std::map<uint16_t, const char *> csrname = {
     {0x001, "fflags"},
     {0x002, "frm"},
     {0x003, "fcsr"},
-    {0x004, "uie"},
-    {0x005, "utvec"},
-    {0x040, "uscratch"},
-    {0x041, "uepc"},
-    {0x042, "ucause"},
-    {0x043, "utval"},
-    {0x044, "uip"},
-    {0xc00, "cycle"},
-    {0xc01, "time"},
-    {0xc02, "instret"},
-    {0xc03, "hpmcounter3"},
-    {0xc04, "hpmcounter4"},
-    {0xc05, "hpmcounter5"},
-    {0xc06, "hpmcounter6"},
-    {0xc07, "hpmcounter7"},
-    {0xc08, "hpmcounter8"},
-    {0xc09, "hpmcounter9"},
-    {0xc0a, "hpmcounter10"},
-    {0xc0b, "hpmcounter11"},
-    {0xc0c, "hpmcounter12"},
-    {0xc0d, "hpmcounter13"},
-    {0xc0e, "hpmcounter14"},
-    {0xc0f, "hpmcounter15"},
-    {0xc10, "hpmcounter16"},
-    {0xc11, "hpmcounter17"},
-    {0xc12, "hpmcounter18"},
-    {0xc13, "hpmcounter19"},
-    {0xc14, "hpmcounter20"},
-    {0xc15, "hpmcounter21"},
-    {0xc16, "hpmcounter22"},
-    {0xc17, "hpmcounter23"},
-    {0xc18, "hpmcounter24"},
-    {0xc19, "hpmcounter25"},
-    {0xc1a, "hpmcounter26"},
-    {0xc1b, "hpmcounter27"},
-    {0xc1c, "hpmcounter28"},
-    {0xc1d, "hpmcounter29"},
-    {0xc1e, "hpmcounter30"},
-    {0xc1f, "hpmcounter31"},
-    {0x100, "sstatus"},
-    {0x102, "sedeleg"},
-    {0x103, "sideleg"},
-    {0x104, "sie"},
     {0x105, "stvec"},
     {0x106, "scounteren"},
     {0x140, "sscratch"},
     {0x141, "sepc"},
     {0x142, "scause"},
     {0x143, "stval"},
-    {0x144, "sip"},
     {0x180, "satp"},
     {0x300, "mstatus"},
     {0x301, "misa"},
