@@ -63,10 +63,10 @@ void disasmem(const uint8_t *mem, uint64_t size)
                 p += 2;
 }
 
-void print(status_t &status, const delta_t &delta)
+void print(uint64_t cycle, status_t &status, const delta_t &delta)
 {
     char s[256], lch[4] = {'U', 'S', 'H', 'M'};
-    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", (uint64_t)status.csr.at("mcycle"),
+    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", cycle,
             lch[status.level & 3], status.pc, status.ir, disas(status.ir).c_str());
     if (strlen(s) < 63)
     {
@@ -305,7 +305,7 @@ int main(int argc, char *argv[])
     s.mem.ui64(s.csr["mtime"] = 0x200bff8) = 0;        // mtime
     s.mem.ui64(s.csr["mtimecmp"] = 0x2004000) = -1ull; // mtimecmp
     signal(SIGINT, intrhandler);
-    while (!interrupt && !exitcall && cycle < cmd.maxtime)
+    while (!interrupt && !exitcall && cycle <= cmd.maxtime)
     {
         /* set interrupts */
         if (cycle % 10 == 0) // increase mtime
@@ -315,7 +315,7 @@ int main(int argc, char *argv[])
         /* get next status */
         delta_t d = next(s);
         if (cycle >= cmd.mintime)
-            cmd.debug ? print(s, d), 0 : 0;
+            cmd.debug ? print(cycle, s, d), 0 : 0;
         apply(s, d);
         if ((cycle + 1) % 1000000 == 0)
             fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
@@ -422,12 +422,11 @@ int main(int argc, char *argv[])
         else if (tohost_dev == 1 && tohost_cmd == 1) // console write
             putchar(tohost_dat), fflush(stdout);
         else if (tohost_dev == 1 && tohost_cmd == 0) // console_read
-            s.mem.ui64(htifaddr.fromhost) = 0;
+            ;
         else
             fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                     tohost_dev, tohost_cmd, tohost_dat);
-        for (int i = 0; i < 8; i++)
-            s.mem.ui64(htifaddr.tohost) = 0;
+        s.mem.ui64(htifaddr.tohost) = 0;
         fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
         char ch; // receive character from stdin
         if (s.mem.ui64(htifaddr.fromhost) == 0 && (ch = getchar()) != EOF)

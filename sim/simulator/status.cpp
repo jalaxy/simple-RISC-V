@@ -627,6 +627,8 @@ inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cau
         ret.csr["mstatus"].write(7, status.csr["mstatus"][3]);
         ret.csr["mstatus"].write(3, 0);
     }
+    if ((ret.pc & 3) == 1 && (int64_t)cause < 0) // vectored for async exception
+        ret.pc += 4 * (cause & 0xf);
     return ret;
 }
 
