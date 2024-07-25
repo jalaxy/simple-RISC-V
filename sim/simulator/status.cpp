@@ -1,6 +1,10 @@
 #include "status.h"
+#include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <fenv.h>
 
 bits::bits() { this->data = 0; }
@@ -160,7 +164,7 @@ inline uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm = 0, bool ad
 }
 
 /**
- * @brief Disassemble an instruction
+ * @brief disassemble an instruction
  * @param ir instruction register value
  * @retval disassembled string
  */
@@ -1504,6 +1508,11 @@ delta_t next(status_t &status)
     return ret;
 }
 
+/**
+ * @brief apply delta on status
+ * @param s the status
+ * @param d the delta to apply
+ */
 void apply(status_t &s, delta_t &d)
 {
     s.pc = d.pc;
@@ -1535,6 +1544,178 @@ void apply(status_t &s, delta_t &d)
         s.mem.ui64(d.mema) = d.memv;
     for (auto i : d.csr)
         s.csr[i.first] = i.second;
+}
+
+/**
+ * @brief handle HTIF requests
+ * @param mem memory working on
+ * @param addr HTIF addressed
+ * @retval tohost exit call value ((code << 1) | 1)
+ */
+uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
+{
+    /* handle HTIF requests */
+    uint64_t tohost_dev = mem[addr.tohost + 7];
+    uint64_t tohost_cmd = mem[addr.tohost + 6];
+    uint64_t tohost_dat = mem.ui64(addr.tohost) & 0xffff'ffff'ffff;
+    if (tohost_dev == 0 && tohost_cmd == 0)
+    {
+        if (tohost_dat & 1) // exit
+            return mem.ui64(addr.tohost);
+        else if (tohost_dat != 0) // proxied ststem call
+        {
+            uint64_t magic_mem = tohost_dat, which = mem.ui64(magic_mem);
+            uint64_t retval = 0;
+            if (which == 0x38) // sysopenat
+            {
+                uint64_t arg0, arg1, arg2, arg3, arg4;
+                arg0 = mem.ui64(magic_mem + 8);  // directory file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // filename
+                arg2 = mem.ui64(magic_mem + 24); // filename size
+                arg3 = mem.ui64(magic_mem + 32); // flags
+                arg4 = mem.ui64(magic_mem + 40); // mode
+                mem[arg1 + arg2] = 0;
+                retval = openat(arg0, (char *)&mem[arg1], arg3, arg4);
+            }
+            else if (which == 0x39) // sysclose
+            {
+                uint64_t arg0;
+                arg0 = mem.ui64(magic_mem + 8); // file descriptor
+                retval = close(arg0);
+            }
+            else if (which == 0x3e) // syslseek
+            {
+                uint64_t arg0, arg1, arg2;
+                arg0 = mem.ui64(magic_mem + 8);  // file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // pointer
+                arg2 = mem.ui64(magic_mem + 24); // directive
+                retval = lseek(arg0, arg1, arg2);
+            }
+            else if (which == 0x3f) // sysread
+            {
+                uint64_t arg0, arg1, arg2;
+                arg0 = mem.ui64(magic_mem + 8);  // file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // memory address
+                arg2 = mem.ui64(magic_mem + 24); // max read size
+                retval = read(arg0, &mem[arg1], arg2);
+            }
+            else if (which == 0x40) // syswrite
+            {
+                uint64_t arg0, arg1, arg2;
+                arg0 = mem.ui64(magic_mem + 8);  // file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // memory address
+                arg2 = mem.ui64(magic_mem + 24); // write size
+                fflush(NULL);
+                if (arg0 = 2)
+                    arg0 = 1; // redirect stderr of program to stdout for debugging
+                retval = write(arg0, &mem[arg1], arg2);
+            }
+            else if (which == 0x43) // syspread
+            {
+                uint64_t arg0, arg1, arg2, arg3;
+                arg0 = mem.ui64(magic_mem + 8);  // file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // memory address
+                arg2 = mem.ui64(magic_mem + 24); // read size
+                arg3 = mem.ui64(magic_mem + 32); // read offset
+                retval = pread(arg0, &mem[arg1], arg2, arg3);
+            }
+            else if (which == 0x50) // sysfstat
+            {
+                uint64_t arg0, arg1;
+                arg0 = mem.ui64(magic_mem + 8);  // file descriptor
+                arg1 = mem.ui64(magic_mem + 16); // memory address
+                retval = fstat(arg0, (struct stat *)&mem[arg1]);
+            }
+            else if (which == 0x5d) // exit
+                return (mem.ui64(magic_mem + 8) << 1) | 1;
+            else if (which == 0x7db) // pk-sysgetmainvars
+            {
+                // buffer format: argc(64) argv[0](64) argv[1](64) ...
+                uint64_t arg0, arg1;
+                arg0 = mem.ui64(magic_mem + 8);  // argument buffer address
+                arg1 = mem.ui64(magic_mem + 16); // argument buffer size
+                mem.ui64(arg0) = pkargs.size();
+                uint64_t addr = arg0 + (pkargs.size() + 1) * 8;
+                for (int i = 0; i < pkargs.size(); i++)
+                {
+                    mem.ui64(arg0 + (i + 1) * 8) = addr;
+                    if (addr - arg0 + strlen(pkargs[i]) + 1 <= arg1)
+                        memcpy(&mem[addr], pkargs[i], strlen(pkargs[i]) + 1);
+                    addr += strlen(pkargs[i]) + 1;
+                }
+                if (addr - arg0 >= arg1)
+                    retval = -1;
+            }
+            else
+                fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx\n", which);
+            mem.ui64(magic_mem) = retval;
+            mem.ui64(addr.fromhost) = 1;
+        }
+    }
+    else if (tohost_dev == 1 && tohost_cmd == 1) // console write
+        putchar(tohost_dat), fflush(stdout);
+    else if (tohost_dev == 1 && tohost_cmd == 0) // console_read
+        ;
+    else
+        fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
+                tohost_dev, tohost_cmd, tohost_dat);
+    mem.ui64(addr.tohost) = 0;
+    fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+    char ch; // receive character from stdin
+    if (mem.ui64(addr.fromhost) == 0 && (ch = getchar()) != EOF)
+        mem.ui64(addr.fromhost) = (1ull << 56) | ch;
+    fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
+    return 0;
+}
+
+/**
+ * @brief print memory to stderr
+ * @param mem pointer to working memory
+ * @param base memory base (only to print)
+ * @param size memory size
+ */
+void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size)
+{
+    fprintf(stderr, "[Debug] Memory@%016lx:", base);
+    for (int i = 0; i < size; i++)
+    {
+        i % 16 ? fprintf(stderr, i % 2 ? "" : " ") : fprintf(stderr, "\n[Debug]     %08x: ", i);
+        fprintf(stderr, "%02x", mem[i]);
+        if ((i + 1) % 16 == 0 || i == size - 1)
+        {
+            if (i == size - 1)
+                for (int j = i + 1; j < i / 16 * 16 + 16; j++)
+                    fprintf(stderr, j % 2 ? "  " : "   ");
+            fprintf(stderr, "  ");
+            for (int j = i / 16 * 16; j <= i; j++)
+                if (mem[j] >= 0x20 && mem[j] <= 0x7e)
+                    fprintf(stderr, "%c", mem[j]);
+                else
+                    fprintf(stderr, " ");
+            if (i == size - 1)
+                fprintf(stderr, "\n");
+        }
+    }
+}
+
+/**
+ * @brief disassemble memory
+ * @param mem pointer to working memory
+ * @param size memory size
+ */
+void disasmem(const uint8_t *mem, uint64_t size)
+{
+    fprintf(stderr, "[Debug] Memory@%016lx:\n", (uint64_t)mem);
+    const uint8_t *p = mem;
+    while (p < mem + size)
+        if (*p & 3 == 3)
+            fprintf(stderr, "[Debug]     %08x: %08x %s\n",
+                    uint32_t(p - mem), *(uint32_t *)p, disas(*(uint32_t *)p).c_str()),
+                p += 4;
+        else
+            fprintf(stderr, "[Debug]     %08x:    %04hx %s\n",
+                    uint32_t(p - mem), *(uint16_t *)p, disas(*(uint16_t *)p).c_str()),
+                p += 2;
 }
 
 const char *gprname[64] = {

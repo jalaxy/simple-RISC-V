@@ -53,14 +53,18 @@ module cache #(parameter rports = 2,
     logic [set-1:0][31:0]         p;    // fifo rear pointer
     logic [31:0] windex;
     always_comb windex = fill ? findex : index[rports];
-    always_ff @(posedge clk) // dirty victim update
+
+    /* dirty victim update */
+    always_ff @(posedge clk)
         if (rst) {victim, vindex, vtag, vdata} <= 0;
         else if (fill & &flag[findex][p[findex]][0]) begin
             victim <= 1'b1; vindex <= findex;
             vtag   <= tags[findex][p[findex]];
             for (int i = 0; i < line; i++) vdata[i] <= data[findex][p[findex]][i];
         end
-    always_ff @(posedge clk) // flag and pointer update
+
+    /* flag and pointer update */
+    always_ff @(posedge clk)
         if (rst) for (int i = 0; i < set; i++)
             for (int j = 0; j < way; j++) {flag[i][j], p[i]} <= 0;
         else if (fill) begin
@@ -68,7 +72,9 @@ module cache #(parameter rports = 2,
             p[windex] <= p[windex] + 1 == way ? 0 : p[windex] + 1;
         end else if (|wena & flag[windex][p[windex]][0])
             flag[windex][p[windex]][1] <= 1;
-    always_ff @(posedge clk) // data reading
+
+    /* data reading */
+    always_ff @(posedge clk)
         if (rst) {miss, rdata} <= 0;
         else for (int i = 0; i <= rports; i++) begin
             miss[i] <= 1; rdata[i] <= 0;
@@ -77,7 +83,10 @@ module cache #(parameter rports = 2,
                 for (int k = 0; k < line; k++) rdata[i][k] <= data[index[i]][j][k];
             end
         end
+
+    /* data filling and writing */
     always_ff @(posedge clk) for (int i = 0; i < line; i++)
-        data[windex][p[windex]][i] = fill ? fdata[i] : data[rports][i];
+        if (fill) data[windex][p[windex]][i] <= fdata[i];
+        else if (wena[i]) data[windex][p[windex]][i] <= wdata[rports][i];
     always_ff @(posedge clk) tags[windex][p[windex]] = fill ? ftag : tag[rports];
 endmodule

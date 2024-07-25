@@ -2,66 +2,19 @@
 #include <cstring>
 #include <vector>
 #include <elf.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #include <sys/signal.h>
 #include "status.h"
 
 typedef struct
 {
-    const char *elf = 0, *dtb = 0, *initrd = 0;
+    const char *file = 0, *dtb = 0, *initrd = 0;
     std::vector<const char *> args;
     uint8_t debug = 0, help = 0, filetype = 0;
     int mintime = 0, maxtime = INT32_MAX;
 } cmd_t;
 
-typedef struct
-{
-    uint64_t fromhost = 0, tohost = 0, lock = 0;
-} htifaddr_t;
-
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted.\n"), interrupt = 1; }
-
-void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size)
-{
-    fprintf(stderr, "[Debug] Memory@%016lx:", base);
-    for (int i = 0; i < size; i++)
-    {
-        i % 16 ? fprintf(stderr, i % 2 ? "" : " ") : fprintf(stderr, "\n[Debug]     %08x: ", i);
-        fprintf(stderr, "%02x", mem[i]);
-        if ((i + 1) % 16 == 0 || i == size - 1)
-        {
-            if (i == size - 1)
-                for (int j = i + 1; j < i / 16 * 16 + 16; j++)
-                    fprintf(stderr, j % 2 ? "  " : "   ");
-            fprintf(stderr, "  ");
-            for (int j = i / 16 * 16; j <= i; j++)
-                if (mem[j] >= 0x20 && mem[j] <= 0x7e)
-                    fprintf(stderr, "%c", mem[j]);
-                else
-                    fprintf(stderr, " ");
-            if (i == size - 1)
-                fprintf(stderr, "\n");
-        }
-    }
-}
-
-void disasmem(const uint8_t *mem, uint64_t size)
-{
-    fprintf(stderr, "[Debug] Memory@%016lx:\n", (uint64_t)mem);
-    const uint8_t *p = mem;
-    while (p < mem + size)
-        if (*p & 3 == 3)
-            fprintf(stderr, "[Debug]     %08x: %08x %s\n",
-                    uint32_t(p - mem), *(uint32_t *)p, disas(*(uint32_t *)p).c_str()),
-                p += 4;
-        else
-            fprintf(stderr, "[Debug]     %08x:    %04hx %s\n",
-                    uint32_t(p - mem), *(uint16_t *)p, disas(*(uint16_t *)p).c_str()),
-                p += 2;
-}
 
 void print(uint64_t cycle, status_t &status, const delta_t &delta)
 {
@@ -101,12 +54,12 @@ int main(int argc, char *argv[])
     /* Read command line */
     cmd_t cmd;
     for (int i = 1; i < argc; i++)
-        if (argv[i][0] == '-' && cmd.elf == NULL)
+        if (argv[i][0] == '-' && cmd.file == NULL)
         {
             int j = 1;
             while (argv[i][j] == '-')
                 j++;
-            if (strcmp(argv[i] + j, "dump") == 0)
+            if (strcmp(argv[i] + j, "hex") == 0)
                 cmd.filetype = 1;
             else if (strcmp(argv[i] + j, "elf") == 0)
                 cmd.filetype = 0;
@@ -131,17 +84,17 @@ int main(int argc, char *argv[])
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
         }
-        else if (cmd.elf == NULL)
-            cmd.args.push_back(cmd.elf = argv[i]);
+        else if (cmd.file == NULL)
+            cmd.args.push_back(cmd.file = argv[i]);
         else
             cmd.args.push_back(argv[i]);
-    if (!cmd.help && cmd.elf == NULL)
+    if (!cmd.help && cmd.file == NULL)
         printf("Not enough arguments.\n"), cmd.help = 1;
     if (cmd.help)
     {
         printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
-        printf("    -dump: (force) input file as hex hump\n");
+        printf("    -hex: (force) input file as hex hump\n");
         printf("    -elf: (default) input file as RISC-V ELF executable\n");
         printf("    -dtb `binary`: specify device tree binary.\n");
         printf("    -initrd `binary`: specify initial rootfs.\n");
@@ -149,14 +102,14 @@ int main(int argc, char *argv[])
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
-            cmd.filetype == 0 ? "dump" : "elf");
+            cmd.filetype == 0 ? "hex" : "elf");
     for (int i = 0; i < cmd.args.size(); i++)
         fprintf(stderr, " %s", cmd.args[i]);
     fprintf(stderr, "\n");
 
     /* Initialize memory and registers */
     memory mem;
-    uint64_t entry, dumpsz;
+    uint64_t entry, hexsz;
     htifaddr_t htifaddr;
     uint64_t dtbaddr = 0x1020; // -0x80000000 - 0x7fffffff
     uint64_t initrdaddr = 0xfe60fe00;
@@ -165,9 +118,9 @@ int main(int argc, char *argv[])
         /* ELF format */
         /* Read and check ELF header */
         Elf64_Ehdr elf_h; // ELF header
-        FILE *fp = fopen(cmd.elf, "r");
+        FILE *fp = fopen(cmd.file, "r");
         if (!fp)
-            return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.elf), 1;
+            return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.file), 1;
         if (fread(&elf_h, sizeof(elf_h), 1, fp) < 0)
             return fprintf(stderr, "[Error] Fread failed.\n"), 1;
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
@@ -271,26 +224,26 @@ int main(int argc, char *argv[])
     }
     else if (cmd.filetype == 1)
     {
-        /* hex dump code */
+        /* hex code */
         entry = 0x80000000;
-        dumpsz = 0;
-        FILE *fp = fopen(cmd.elf, "r");
+        hexsz = 0;
+        FILE *fp = fopen(cmd.file, "r");
         if (!fp)
-            return fprintf(stderr, "Unable to open file '%s'\n", cmd.elf), 1;
+            return fprintf(stderr, "Unable to open file '%s'\n", cmd.file), 1;
         uint32_t inst;
         while (fscanf(fp, "%x", &inst) == 1)
-            dumpsz++;
-        dumpsz *= 4;
+            hexsz++;
+        hexsz *= 4;
         uint8_t *buffer;
-        if (dumpsz > 0x80000000ull || (buffer = new (std::nothrow) uint8_t[dumpsz + 4]) == 0)
+        if (hexsz > 0x80000000ull || (buffer = new (std::nothrow) uint8_t[hexsz + 4]) == 0)
             return fprintf(stderr, "Require too much memory\n"), 1;
         rewind(fp);
-        for (int i = 0; i < dumpsz; i += 4)
+        for (int i = 0; i < hexsz; i += 4)
             if (fscanf(fp, "%x", (uint32_t *)(buffer + i)) != 1)
                 return fprintf(stderr, "Read file failed\n"), 1;
         fclose(fp);
-        ((uint32_t *)buffer)[dumpsz / 4] = 0x6f; // j 0(pc)
-        if (!mem.copy(buffer, dumpsz += 4, entry))
+        ((uint32_t *)buffer)[hexsz / 4] = 0x6f; // j 0(pc)
+        if (!mem.copy(buffer, hexsz += 4, entry))
             return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
         if (!mem.add(0x1000, 0x10010000)) // data segment
             return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
@@ -299,146 +252,41 @@ int main(int argc, char *argv[])
 
     /* Simulate */
     status_t s = {.pc = entry, .mem = mem};
-    uint8_t exitcall = 0, exitcode = 0;
-    uint64_t cycle = 0;
+    uint64_t cycle = 0, htifexit;
     s.mem.add(0xc0000, 0x2000000);                     // CLINT area
     s.mem.ui64(s.csr["mtime"] = 0x200bff8) = 0;        // mtime
     s.mem.ui64(s.csr["mtimecmp"] = 0x2004000) = -1ull; // mtimecmp
     signal(SIGINT, intrhandler);
-    while (!interrupt && !exitcall && cycle <= cmd.maxtime)
+    while (!interrupt && cycle <= cmd.maxtime)
     {
         /* set interrupts */
         if (cycle % 10 == 0) // increase mtime
             s.mem.ui64(s.csr["mtime"])++;
-        s.csr["mip"].write(7, s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]));
+        if (s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]))
+            s.csr["mip"].write(7, 1);
 
         /* get next status */
         delta_t d = next(s);
         if (cycle >= cmd.mintime)
             cmd.debug ? print(cycle, s, d), 0 : 0;
         apply(s, d);
+
+        /* cycle increment */
         if ((cycle + 1) % 1000000 == 0)
             fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
                     (int)cycle, s.pc, s.ir);
+        cycle++;
 
         /* handle HTIF requests */
-        uint64_t tohost_dev = s.mem[htifaddr.tohost + 7];
-        uint64_t tohost_cmd = s.mem[htifaddr.tohost + 6];
-        uint64_t tohost_dat = s.mem.ui64(htifaddr.tohost) & 0xffff'ffff'ffff;
-        if (tohost_dev == 0 && tohost_cmd == 0)
-        {
-            if (tohost_dat & 1) // exit
-                exitcall = 1, exitcode = s.mem.ui64(htifaddr.tohost) >> 1;
-            else if (tohost_dat != 0) // proxied ststem call
-            {
-                uint64_t magic_mem = tohost_dat, which = s.mem.ui64(magic_mem);
-                uint64_t retval = 0;
-                if (which == 0x38) // sysopenat
-                {
-                    uint64_t arg0, arg1, arg2, arg3, arg4;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // directory file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // filename
-                    arg2 = s.mem.ui64(magic_mem + 24); // filename size
-                    arg3 = s.mem.ui64(magic_mem + 32); // flags
-                    arg4 = s.mem.ui64(magic_mem + 40); // mode
-                    s.mem[arg1 + arg2] = 0;
-                    retval = openat(arg0, (char *)&s.mem[arg1], arg3, arg4);
-                }
-                else if (which == 0x39) // sysclose
-                {
-                    uint64_t arg0;
-                    arg0 = s.mem.ui64(magic_mem + 8); // file descriptor
-                    retval = close(arg0);
-                }
-                else if (which == 0x3e) // syslseek
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // pointer
-                    arg2 = s.mem.ui64(magic_mem + 24); // directive
-                    retval = lseek(arg0, arg1, arg2);
-                }
-                else if (which == 0x3f) // sysread
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // memory address
-                    arg2 = s.mem.ui64(magic_mem + 24); // max read size
-                    retval = read(arg0, &s.mem[arg1], arg2);
-                }
-                else if (which == 0x40) // syswrite
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // memory address
-                    arg2 = s.mem.ui64(magic_mem + 24); // write size
-                    fflush(NULL);
-                    if (arg0 = 2)
-                        arg0 = 1; // redirect stderr of program to stdout for debugging
-                    retval = write(arg0, &s.mem[arg1], arg2);
-                }
-                else if (which == 0x43) // syspread
-                {
-                    uint64_t arg0, arg1, arg2, arg3;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // memory address
-                    arg2 = s.mem.ui64(magic_mem + 24); // read size
-                    arg3 = s.mem.ui64(magic_mem + 32); // read offset
-                    retval = pread(arg0, &s.mem[arg1], arg2, arg3);
-                }
-                else if (which == 0x50) // sysfstat
-                {
-                    uint64_t arg0, arg1;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // file descriptor
-                    arg1 = s.mem.ui64(magic_mem + 16); // memory address
-                    retval = fstat(arg0, (struct stat *)&s.mem[arg1]);
-                }
-                else if (which == 0x5d) // exit
-                    exitcall = 1, exitcode = s.mem.ui64(magic_mem + 8);
-                else if (which == 0x7db) // pk-sysgetmainvars
-                {
-                    // buffer format: argc(64) argv[0](64) argv[1](64) ...
-                    uint64_t arg0, arg1;
-                    arg0 = s.mem.ui64(magic_mem + 8);  // argument buffer address
-                    arg1 = s.mem.ui64(magic_mem + 16); // argument buffer size
-                    s.mem.ui64(arg0) = cmd.args.size();
-                    uint64_t addr = arg0 + (cmd.args.size() + 1) * 8;
-                    for (int i = 0; i < cmd.args.size(); i++)
-                    {
-                        s.mem.ui64(arg0 + (i + 1) * 8) = addr;
-                        if (addr - arg0 + strlen(cmd.args[i]) + 1 <= arg1)
-                            memcpy(&s.mem[addr], cmd.args[i], strlen(cmd.args[i]) + 1);
-                        addr += strlen(cmd.args[i]) + 1;
-                    }
-                    if (addr - arg0 >= arg1)
-                        retval = -1;
-                }
-                else
-                    fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx\n", which);
-                s.mem.ui64(magic_mem) = retval;
-                s.mem.ui64(htifaddr.fromhost) = 1;
-            }
-        }
-        else if (tohost_dev == 1 && tohost_cmd == 1) // console write
-            putchar(tohost_dat), fflush(stdout);
-        else if (tohost_dev == 1 && tohost_cmd == 0) // console_read
-            ;
-        else
-            fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
-                    tohost_dev, tohost_cmd, tohost_dat);
-        s.mem.ui64(htifaddr.tohost) = 0;
-        fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
-        char ch; // receive character from stdin
-        if (s.mem.ui64(htifaddr.fromhost) == 0 && (ch = getchar()) != EOF)
-            s.mem.ui64(htifaddr.fromhost) = (1ull << 56) | ch;
-        fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
-
-        /* cycle increment */
-        cycle++;
+        if ((htifexit = htif(s.mem, htifaddr, cmd.args)) & 1)
+            break;
     }
     if (cmd.filetype == 1 && cmd.debug)
-        disasmem(&s.mem[entry], dumpsz), print(s, 0x10010000, 256);
+        disasmem(&s.mem[entry], hexsz), print(s, 0x10010000, 256);
 
-    fprintf(stderr, "[Info] Exited with code %hhu at cycle %lu\n", exitcode, (uint64_t)s.csr["mcycle"]);
-    return exitcode;
+    if (cycle > cmd.maxtime)
+        fprintf(stderr, "[Info] Exceeded maximum cycle %d\n", cmd.maxtime);
+    if (htifexit & 1)
+        fprintf(stderr, "[Info] Exited with code %hhu\n", (int)htifexit >> 1);
+    return htifexit >> 1;
 }

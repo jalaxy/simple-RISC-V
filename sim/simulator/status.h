@@ -6,6 +6,7 @@
 extern const char *gprname[64];
 extern std::map<uint16_t, const char *> csrname;
 
+/* class for bit operation */
 class bits
 {
 private:
@@ -29,6 +30,7 @@ public:
     void write(uint8_t, uint64_t);
 };
 
+/* class for segmented memory */
 class memory
 {
 private:
@@ -81,6 +83,14 @@ typedef struct
     std::map<std::string, bits> csr;
 } delta_t;
 
+typedef struct
+{
+    uint64_t fromhost = 0, tohost = 0, lock = 0;
+} htifaddr_t;
+
 std::string disas(uint32_t ir);
 delta_t next(status_t &status);
 void apply(status_t &status, delta_t &delta);
+uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs);
+void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size);
+void disasmem(const uint8_t *mem, uint64_t size);

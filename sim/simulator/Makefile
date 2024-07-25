@@ -1,3 +1,5 @@
+.PHONY : clean
+
 CXXFLAGS = -O2
 OBJ = status.o main.o
 
