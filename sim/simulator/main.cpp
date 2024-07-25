@@ -14,7 +14,7 @@ typedef struct
 } cmd_t;
 
 int interrupt = 0;
-void intrhandler(int) { fprintf(stderr, "[Info] Interrupted.\n"), interrupt = 1; }
+void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
 
 void print(uint64_t cycle, status_t &status, const delta_t &delta)
 {
@@ -59,7 +59,9 @@ int main(int argc, char *argv[])
             int j = 1;
             while (argv[i][j] == '-')
                 j++;
-            if (strcmp(argv[i] + j, "hex") == 0)
+            if (strcmp(argv[i] + j, "bin") == 0)
+                cmd.filetype = 2;
+            else if (strcmp(argv[i] + j, "hex") == 0)
                 cmd.filetype = 1;
             else if (strcmp(argv[i] + j, "elf") == 0)
                 cmd.filetype = 0;
@@ -89,30 +91,30 @@ int main(int argc, char *argv[])
         else
             cmd.args.push_back(argv[i]);
     if (!cmd.help && cmd.file == NULL)
-        printf("Not enough arguments.\n"), cmd.help = 1;
+        printf("Not enough arguments\n"), cmd.help = 1;
     if (cmd.help)
     {
         printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
         printf("    -hex: (force) input file as hex hump\n");
         printf("    -elf: (default) input file as RISC-V ELF executable\n");
-        printf("    -dtb `binary`: specify device tree binary.\n");
-        printf("    -initrd `binary`: specify initial rootfs.\n");
+        printf("    -dtb `binary`: specify device tree binary\n");
+        printf("    -initrd `binary`: specify initial rootfs\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
-            cmd.filetype == 0 ? "hex" : "elf");
+            cmd.filetype == 0 ? "elf" : (cmd.filetype == 1 ? "hex" : "bin"));
     for (int i = 0; i < cmd.args.size(); i++)
         fprintf(stderr, " %s", cmd.args[i]);
     fprintf(stderr, "\n");
 
     /* Initialize memory and registers */
-    memory mem;
-    uint64_t entry, hexsz;
+    status_t s;
     htifaddr_t htifaddr;
-    uint64_t dtbaddr = 0x1020; // -0x80000000 - 0x7fffffff
+    uint64_t dtbaddr = 0x1020;
     uint64_t initrdaddr = 0xfe60fe00;
+    uint64_t hexsz;
     if (cmd.filetype == 0)
     {
         /* ELF format */
@@ -120,33 +122,33 @@ int main(int argc, char *argv[])
         Elf64_Ehdr elf_h; // ELF header
         FILE *fp = fopen(cmd.file, "r");
         if (!fp)
-            return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.file), 1;
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.file), 1;
         if (fread(&elf_h, sizeof(elf_h), 1, fp) < 0)
-            return fprintf(stderr, "[Error] Fread failed.\n"), 1;
+            return fprintf(stderr, "[Error] Fread failed\n"), 1;
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
             elf_h.e_ident[EI_CLASS] != ELFCLASS64)
-            return fprintf(stderr, "[Error] Not 64-bit ELF format.\n"), 1;
+            return fprintf(stderr, "[Error] Not 64-bit ELF format\n"), 1;
         if (elf_h.e_type != ET_EXEC && elf_h.e_type != ET_DYN)
-            return fprintf(stderr, "[Error] Not an executable file.\n"), 1;
+            return fprintf(stderr, "[Error] Not an executable file\n"), 1;
         if (elf_h.e_machine != EM_RISCV)
-            return fprintf(stderr, "[Error] Not RISC-V architecture.\n"), 1;
+            return fprintf(stderr, "[Error] Not RISC-V architecture\n"), 1;
         /* sections from ELF file */
         Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
         fseek(fp, elf_h.e_shoff, SEEK_SET);
         if (fread(shdr, sizeof(Elf64_Shdr) * elf_h.e_shnum, 1, fp) < 0)
-            return fprintf(stderr, "[Error] Fread failed.\n"), 1;
+            return fprintf(stderr, "[Error] Fread failed\n"), 1;
         for (int i = 0; i < elf_h.e_shnum; i++)
             if (shdr[i].sh_flags & SHF_ALLOC)
                 if (shdr[i].sh_type == SHT_NOBITS)
                 {
-                    if (!mem.add(shdr[i].sh_size, shdr[i].sh_addr))
-                        return fprintf(stderr, "[Error] Adding memory failed.\n"), 1;
+                    if (!s.mem.add(shdr[i].sh_size, shdr[i].sh_addr))
+                        return fprintf(stderr, "[Error] Adding memory failed\n"), 1;
                 }
                 else
                 {
                     fseek(fp, shdr[i].sh_offset, SEEK_SET);
-                    if (!mem.read(fp, shdr[i].sh_size, shdr[i].sh_addr))
-                        return fprintf(stderr, "[Error] Adding memory from file failed.\n"), 1;
+                    if (!s.mem.read(fp, shdr[i].sh_size, shdr[i].sh_addr))
+                        return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
                 }
             else if (shdr[i].sh_type == SHT_SYMTAB)
             {
@@ -154,7 +156,7 @@ int main(int argc, char *argv[])
                 char name[1024];
                 fseek(fp, shdr[elf_h.e_shstrndx].sh_offset + shdr[i].sh_name, SEEK_SET);
                 if (fscanf(fp, "%1023s", name) <= 0)
-                    return fprintf(stderr, "[Error] Fscanf failed.\n"), 1;
+                    return fprintf(stderr, "[Error] Fscanf failed\n"), 1;
                 if (strcmp(name, ".symtab") != 0)
                     continue;
                 /* read symbol table and search for fromhost and tohost */
@@ -164,10 +166,10 @@ int main(int argc, char *argv[])
                     Elf64_Sym sym;
                     fseek(fp, shdr[i].sh_offset + j * shdr[i].sh_entsize, SEEK_SET);
                     if (fread(&sym, sizeof(sym), 1, fp) < 0)
-                        return fprintf(stderr, "[Error] Fread failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Fread failed\n"), 1;
                     fseek(fp, shdr[shdr[i].sh_link].sh_offset + sym.st_name, SEEK_SET);
                     if (fscanf(fp, "%1023s", name) <= 0)
-                        return fprintf(stderr, "[Error] Fscanf failed.\n"), 1;
+                        return fprintf(stderr, "[Error] Fscanf failed\n"), 1;
                     if (strcmp(name, "fromhost") == 0)
                         htifaddr.fromhost = sym.st_value;
                     else if (strcmp(name, "tohost") == 0)
@@ -179,53 +181,18 @@ int main(int argc, char *argv[])
         if (htifaddr.fromhost == 0 || htifaddr.tohost == 0)
         {
             htifaddr = {0x2000, 0x2008, 0x2010}; // default htif addresses
-            mem.add(4096, 0x2000);
-            fprintf(stderr, "[Info] HTIF address not specified, set to default.\n");
+            s.mem.add(4096, 0x2000);
+            fprintf(stderr, "[Info] HTIF address not specified, set to default\n");
         }
         delete[] shdr;
         fclose(fp);
-        if (cmd.dtb)
-        {
-            fp = fopen(cmd.dtb, "r");
-            if (!fp)
-                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.dtb), 1;
-            fseek(fp, 0, SEEK_END);
-            int sz = ftell(fp);
-            rewind(fp);
-            if (!mem.read(fp, sz, dtbaddr))
-                return fprintf(stderr, "[Error] Adding memory from file failed.\n"), 1;
-            fclose(fp);
-        }
-        if (cmd.initrd)
-        {
-            fp = fopen(cmd.initrd, "r");
-            if (!fp)
-                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.initrd), 1;
-            fseek(fp, 0, SEEK_END);
-            int sz = ftell(fp);
-            rewind(fp);
-            if (!mem.read(fp, sz, initrdaddr))
-                return fprintf(stderr, "[Error] Adding memory from file failed.\n"), 1;
-            fclose(fp);
-        }
-        /* start section: jump from reset address to ELF entry */
-        entry = 0;
-        if (!mem.issegfault(mem[entry]))
-            entry += 0x1000; // find an unused page
-        mem.add(0x1000, entry);
-        mem.ui32(entry + 0) = 0x5b7 | dtbaddr & 0xfffff000; // lui a1, `dtbaddr >> 12`
-        mem.ui32(entry + 4) = 0x58593 | dtbaddr << 20;      // addi a1, a1, `dtbaddr & 0xfff`
-        mem.ui32(entry + 8) = 0x93;                         // addi ra, zero, 0
-        for (int i = 0; i < 8; i++)
-        {
-            mem.ui32(entry + 12 + 8 * i) = 0x8093 | (uint8_t(elf_h.e_entry >> 8 * (7 - i)) << 20);
-            mem.ui32(entry + 16 + 8 * i) = (i == 7 ? 0x8067 : 0x809093); // ret : slli ra, ra, 8
-        }
+        s.pc = elf_h.e_entry;
+        s.gpr[11] = dtbaddr; // `a1` as device tree address
     }
     else if (cmd.filetype == 1)
     {
         /* hex code */
-        entry = 0x80000000;
+        s.pc = 0x80000000;
         hexsz = 0;
         FILE *fp = fopen(cmd.file, "r");
         if (!fp)
@@ -243,15 +210,52 @@ int main(int argc, char *argv[])
                 return fprintf(stderr, "Read file failed\n"), 1;
         fclose(fp);
         ((uint32_t *)buffer)[hexsz / 4] = 0x6f; // j 0(pc)
-        if (!mem.copy(buffer, hexsz += 4, entry))
+        if (!s.mem.copy(buffer, hexsz += 4, s.pc))
             return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
-        if (!mem.add(0x1000, 0x10010000)) // data segment
+        if (!s.mem.add(0x1000, 0x10010000)) // data segment
             return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
         delete[] buffer;
     }
+    else if (cmd.filetype == 2)
+    {
+        /* bin code */
+        s.pc = 0x80000000;
+        FILE *fp = fopen(cmd.file, "r");
+        fseek(fp, 0, SEEK_END);
+        size_t binsz = ftell(fp);
+        rewind(fp);
+        if (!s.mem.read(fp, binsz, s.pc))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+        htifaddr = {0x800421b0, 0x800421b8}; // buildroot default
+        s.gpr[11] = dtbaddr;
+    }
+    if (cmd.dtb)
+    {
+        FILE *fp = fopen(cmd.dtb, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.dtb), 1;
+        fseek(fp, 0, SEEK_END);
+        size_t sz = ftell(fp);
+        rewind(fp);
+        if (!s.mem.read(fp, sz, dtbaddr))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+    }
+    if (cmd.initrd)
+    {
+        FILE *fp = fopen(cmd.initrd, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.initrd), 1;
+        fseek(fp, 0, SEEK_END);
+        size_t sz = ftell(fp);
+        rewind(fp);
+        if (!s.mem.read(fp, sz, initrdaddr))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+    }
 
     /* Simulate */
-    status_t s = {.pc = entry, .mem = mem};
     uint64_t cycle = 0, htifexit;
     s.mem.add(0xc0000, 0x2000000);                     // CLINT area
     s.mem.ui64(s.csr["mtime"] = 0x200bff8) = 0;        // mtime
@@ -262,8 +266,7 @@ int main(int argc, char *argv[])
         /* set interrupts */
         if (cycle % 10 == 0) // increase mtime
             s.mem.ui64(s.csr["mtime"])++;
-        if (s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]))
-            s.csr["mip"].write(7, 1);
+        s.csr["mip"].write(7, s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]));
 
         /* get next status */
         delta_t d = next(s);
@@ -272,7 +275,7 @@ int main(int argc, char *argv[])
         apply(s, d);
 
         /* cycle increment */
-        if ((cycle + 1) % 1000000 == 0)
+        if (cycle && cycle % 1000000 == 0)
             fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
                     (int)cycle, s.pc, s.ir);
         cycle++;
@@ -282,7 +285,7 @@ int main(int argc, char *argv[])
             break;
     }
     if (cmd.filetype == 1 && cmd.debug)
-        disasmem(&s.mem[entry], hexsz), print(s, 0x10010000, 256);
+        disasmem(&s.mem[s.pc], hexsz), print(s, 0x10010000, 256);
 
     if (cycle > cmd.maxtime)
         fprintf(stderr, "[Info] Exceeded maximum cycle %d\n", cmd.maxtime);
