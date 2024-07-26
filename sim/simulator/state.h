@@ -71,7 +71,7 @@ typedef struct
         {"pmpcfg1", 0},
         {"pmpcfg2", 0}};
     std::map<uint64_t, uint8_t> rsrv;
-} status_t;
+} state_t;
 
 typedef struct
 {
@@ -88,9 +88,10 @@ typedef struct
     uint64_t fromhost = 0, tohost = 0, lock = 0;
 } htifaddr_t;
 
+uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm = 0, bool adpf = 1);
 std::string disas(uint32_t ir);
-delta_t next(status_t &status);
-void apply(status_t &status, delta_t &delta);
+delta_t next(state_t &s);
+void apply(state_t &s, delta_t &delta);
 uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs);
 void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size);
 void disasmem(const uint8_t *mem, uint64_t size);

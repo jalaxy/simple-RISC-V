@@ -1,3 +1,17 @@
+typedef struct packed {
+    logic [1:0] level;
+    logic [63:0] pc, mstatus, mcycle, minstret, mtime;
+    logic [63:0] mepc, mcause, mtval, sepc, scause, stval;
+} state_t;
+
+typedef struct packed {
+    logic gprw, csrw;
+    logic [7:0] memw;
+    logic [5:0] gpra;
+    logic [11:0] csra;
+    logic [63:0] mema, gprv, csrv, memv;
+} delta_t;
+
 module stats(
     input  logic         clk,
     input  logic         rst,
@@ -20,24 +34,19 @@ module stats(
     output logic [63:0] dcache_wdat,
     output logic        dcache_flsh,
     // stats
-    output logic        cmtena[3:0],
-    output logic [63:0] cmtpc[3:0],
-    output logic [31:0] cmtir[3:0],
-    output logic  [6:0] cmtaddr[3:0],
-    output logic [63:0] cmtdata[3:0],
-    output logic        cmtcsrena,
-    output logic [11:0] cmtcsraddr,
-    output logic [63:0] cmtcsrval,
-    output logic [63:0] arregs[63:0],
-    output logic  [1:0] level,
-    output logic [63:0] cycle,
-    output logic [63:0] instret,
-    output logic [63:0] epc,
+    output logic        cmt[3:0],
+    output logic  [1:0] stt_level[3:0],
+    output logic [63:0] stt_pc[3:0],
+    output logic        del_gprw[3:0],
+    output logic  [5:0] del_gpra[3:0],
+    output logic [63:0] del_gprv[3:0],
+    output logic        del_csrw[3:0],
+    output logic [11:0] del_csra[3:0],
+    output logic [63:0] del_csrv[3:0],
     output logic [63:0] stallpc,
-    output logic [63:0] misp,
-    output logic [63:0] debug[3:0]
+    output logic [63:0] misp
 );
-    // instantiate
+    /* instantiate */
     pipeline pipeline_inst(clk, rst, csr_satp,
         icache_rqst, icache_addr, icache_flsh,
         icache_done, icache_pgft, icache_data,
@@ -45,40 +54,27 @@ module stats(
         dcache_bits, dcache_done, dcache_pgft, dcache_rdat,
         dcache_wdat, dcache_flsh);
 
-    // monitor registers change
-    always_comb for (int i = 0; i < 4; i++)
-        {cmtena[i], cmtpc[i], cmtir[i], cmtaddr[i], cmtdata[i]} = {
-            pipeline_inst.wb_stage_inst.cqpop[i] &
-                ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6],
-            pipeline_inst.wb_stage_inst.cqinfo[i].pc,
-            pipeline_inst.wb_stage_inst.cqinfo[i].ir,
-            pipeline_inst.wb_stage_inst.cqinfo[i].rda,
-            pipeline_inst.wb_stage_inst.cqdata[i][63:0]};
-    always_comb {cmtcsrena, cmtcsraddr, cmtcsrval} = {pipeline_inst.csr_inst.wena,
-        pipeline_inst.csr_inst.addr, pipeline_inst.csr_inst.wres};
+    /* architectural states change */
+    always_comb for (int i = 0; i < 4; i++) begin
+        cmt[i] = pipeline_inst.wb_stage_inst.cqpop[i] &
+                ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6];
+        stt_level[i] = pipeline_inst.csr_inst.level;
+        stt_pc[i] = pipeline_inst.wb_stage_inst.cqinfo[i].pc;
+        del_gprw[i] = |pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
+        del_gpra[i] = pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
+        del_gprv[i] = pipeline_inst.wb_stage_inst.cqdata[i][63:0];
+        del_csrw[i] = pipeline_inst.csr_inst.wena;
+        del_csra[i] = pipeline_inst.csr_inst.addr;
+        del_csrv[i] = pipeline_inst.csr_inst.wres;
+    end
 
-    // extract architectural registers from instance
-    /*verilator tracing_off*/ logic [63:0] dupregs[3:0][63:0]; /*verilator tracing_on*/
-    for (genvar i = 0; i < 4; i++) for (genvar j = 0; j < 64; j++)
-        assign dupregs[i][j] = pipeline_inst.wb_stage_inst.regs_inst.dupregs[i].regs[j];
-    always_comb for (int i = 0; i < 64; i++)
-        arregs[i] = dupregs[pipeline_inst.wb_stage_inst.regs_inst.sel[i]][i];
-
-    // other stats
-    always_comb level = pipeline_inst.csr_inst.level;
-    always_comb cycle = pipeline_inst.csr_inst.mcycle;
-    always_comb instret = pipeline_inst.csr_inst.minstret;
-    always_comb epc = pipeline_inst.csr_inst.mepc;
+    /* other stats */
     always_comb begin stallpc = 0; for (int i = 3; i >= 0; i--)
         if ( pipeline_inst.wb_stage_inst.cqvalid[i] &
             ~pipeline_inst.wb_stage_inst.cqpop[i] & ~pipeline_inst.redir)
             stallpc = pipeline_inst.wb_stage_inst.cqinfo[i].pc; end
     always_ff @(posedge clk) if (rst) misp <= 0;
         else if (pipeline_inst.redir) misp <= misp + 1;
-    always_comb debug[0] = 64'(pipeline_inst.csr_inst.ein);
-    always_comb debug[1] = 64'(pipeline_inst.csr_inst.cause);
-    always_comb debug[2] = 64'(pipeline_inst.csr_inst.epc);
-    always_comb debug[3] = 64'(pipeline_inst.csr_inst.tval);
 endmodule
 
 module mul(input logic clk, input logic rst, input logic flush,

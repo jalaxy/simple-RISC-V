@@ -1,42 +1,19 @@
 #include <cstdio>
-#include <map>
 #include <queue>
-#include <algorithm>
-#include <sstream>
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include <elf.h>
-#include <fcntl.h>
 #include <signal.h>
-#include <sys/stat.h>
+#include "../simulator/state.h"
 #include "Vstats.h"
-#include "simulator.h"
-
-#define BTOD(b0, b1, b2, b3, b4, b5, b6, b7)                                                         \
-    ((((uint64_t)(uint8_t)(b0)) << (uint64_t)0x00) | (((uint64_t)(uint8_t)(b1)) << (uint64_t)0x08) | \
-     (((uint64_t)(uint8_t)(b2)) << (uint64_t)0x10) | (((uint64_t)(uint8_t)(b3)) << (uint64_t)0x18) | \
-     (((uint64_t)(uint8_t)(b4)) << (uint64_t)0x20) | (((uint64_t)(uint8_t)(b5)) << (uint64_t)0x28) | \
-     (((uint64_t)(uint8_t)(b6)) << (uint64_t)0x30) | (((uint64_t)(uint8_t)(b7)) << (uint64_t)0x38))
-#define DTOB(x, i) ((uint8_t)((x) >> (8 * (uint64_t)(i))))
-#define DLE(pb, addr) (BTOD((pb)[(addr) + 0], (pb)[(addr) + 1], (pb)[(addr) + 2], (pb)[(addr) + 3], \
-                            (pb)[(addr) + 4], (pb)[(addr) + 5], (pb)[(addr) + 6], (pb)[(addr) + 7]))
-#define BITS(dw, s, e) ((uint64_t)(dw) << (63 - (e)) >> (63 - (e) + (s)))
-#define BIT(dw, i) BITS(dw, i, i)
-#define NOP ((uint64_t)0x13)
 
 typedef struct
 {
-    const char *filename = 0, *vcd = 0, *dtb = 0, *initrd = 0;
+    const char *file = 0, *dtb = 0, *initrd = 0, *vcd = 0;
     std::vector<const char *> args;
-    uint8_t help = 0, filetype = 1, debug = 0, step = 0, pc = 0, spike = 0;
-    int maxtime = INT32_MAX, mintime = 0;
-    uint64_t entry = -1;
+    uint8_t debug = 0, help = 0, filetype = 0;
+    int mintime = 0, maxtime = INT32_MAX;
 } cmd_t;
-
-typedef struct
-{
-    uint64_t fromhost = 0, tohost = 0, lock = 0;
-} htif_t;
 
 typedef struct
 {
@@ -50,200 +27,25 @@ typedef struct
     uint64_t addr = 0, wdata = 0, vaddr = 0;
 } dcache_req_t;
 
-typedef struct
+int interrupt = 0;
+void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
+
+int main(int argc, char *argv[])
 {
-    int cycle, addr;
-    uint64_t pc, data;
-    uint32_t ir;
-    uint64_t ra, sp;
-} commit_t;
-
-typedef struct
-{
-    uint64_t addr, vaddr, data;
-    uint8_t width;
-} store_t;
-
-typedef struct
-{
-    uint64_t addr, data;
-} csrcmt_t;
-
-typedef struct
-{
-    uint16_t valid, level;
-    uint64_t pc;
-    uint32_t ir;
-    uint16_t rega;
-    uint64_t regd;
-    uint64_t memra, memrd, memwa, memwd;
-    uint16_t memww;
-    uint16_t csra;
-    uint64_t csrd;
-} spike_cmt_t;
-
-extern const uint8_t dtb_spike[1173]; // HTIF device tree
-int intr = 0;
-
-void intrhandler(int) { fprintf(stderr, "[Info] Interrupted.\n"), intr = 1; }
-
-void dumpmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
-{
-    printf("Memory@%016lx:", addr);
-    for (int i = 0; i < size; i++)
-    {
-        i % 16 ? printf(i % 2 ? "" : " ") : printf("\n%016lx: ", addr + i);
-        printf("%02x", mem[addr + i]);
-        if ((i + 1) % 16 == 0 || i == size - 1)
-        {
-            if (i == size - 1)
-                for (int j = i + 1; j < i / 16 * 16 + 16; j++)
-                    printf(j % 2 ? "  " : "   ");
-            printf("  ");
-            for (int j = i / 16 * 16; j <= i; j++)
-                if (mem[addr + j] >= 0x20 && mem[addr + j] <= 0x7e)
-                    printf("%c", mem[addr + j]);
-                else
-                    printf(" ");
-            if (i == size - 1)
-                printf("\n");
-        }
-    }
-}
-
-void disasmem(std::map<uint64_t, uint8_t> &mem, uint64_t addr, uint64_t size)
-{
-    printf("Memory@%016lx:\n", addr);
-    simulator sim(addr, mem);
-    while (sim.get_pc() < addr + size)
-    {
-        sim.step(1);
-        char s[16];
-        uint32_t code = DLE(mem, sim.get_pc());
-        if ((code & 3) != 3)
-            sprintf(s, "    %04x", code & 0xffff);
-        else
-            sprintf(s, "%08x", code);
-        printf("    0x%016lx:  %s  %s\n", sim.get_pc(), s, sim.get_asmcode());
-    }
-}
-
-uint64_t paddr(std::map<uint64_t, uint8_t> &mem, uint64_t satp, uint64_t vaddr, uint8_t wena = 0)
-{
-    uint64_t ppn, vpn[5], offset;
-    int start = -1;
-    ppn = BITS(satp, 0, 43);
-    offset = vaddr & 0xfffllu;
-    if (satp >> 60 == 0) // bare
-        return vaddr;
-    offset = BITS(vaddr, 0, 11);
-    vpn[0] = BITS(vaddr, 12, 20);
-    vpn[1] = BITS(vaddr, 21, 29);
-    vpn[2] = BITS(vaddr, 30, 38);
-    vpn[3] = BITS(vaddr, 39, 47);
-    vpn[4] = BITS(vaddr, 48, 56);
-    if (satp >> 60 == 8) // sv39
-        start = 2;
-    else if (satp >> 60 == 9) // sv48
-        start = 3;
-    else if (satp >> 60 == 10) // sv57
-        start = 4;
-    for (int i = start; i >= 0; i--)
-    {
-        uint64_t pte = DLE(mem, (ppn << 12) + (vpn[i] << 3));
-        ppn = BITS(pte, 10, 53);
-        if (BIT(pte, 0) == 0)
-            return -1;
-        if (BIT(pte, 1) || BIT(pte, 3)) // pte.r = 1 or pte.x = 1 -> leaf node
-        {
-            pte |= 1 << 6;
-            if (wena)
-                pte |= 1 << 7;
-            for (int j = 0; j < i; j++)
-                ppn |= vpn[j] << (j * 9); // super page
-            break;
-        }
-    }
-    return (ppn << 12) | offset;
-}
-
-spike_cmt_t parse_spike_log(FILE *spike)
-{
-    spike_cmt_t cmt = {.valid = 1};
-    char s[1024];
-    if (fgets(s, 1024, spike) == NULL)
-        cmt.valid = 0, fprintf(stderr, "[Info] End of spike log\n"), getchar();
-    std::stringstream ss(s);
-    ss >> s; // core
-    if (strcmp(s, "core"))
-        return cmt = {.valid = 0};
-    ss >> s; // 0:
-    if (strcmp(s, "0:"))
-        return cmt = {.valid = 0};
-    ss >> cmt.level;          // level
-    ss >> std::hex >> cmt.pc; // pc
-    ss >> s[0];               // (
-    ss >> std::hex >> cmt.ir; // ir
-    ss >> s[0];               // )
-    ss >> s;
-    cmt.csra = cmt.memra = -1;
-    cmt.rega = cmt.memww = 0;
-    while (!ss.eof())
-    {
-        if (s[0] == 'x')
-        {
-            cmt.rega = strtoull(s + 1, 0, 10);
-            ss >> std::hex >> cmt.regd >> s;
-        }
-        else if (s[0] == 'f')
-        {
-            cmt.rega = strtoull(s + 1, 0, 10) + 32;
-            ss >> std::hex >> cmt.regd >> s;
-        }
-        else if (s[0] == 'c')
-        {
-            cmt.csra = strtoull(s + 1, 0, 10);
-            ss >> std::hex >> cmt.csrd >> s;
-        }
-        else if (s[0] == 'm')
-        {
-            uint64_t addr;
-            ss >> std::hex >> addr >> s;
-            if (s[0] == '0' && s[1] == 'x')
-            {
-                cmt.memwa = addr;
-                cmt.memwd = strtoull(s, 0, 0);
-                cmt.memww = strlen(s) / 2 - 1;
-                ss >> s;
-            }
-            else
-                cmt.memra = addr;
-        }
-        else if (!ss.eof())
-        {
-            fprintf(stderr, "[Info] spike log file unhandled string %s\n", s);
-            getchar();
-            ss >> s;
-            return cmt = {.valid = 0};
-        }
-    }
-    return cmt;
-}
-
-int main(int argc, char **argv)
-{
-    // Read command line
+    /* Read command line */
     cmd_t cmd;
     for (int i = 1; i < argc; i++)
-        if (argv[i][0] == '-' && cmd.filename == NULL)
+        if (argv[i][0] == '-' && cmd.file == NULL)
         {
             int j = 1;
             while (argv[i][j] == '-')
                 j++;
-            if (strcmp(argv[i] + j, "dump") == 0)
-                cmd.filetype = 0;
-            else if (strcmp(argv[i] + j, "elf") == 0)
+            if (strcmp(argv[i] + j, "bin") == 0)
+                cmd.filetype = 2;
+            else if (strcmp(argv[i] + j, "hex") == 0)
                 cmd.filetype = 1;
+            else if (strcmp(argv[i] + j, "elf") == 0)
+                cmd.filetype = 0;
             else if (strcmp(argv[i] + j, "dtb") == 0)
                 cmd.dtb = argv[++i];
             else if (strcmp(argv[i] + j, "initrd") == 0)
@@ -264,717 +66,312 @@ int main(int argc, char **argv)
             }
             else if (strcmp(argv[i] + j, "d") == 0)
                 cmd.debug = 1;
-            else if (strcmp(argv[i] + j, "s") == 0)
-                cmd.step = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
-            else if (strcmp(argv[i] + j, "pc") == 0)
-                cmd.pc = 1;
-            else if (strcmp(argv[i] + j, "spike") == 0)
-                cmd.spike = 1;
         }
-        else if (cmd.filename == NULL)
-            cmd.filename = argv[i], cmd.args.push_back(argv[i]);
+        else if (cmd.file == NULL)
+            cmd.args.push_back(cmd.file = argv[i]);
         else
             cmd.args.push_back(argv[i]);
-    if (!cmd.help && cmd.filename == NULL)
-        printf("Not enough arguments.\n"), cmd.help = 1;
+    if (!cmd.help && cmd.file == NULL)
+        printf("Not enough arguments\n"), cmd.help = 1;
     if (cmd.help)
     {
         printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
-        printf("    -dump: (force) input file as hex hump\n");
+        printf("    -bin: (force) input file as binary file\n");
+        printf("    -hex: (force) input file as hex text file\n");
         printf("    -elf: (default) input file as RISC-V ELF executable\n");
         printf("    -w `waveform`: output waveform to `waveform`\n");
-        printf("    -dtb `binary`: specify device tree binary.\n");
+        printf("    -dtb `binary`: specify device tree binary\n");
+        printf("    -initrd `binary`: specify initial rootfs\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
         printf("    -d: debug mode\n");
-        printf("    -d -s: debug mode with step\n");
-        printf("    -pc: output PC trace\n");
-        printf("    -spike: compare with spike\n");
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
-            cmd.filetype == 0 ? "dump" : "elf");
+            cmd.filetype == 0 ? "elf" : (cmd.filetype == 1 ? "hex" : "bin"));
     for (int i = 0; i < cmd.args.size(); i++)
         fprintf(stderr, " %s", cmd.args[i]);
     fprintf(stderr, "\n");
     if (cmd.vcd)
         fprintf(stderr, "[Info] Recording waveform in file: %s\n", cmd.vcd);
 
-    // Load and set reset code in memory
-    std::map<uint64_t, uint8_t> memory, reserved;
-    std::vector<uint32_t> ini_code;
-    htif_t htif = {0, 0, 0};
-    uint64_t dtbaddr = 0x1020; // -0x80000000 - 0x7fffffff
+    /* Initialize memory */
+    uint64_t entry = 0x400000;
+    memory mem;
+    std::map<uint64_t, uint8_t> rsrv;
+    htifaddr_t htifaddr;
+    uint64_t dtbaddr = 0x1020;
     uint64_t initrdaddr = 0xfe60fe00;
-    uint64_t pkargaddr = 0x8000d428; // proxy kernel arguments address (args.2997) (may change)
-    FILE *fp = fopen(cmd.filename, "r");
-    if (!fp)
-        return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.filename), 1;
-    if (cmd.filetype == 0) // direct dumped hex code
+    uint64_t hexsz;
+    if (cmd.filetype == 0)
     {
-        int code;
-        while (fscanf(fp, "%x", &code) > 0)
-            ini_code.push_back(code);
-        htif = {0x100000, 0x100008, 0x100010};
-    }
-    else if (cmd.filetype == 1) // code in ELF file
-    {
-        // Read and check ELF header, and print info
+        /* ELF format */
+        /* Read and check ELF header */
         Elf64_Ehdr elf_h; // ELF header
+        FILE *fp = fopen(cmd.file, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.file), 1;
         if (fread(&elf_h, sizeof(elf_h), 1, fp) < 0)
-            exit((perror("fread"), 1));
+            return fprintf(stderr, "[Error] Fread failed\n"), 1;
         if (strncmp((char *)elf_h.e_ident, ELFMAG, strlen(ELFMAG)) ||
             elf_h.e_ident[EI_CLASS] != ELFCLASS64)
-            return fprintf(stderr, "[Error] Not 64-bit ELF format.\n"), 1;
+            return fprintf(stderr, "[Error] Not 64-bit ELF format\n"), 1;
         if (elf_h.e_type != ET_EXEC && elf_h.e_type != ET_DYN)
-            return fprintf(stderr, "[Error] Not an executable file.\n"), 1;
+            return fprintf(stderr, "[Error] Not an executable file\n"), 1;
         if (elf_h.e_machine != EM_RISCV)
-            return fprintf(stderr, "[Error] Not RISC-V architecture.\n"), 1;
-        // sections from ELF file
+            return fprintf(stderr, "[Error] Not RISC-V architecture\n"), 1;
+        /* sections from ELF file */
         Elf64_Shdr *shdr = new (std::nothrow) Elf64_Shdr[elf_h.e_shnum]; // section headers
         fseek(fp, elf_h.e_shoff, SEEK_SET);
         if (fread(shdr, sizeof(Elf64_Shdr) * elf_h.e_shnum, 1, fp) < 0)
-            exit((perror("fread"), 1));
+            return fprintf(stderr, "[Error] Fread failed\n"), 1;
         for (int i = 0; i < elf_h.e_shnum; i++)
-            if (shdr[i].sh_type != SHT_NOBITS && (shdr[i].sh_flags & SHF_ALLOC))
-            {
-                fseek(fp, shdr[i].sh_offset, SEEK_SET);
-                for (int j = 0; j < shdr[i].sh_size; j++)
-                    if (fread(&memory[shdr[i].sh_addr + j], 1, 1, fp) < 0)
-                        exit((perror("fread"), 1));
-            }
+            if (shdr[i].sh_flags & SHF_ALLOC)
+                if (shdr[i].sh_type == SHT_NOBITS)
+                {
+                    if (!mem.add(shdr[i].sh_size, shdr[i].sh_addr))
+                        return fprintf(stderr, "[Error] Adding memory failed\n"), 1;
+                }
+                else
+                {
+                    fseek(fp, shdr[i].sh_offset, SEEK_SET);
+                    if (!mem.read(fp, shdr[i].sh_size, shdr[i].sh_addr))
+                        return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+                }
             else if (shdr[i].sh_type == SHT_SYMTAB)
             {
-                // check section name
+                /* check section name */
                 char name[1024];
                 fseek(fp, shdr[elf_h.e_shstrndx].sh_offset + shdr[i].sh_name, SEEK_SET);
                 if (fscanf(fp, "%1023s", name) <= 0)
-                    exit((perror("fscanf"), 1));
+                    return fprintf(stderr, "[Error] Fscanf failed\n"), 1;
                 if (strcmp(name, ".symtab") != 0)
                     continue;
-                // read symbol table and search for fromhost and tohost
+                /* read symbol table and search for fromhost and tohost */
                 int sym_sz = shdr[i].sh_size / shdr[i].sh_entsize;
                 for (int j = 0; j < sym_sz; j++)
                 {
                     Elf64_Sym sym;
                     fseek(fp, shdr[i].sh_offset + j * shdr[i].sh_entsize, SEEK_SET);
                     if (fread(&sym, sizeof(sym), 1, fp) < 0)
-                        exit((perror("fread"), 1));
+                        return fprintf(stderr, "[Error] Fread failed\n"), 1;
                     fseek(fp, shdr[shdr[i].sh_link].sh_offset + sym.st_name, SEEK_SET);
                     if (fscanf(fp, "%1023s", name) <= 0)
-                        exit((perror("fscanf"), 1));
+                        return fprintf(stderr, "[Error] Fscanf failed\n"), 1;
                     if (strcmp(name, "fromhost") == 0)
-                        htif.fromhost = sym.st_value;
+                        htifaddr.fromhost = sym.st_value;
                     else if (strcmp(name, "tohost") == 0)
-                        htif.tohost = sym.st_value;
+                        htifaddr.tohost = sym.st_value;
                     else if (strcmp(name, "htif_lock") == 0)
-                        htif.lock = sym.st_value;
+                        htifaddr.lock = sym.st_value;
                 }
             }
-        if (htif.fromhost == 0 || htif.tohost == 0)
+        if (htifaddr.fromhost == 0 || htifaddr.tohost == 0)
         {
-            htif = {0x100000, 0x100008, 0x100010}; // default htif addresses
-            fprintf(stderr, "[Info] HTIF address not specified, set to default.\n");
+            htifaddr = {0x2000, 0x2008, 0x2010}; // default htif addresses
+            mem.add(4096, 0x2000);
+            fprintf(stderr, "[Info] HTIF address not specified, set to default\n");
         }
         delete[] shdr;
         fclose(fp);
-        if (cmd.dtb)
-        {
-            fp = fopen(cmd.dtb, "r");
-            if (!fp)
-                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.dtb), 1;
-            fseek(fp, 0, SEEK_END);
-            int sz = ftell(fp);
-            rewind(fp);
-            for (int i = 0; i < sz; i++)
-                if (fread(&memory[dtbaddr + i], 1, 1, fp) < 0)
-                    exit((perror("fread"), 1));
-        }
-        else
-        {
-            fprintf(stderr, "[Info] Using default device tree (spike).\n");
-            for (int i = 0; i < sizeof(dtb_spike) / sizeof(dtb_spike[0]); i++)
-                memory[dtbaddr + i] = dtb_spike[i];
-            if (cmd.spike)
-                cmd.dtb = "spike.dtb";
-        }
-        if (cmd.initrd)
-        {
-            fp = fopen(cmd.initrd, "r");
-            if (!fp)
-                return fprintf(stderr, "[Error] Unable to open file %s.\n", cmd.initrd), 1;
-            fseek(fp, 0, SEEK_END);
-            int sz = ftell(fp);
-            rewind(fp);
-            for (int i = 0; i < sz; i++)
-                if (fread(&memory[initrdaddr + i], 1, 1, fp) < 0)
-                    exit((perror("fread"), 1));
-        }
-        // start section: jump from reset address to ELF entry
-        // a1 -> dtb address
-        ini_code.push_back(0x5b7 | dtbaddr & 0xfffff000); // lui a1, `dtbaddr >> 12`
-        ini_code.push_back(0x58593 | dtbaddr << 20);      // addi a1, a1, `dtbaddr & 0xfff`
-        // ra -> entry point
-        ini_code.push_back(0x93); // addi ra, zero, 0
+        /* start section: jump from reset address to ELF entry */
+        mem.add(0x1000, entry);
+        mem.ui32(entry + 0) = 0x5b7 | dtbaddr & 0xfffff000; // lui a1, `dtbaddr >> 12`
+        mem.ui32(entry + 4) = 0x58593 | dtbaddr << 20;      // addi a1, a1, `dtbaddr & 0xfff`
+        mem.ui32(entry + 8) = 0x93;                         // addi ra, zero, 0
         for (int i = 0; i < 8; i++)
         {
-            ini_code.push_back(0x8093 | (DTOB(elf_h.e_entry, 7 - i) << 20));
-            ini_code.push_back(i == 7 ? 0x8067 : 0x809093); // ret : slli ra, ra, 8
+            mem.ui32(entry + 12 + 8 * i) = 0x8093 | (uint8_t(elf_h.e_entry >> 8 * (7 - i)) << 20);
+            mem.ui32(entry + 16 + 8 * i) = (i == 7 ? 0x8067 : 0x809093); // ret : slli ra, ra, 8
         }
-        cmd.entry = elf_h.e_entry;
     }
-    for (int i = 0; i < 32; i++)
-        ini_code.push_back(NOP);
-    for (int i = 0; i < ini_code.size(); i++)
-        for (int j = 0; j < 4; j++) // reset address is 0x400000
-            memory[0x400000 + i * 4 + j] = DTOB(ini_code[i], j);
-    char spike_cmd[1024];
-    sprintf(spike_cmd, "spike --dtb=%s --log-commits", cmd.dtb);
-    for (auto i : cmd.args)
-        strcat(spike_cmd, " "), strcat(spike_cmd, i);
-    strcat(spike_cmd, " 2>&1 1>/dev/null");
+    else if (cmd.filetype == 1)
+    {
+        /* hex code */
+        hexsz = 0;
+        FILE *fp = fopen(cmd.file, "r");
+        if (!fp)
+            return fprintf(stderr, "Unable to open file '%s'\n", cmd.file), 1;
+        uint32_t inst;
+        while (fscanf(fp, "%x", &inst) == 1)
+            hexsz++;
+        hexsz *= 4;
+        uint8_t *buffer;
+        if (hexsz > 0x80000000ull || (buffer = new (std::nothrow) uint8_t[hexsz + 4]) == 0)
+            return fprintf(stderr, "Require too much memory\n"), 1;
+        rewind(fp);
+        for (int i = 0; i < hexsz; i += 4)
+            if (fscanf(fp, "%x", (uint32_t *)(buffer + i)) != 1)
+                return fprintf(stderr, "Read file failed\n"), 1;
+        fclose(fp);
+        ((uint32_t *)buffer)[hexsz / 4] = 0x6f; // j 0(pc)
+        if (!mem.copy(buffer, hexsz += 4, entry))
+            return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
+        if (!mem.add(0x1000, 0x10010000)) // data segment
+            return fprintf(stderr, "[Error] Memory allocation failed\n"), 1;
+        delete[] buffer;
+    }
+    else if (cmd.filetype == 2)
+    {
+        /* bin code */
+        uint64_t binentry = 0x80000000;
+        FILE *fp = fopen(cmd.file, "r");
+        fseek(fp, 0, SEEK_END);
+        size_t binsz = ftell(fp);
+        rewind(fp);
+        if (!mem.read(fp, binsz, binentry))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+        htifaddr = {0x800421b0, 0x800421b8}; // buildroot default
+        mem.add(0x1000, entry);
+        mem.ui32(entry + 0) = 0x5b7 | dtbaddr & 0xfffff000; // lui a1, `dtbaddr >> 12`
+        mem.ui32(entry + 4) = 0x58593 | dtbaddr << 20;      // addi a1, a1, `dtbaddr & 0xfff`
+        mem.ui32(entry + 8) = 0x93;                         // addi ra, zero, 0
+        for (int i = 0; i < 8; i++)
+        {
+            mem.ui32(entry + 12 + 8 * i) = 0x8093 | (uint8_t(binentry >> 8 * (7 - i)) << 20);
+            mem.ui32(entry + 16 + 8 * i) = (i == 7 ? 0x8067 : 0x809093); // ret : slli ra, ra, 8
+        }
+    }
+    if (cmd.dtb)
+    {
+        FILE *fp = fopen(cmd.dtb, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.dtb), 1;
+        fseek(fp, 0, SEEK_END);
+        size_t sz = ftell(fp);
+        rewind(fp);
+        if (!mem.read(fp, sz, dtbaddr))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+    }
+    if (cmd.initrd)
+    {
+        FILE *fp = fopen(cmd.initrd, "r");
+        if (!fp)
+            return fprintf(stderr, "[Error] Unable to open file %s\n", cmd.initrd), 1;
+        fseek(fp, 0, SEEK_END);
+        size_t sz = ftell(fp);
+        rewind(fp);
+        if (!mem.read(fp, sz, initrdaddr))
+            return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
+        fclose(fp);
+    }
+    mem.ui64(htifaddr.fromhost) = mem.ui64(htifaddr.tohost) = 0;
 
-    // Simulation
-    simulator *sim = cmd.debug || cmd.spike ? new (std::nothrow) simulator(0x400000, memory) : 0;
-    FILE *spike = cmd.spike ? popen(spike_cmd, "r") : 0;
-    spike_cmt_t spike_cmt = spike ? parse_spike_log(spike) : (spike_cmt_t){0};
+    /* Simulate */
     Vstats *dut = new (std::nothrow) Vstats;
-    VerilatedVcdC *trace = NULL;
-    if (cmd.vcd)
+    state_t *sim = cmd.debug ? new (std::nothrow) state_t : NULL;
+    VerilatedVcdC *trace = cmd.vcd ? new (std::nothrow) VerilatedVcdC : NULL;
+    uint64_t wt = 0; // waveform record time
+    if (trace)
     {
         Verilated::traceEverOn(true); // trace waveform
-        dut->trace(trace = new (std::nothrow) VerilatedVcdC, 5);
+        dut->trace(trace, 5);
         trace->open(cmd.vcd);
     }
-    int st = 0; // simulation time
     // reset
-    dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
-    dut->rst = 1, dut->clk = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
+    dut->rst = 0, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
+    dut->rst = 1, dut->clk = 0, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
     for (int i = 0; i < 8; i++)
-        dut->clk = !dut->clk, dut->eval(), trace ? trace->dump(st++), 0 : 0;
-    dut->rst = 0, dut->eval(), trace ? trace->dump(st++), 0 : 0;
-    if (spike)
-        while (spike_cmt.valid && spike_cmt.pc != cmd.entry)
-            spike_cmt = parse_spike_log(spike);
-    for (int i = 0; i < 8; i++)
-        memory[htif.tohost + i] = memory[htif.fromhost + i] = 0;
+        dut->clk = !dut->clk, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
+    dut->rst = 0, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
     // clock and memory loop
-    std::queue<icache_req_t> i_delay;
-    std::queue<dcache_req_t> d_delay;
-    std::queue<commit_t> commits;
-    std::queue<store_t> stores;
-    std::queue<csrcmt_t> csrs;
-    std::map<uint64_t, int> stalls;
-    int i = 0, exitcall = 0, exitcode = 0;
+    std::queue<icache_req_t> ireq;
+    std::queue<dcache_req_t> dreq;
+    std::queue<delta_t> deltas;
+    uint64_t cycle = 0, htifexit = 0;
+    mem.add(0xc0000, 0x2000000); // CLINT area
+    mem.ui64(0x200bff8) = 0;     // mtime
+    mem.ui64(0x2004000) = -1ull; // mtimecmp
     signal(SIGINT, intrhandler);
-    while (i < cmd.maxtime)
+    while (!interrupt && cycle <= cmd.maxtime)
     {
-        if (intr)
-            break;
-        int cmt_check = commits.size() > 1 || exitcall;
-        static commit_t lastcmt = {0, 0, 0, 0};
-        static store_t laststore = {0, 0, 0, 0};
-        if (commits.empty() && exitcall)
-            break;
-        if (commits.size() <= 1 && !exitcall)
+        if (deltas.empty())
         {
             // negedge clock
-            dut->clk = 0, dut->eval(), trace && i >= cmd.mintime ? trace->dump(st++), 0 : 0;
+            dut->clk = 0, dut->eval(), trace && cycle >= cmd.mintime ? trace->dump(wt++), 0 : 0;
             // posedge clock
             if (dut->icache_rqst) // record stats before posedge
-            {
-                // if (i == 0004) // delay for some cycles in some conditions
-                //     for (int i = 0; i < 0004; i++)
-                //         i_delay.push({0, 0});
-                i_delay.push({1, paddr(memory, dut->csr_satp, dut->icache_addr)});
-            }
+                ireq.push({1, paddr(mem, dut->csr_satp, dut->icache_addr)});
             if (dut->dcache_rqst)
-                d_delay.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena, dut->dcache_rsrv,
-                              paddr(memory, dut->csr_satp, dut->dcache_addr, dut->dcache_wena),
-                              dut->dcache_wdat, dut->dcache_addr});
-            while (dut->icache_flsh && !i_delay.empty())
-                i_delay.pop();
-            while (dut->dcache_flsh && !d_delay.empty())
-                d_delay.pop();
-            dut->clk = 1, dut->eval(); // clock changes first
-            i_delay.empty() ? i_delay.push({0}), 0 : 0;
-            d_delay.empty() ? d_delay.push({0}), 0 : 0;
-            dut->icache_done = i_delay.front().rqst; // other signals change after clk
-            if (i_delay.front().rqst && i_delay.front().addr != -1)
+                dreq.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena, dut->dcache_rsrv,
+                           paddr(mem, dut->csr_satp, dut->dcache_addr, dut->dcache_wena),
+                           dut->dcache_wdat, dut->dcache_addr});
+            while (dut->icache_flsh && !ireq.empty())
+                ireq.pop();
+            while (dut->dcache_flsh && !dreq.empty())
+                dreq.pop();
+            ireq.empty() ? ireq.push({0}), 0 : 0;
+            dreq.empty() ? dreq.push({0}), 0 : 0;
+            dut->clk = 1, dut->eval();            // clock changes first
+            dut->icache_done = ireq.front().rqst; // other signals change after clk
+            if (ireq.front().rqst && ireq.front().addr != -1)
                 for (int j = 0; j < 4; j++)
-                    dut->icache_data[j] = DLE(memory, i_delay.front().addr + 4 * j);
-            dut->icache_pgft = i_delay.front().rqst && i_delay.front().addr == -1;
-            dut->dcache_done = d_delay.front().rqst;
-            if (d_delay.front().rqst)
-                if (d_delay.front().addr == -1)
-                    dut->dcache_rdat = d_delay.front().vaddr;
+                    dut->icache_data[j] = mem.ui32(ireq.front().addr + 4 * j);
+            dut->icache_pgft = ireq.front().rqst && ireq.front().addr == -1;
+            dut->dcache_done = dreq.front().rqst;
+            if (dreq.front().rqst)
+                if (dreq.front().addr == -1)
+                    dut->dcache_rdat = dreq.front().vaddr; // fault vaddr in rdat as tval
                 else
-                    dut->dcache_rdat = DLE(memory, d_delay.front().addr);
-            if (d_delay.front().rqst && d_delay.front().addr == -1)
-                dut->dcache_pgft = d_delay.front().wena ? 2 : 1;
-            else
-                dut->dcache_pgft = 0;
-            if (d_delay.front().rqst && !d_delay.front().wena && d_delay.front().rsrv)
-                reserved[d_delay.front().addr] = 1;
+                    dut->dcache_rdat = mem.ui64(dreq.front().addr);
+            dut->dcache_pgft = 0;
+            if (dreq.front().rqst && dreq.front().addr == -1)
+                dut->dcache_pgft = dreq.front().wena ? 2 : 1; // [1:0] -> [WPF,RPF]
             // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
-            uint64_t bitwidth = 8 * (1 << (d_delay.front().bits & 3));
-            uint64_t mask = bitwidth < 64 ? (1llu << bitwidth) - 1 : ~0llu;
+            uint64_t width = 1 << (dreq.front().bits & 3);
+            uint64_t mask = width < 8 ? (1llu << 8 * width) - 1 : ~0llu;
+            if (dreq.front().rqst && !dreq.front().wena && dreq.front().rsrv == 1)
+                for (int i = 0; i < width; i++)
+                    rsrv[dreq.front().addr + i] = 1; // register reservation set (LR)
             if (!dut->dcache_pgft)
             {
                 dut->dcache_rdat &= mask;
-                if (((1 << bitwidth - 1) & dut->dcache_rdat) && !(d_delay.front().bits >> 2))
+                if (((1 << 8 * width - 1) & dut->dcache_rdat) && !(dreq.front().bits >> 2))
                     dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
-                if (d_delay.front().rqst && d_delay.front().wena)
-                {
-                    if (d_delay.front().rsrv != 1 || reserved[d_delay.front().addr])
+                if (dreq.front().rqst && dreq.front().wena)
+                { // store instructions
+                    if (dreq.front().rsrv != 1 || rsrv[dreq.front().addr])
                     {
-                        uint64_t addr = d_delay.front().addr, data = d_delay.front().wdata;
-                        uint8_t width = 1 << (d_delay.front().bits & 3);
+                        uint64_t addr = dreq.front().addr, data = dreq.front().wdata;
                         for (int j = 0; j < width; j++)
-                            memory[addr + j] = DTOB(data, j);
-                        stores.push({addr, d_delay.front().vaddr, data, width});
-                        if (d_delay.front().rsrv == 1)
-                            reserved[addr] = dut->dcache_rdat = 0;
+                            mem[addr + j] = bits(data).range(j * 8, j * 8 + 7);
+                        if (dreq.front().rsrv == 1)
+                            rsrv[addr] = dut->dcache_rdat = 0;
                     }
                     else
                         dut->dcache_rdat = 1;
                 }
             }
-            i_delay.pop(), d_delay.pop();
-            dut->eval(), (trace && i >= cmd.mintime) ? trace->dump(st++), 0 : 0; // evaluate again
-            for (int j = 0; j < sizeof(dut->cmtena) / sizeof(dut->cmtena[0]); j++)
-                if (dut->cmtena[j] && !(cmd.filetype == 0 && !dut->cmtpc[j])) // dump mode mtvec is 0x0
-                    commits.push({i, dut->cmtaddr[j], dut->cmtpc[j], dut->cmtdata[j], dut->cmtir[j],
-                                  dut->arregs[1], dut->arregs[2]});
-            if (dut->cmtcsrena)
-                csrs.push({dut->cmtcsraddr, dut->cmtcsrval});
-            if (dut->stallpc)
-            {
-                if (stalls.find(dut->stallpc) == stalls.end())
-                    stalls[dut->stallpc] = 0;
-                stalls[dut->stallpc]++;
-            }
-            i++;
-            if (i % 1000000 == 0)
-                fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
-                        lastcmt.cycle, lastcmt.pc, lastcmt.ir);
+            ireq.pop(), dreq.pop();
+            // extract delta
+            for (int i = 0; i < 4; i++)
+                if (dut->cmt[i])
+                    deltas.push({.pc = dut->stt_pc[i]});
+            // evaluate again
+            dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
+            cycle++;
         }
-        static int start = 0, pcdiff = 0, pcdiffoutput = 0;
-        if (!commits.empty() && commits.front().pc == cmd.entry)
-            start = 1;
-        if (!commits.empty())
-            lastcmt = commits.front();
-        // spike checker
-        if (spike && cmt_check && start)
-        {
-            commit_t curcommit = commits.front();
-            store_t curstore = {0, 0, 0};
-            csrcmt_t curcsr = {-1llu, 0llu};
-            pcdiff = spike_cmt.valid && spike_cmt.pc != curcommit.pc;
-            if (pcdiff && !pcdiffoutput)
-            {
-                pcdiffoutput = 1;
-                if (curcommit.cycle > cmd.mintime)
-                {
-                    fprintf(stderr, "[Info] PC difference detected\n");
-                    fprintf(stderr, "[Info] -------- Press Enter to continue --------\n");
-                    getchar();
-                }
-            }
-            else if (!pcdiff)
-            {
-                pcdiffoutput = 0;
-                int err = 0;
-                if (spike_cmt.rega != (uint16_t)-1)
-                    err |= curcommit.addr != spike_cmt.rega ||
-                           curcommit.addr && curcommit.data != spike_cmt.regd;
-                if (spike_cmt.memww)
-                {
-                    if (!stores.empty() && stores.front().width < 8)
-                        stores.front().data &= ~((uint64_t)-1 << (8 * stores.front().width));
-                    err |= stores.empty() ||
-                           stores.front().vaddr != spike_cmt.memwa ||
-                           stores.front().data != spike_cmt.memwd ||
-                           stores.front().width != spike_cmt.memww;
-                    if (!stores.empty())
-                    {
-                        curstore = stores.front();
-                        stores.pop();
-                    }
-                }
-                if (spike_cmt.csra != (uint16_t)-1)
-                {
-                    // err |= csrs.front().addr != spike_cmt.csra || csrs.front().data != spike_cmt.csrd;
-                    if (!csrs.empty())
-                    {
-                        curcsr = csrs.front();
-                        csrs.pop();
-                    }
-                }
-                if (!spike_cmt.valid)
-                    err = 0;
-                if ((err || cmd.step) && curcommit.cycle > cmd.mintime)
-                {
-                    static char levelch[4] = {'U', 'S', 'H', 'M'};
-                    fprintf(stderr, "[Info] Cycle %d:\n", curcommit.cycle);
-                    fprintf(stderr, "[Info] DUT:               %c mode\n[Info]     pc: 0x%016lx\n",
-                            levelch[dut->level], curcommit.pc);
-                    if (curcommit.addr)
-                        fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                                curcommit.addr % 32, curcommit.data);
-                    if (curcsr.addr != -1)
-                        fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                                sim->get_csrname(curcsr.addr), curcsr.data);
-                    if (curstore.width)
-                        fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                                curstore.width, curstore.vaddr,
-                                curstore.width * 2, curstore.data);
-                    fprintf(stderr, "[Info] SIM-SPIKE:         %c mode\n[Info]     pc: 0x%016lx\n",
-                            levelch[spike_cmt.level], spike_cmt.pc);
-                    if (spike_cmt.rega)
-                        fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", spike_cmt.rega < 32 ? 'x' : 'f',
-                                spike_cmt.rega % 32, spike_cmt.regd);
-                    if (spike_cmt.csra != uint16_t(-1))
-                        fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                                sim->get_csrname(spike_cmt.csra), spike_cmt.csrd);
-                    if (spike_cmt.memww)
-                        fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                                spike_cmt.memww, spike_cmt.memwa,
-                                spike_cmt.memww * 2, spike_cmt.memwd);
-                    fprintf(stderr, "[Info] -------- Press Enter to continue --------\n");
-                    getchar();
-                }
-            }
-            spike_cmt = parse_spike_log(spike);
-        }
-        // simulator checker
-        if (sim && !spike && cmt_check)
-        {
-            sim->step();
-            commit_t curcommit = commits.front();
-            store_t curstore;
-            csrcmt_t curcsr;
-            if (sim->get_mwwidth() && !stores.empty())
-                curstore = stores.front(), stores.pop();
-            else
-                curstore = {0, 0, 0};
-            if (sim->get_csraddr() != -1 && !csrs.empty())
-                curcsr = csrs.front(), csrs.pop();
-            else
-                curcsr = {(uint64_t)-1, 0};
-            int check = sim->check(curcommit.pc, curcommit.addr, curcommit.data,
-                                   curstore.addr, curstore.data, curstore.width,
-                                   curcsr.addr, curcsr.data);
-            if ((!check || cmd.step) && curcommit.cycle >= cmd.mintime)
-            {
-                fprintf(stderr, check ? "[Info] Cycle %d:\n" : "[Info] Difference found at cycle %d:\n",
-                        curcommit.cycle);
-                fprintf(stderr, "[Info] DUT:\n[Info]     pc: 0x%016lx\n", curcommit.pc);
-                fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                        curcommit.addr % 32, curcommit.data);
-                if (curstore.width < 8)
-                    curstore.data &= ~((uint64_t)-1 << (8 * curstore.width));
-                if (sim->get_csraddr() != -1)
-                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                            sim->get_csrname(curcsr.addr), curcsr.data);
-                if (curstore.width)
-                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                            curstore.width, curstore.addr,
-                            curstore.width * 2, curstore.data);
-                fprintf(stderr, "[Info] SIM:\n[Info]     pc: 0x%016lx    %s\n",
-                        sim->get_pc(), sim->get_asmcode());
-                fprintf(stderr, "[Info]     %c%d: 0x%016lx\n", curcommit.addr < 32 ? 'x' : 'f',
-                        curcommit.addr % 32, sim->get_arreg()[curcommit.addr]);
-                if (sim->get_csraddr() != -1)
-                    fprintf(stderr, "[Info]     %s: 0x%016lx\n",
-                            sim->get_csrname(sim->get_csraddr()), sim->get_csrdata());
-                if (sim->get_mwwidth())
-                    fprintf(stderr, "[Info]     mem%d@0x%lx: 0x%0*lx\n",
-                            sim->get_mwwidth(), sim->get_mwaddr(),
-                            sim->get_mwwidth() * 2, sim->get_mwdata());
-                fprintf(stderr, "[Info] Press Enter to continue...\n[Info] ");
-                getchar();
-            }
-        }
-        else if (!sim && !stores.empty())
-            stores.pop();
-        if (cmd.pc && i > cmd.mintime && dut->debug[0])
-            fprintf(stderr, "[Debug] cycle: %d cause: %ld  epc: 0x%lx  tval: 0x%lx\n",
-                    i, dut->debug[1], dut->debug[2], dut->debug[3]);
-        if (cmd.pc && i > cmd.mintime && ~stores.empty())
-            fprintf(stderr, "[Debug] cycle: %d  vaddr: %lx  paddr: %lx  wval: %lx",
-                    i, stores.front().vaddr, stores.front().addr, stores.front().data);
-        if (cmt_check && cmd.pc && commits.front().cycle > cmd.mintime)
-            fprintf(stderr, "[Info] c: %d  v: 0x%016lx  p: 0x%016lx  i: 0x%08x  ra: 0x%lx  sp: 0x%lx\n",
-                    commits.front().cycle, commits.front().pc,
-                    paddr(memory, dut->csr_satp, commits.front().pc), commits.front().ir,
-                    commits.front().ra, commits.front().sp);
-        if (cmt_check && !(spike && pcdiff))
-            commits.pop();
-        // HTIF requests handler
-        uint64_t tohost_dev = DLE(memory, htif.tohost) >> 56;
-        uint64_t tohost_cmd = DLE(memory, htif.tohost) << 8 >> 56;
-        uint64_t tohost_dat = DLE(memory, htif.tohost) << 16 >> 16;
-        if (tohost_dev == 0 && tohost_cmd == 0)
-        {
-            if (tohost_dat & 1) // exit
-                exitcall = 1, exitcode = DLE(memory, htif.tohost) >> 1;
-            else if (tohost_dat != 0) // proxied ststem call
-            {
-                uint64_t magic_mem = tohost_dat, which = DLE(memory, magic_mem);
-                uint64_t retval = 0;
-                if (which == 0x38) // sysopenat
-                {
-                    uint64_t arg0, arg1, arg2, arg3, arg4;
-                    arg0 = DLE(memory, magic_mem + 8);  // directory file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // filename
-                    arg2 = DLE(memory, magic_mem + 24); // filename size
-                    arg3 = DLE(memory, magic_mem + 32); // flags
-                    arg4 = DLE(memory, magic_mem + 40); // mode
-                    char *filename = new (std::nothrow) char[arg2];
-                    if (!filename)
-                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
-                    for (int i = 0; i < arg2; i++)
-                        filename[i] = memory[arg1 + i];
-                    retval = openat(arg0, filename, arg3, arg4);
-                    delete[] filename;
-                }
-                else if (which == 0x39) // sysclose
-                {
-                    uint64_t arg0;
-                    arg0 = DLE(memory, magic_mem + 8); // file descriptor
-                    retval = close(arg0);
-                }
-                else if (which == 0x3e) // syslseek
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // pointer
-                    arg2 = DLE(memory, magic_mem + 24); // directive
-                    retval = lseek(arg0, arg1, arg2);
-                }
-                else if (which == 0x3f) // sysread
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // memory address
-                    arg2 = DLE(memory, magic_mem + 24); // max read size
-                    uint8_t *buf = new (std::nothrow) uint8_t[arg1];
-                    if (!buf)
-                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
-                    retval = read(arg0, buf, arg2);
-                    for (int i = 0; i < retval; i++)
-                        memory[arg1 + i] = buf[i];
-                }
-                else if (which == 0x40) // syswrite
-                {
-                    uint64_t arg0, arg1, arg2;
-                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // memory address
-                    arg2 = DLE(memory, magic_mem + 24); // write size
-                    uint8_t *buf = new (std::nothrow) uint8_t[arg2];
-                    if (!buf)
-                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
-                    for (int i = 0; i < arg2; i++)
-                        buf[i] = memory[arg1 + i];
-                    fflush(NULL);
-                    if (arg0 = 2)
-                        arg0 = 1; // redirect stderr of program to stdout for debugging
-                    retval = write(arg0, buf, arg2);
-                    delete[] buf;
-                }
-                else if (which == 0x43) // syspread
-                {
-                    uint64_t arg0, arg1, arg2, arg3;
-                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // memory address
-                    arg2 = DLE(memory, magic_mem + 24); // read size
-                    arg3 = DLE(memory, magic_mem + 32); // read offset
-                    uint8_t *buf = new (std::nothrow) uint8_t[arg2];
-                    if (!buf)
-                        return fprintf(stderr, "[Error] Memory allocation failed.\n"), 1;
-                    retval = pread(arg0, buf, arg2, arg3);
-                    for (int i = 0; i < retval; i++)
-                        memory[arg1 + i] = buf[i];
-                    delete[] buf;
-                }
-                else if (which == 0x50) // sysfstat
-                {
-                    uint64_t arg0, arg1;
-                    struct stat s;
-                    arg0 = DLE(memory, magic_mem + 8);  // file descriptor
-                    arg1 = DLE(memory, magic_mem + 16); // memory address
-                    retval = fstat(arg0, &s);
-                    for (int i = 0; i < sizeof(s); i++)
-                        memory[arg1 + i] = *((uint8_t *)&s + i);
-                }
-                else if (which == 0x5d) // exit
-                    exitcall = 1, exitcode = DLE(memory, magic_mem + 8);
-                else if (which == 0x7db) // pk-sysgetmainvars
-                {
-                    // buffer format: argc(64) argv[0](64) argv[1](64) ...
-                    uint64_t arg0, arg1;
-                    arg0 = DLE(memory, magic_mem + 8);  // argument buffer address
-                    arg1 = DLE(memory, magic_mem + 16); // argument buffer size
-                    for (int i = 0; i < 8; i++)
-                        memory[arg0 + i] = DTOB(cmd.args.size(), i);
-                    uint64_t addr = pkargaddr;
-                    for (int i = 0; i < cmd.args.size(); i++)
-                    {
-                        for (int j = 0; j < 8; j++)
-                            memory[arg0 + (i + 1) * 8 + j] = DTOB(addr, j);
-                        for (int j = 0; j < strlen(cmd.args[i]); j++)
-                            memory[addr++] = cmd.args[i][j];
-                        memory[addr++] = '\0';
-                    }
-                    if (addr - pkargaddr >= arg1)
-                        retval = -1;
-                }
-                else
-                    fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx@0x%lx\n", which, dut->epc);
-                for (int i = 0; i < 8; i++)
-                    memory[magic_mem + i] = DTOB(retval, i);
-                for (int i = 0; i < 8; i++)
-                    memory[htif.fromhost + i] = 0;
-                memory[htif.fromhost] = 1;
-            }
-        }
-        else if (tohost_dev == 1 && tohost_cmd == 1) // console write
-            putchar(tohost_dat), fflush(stdout);
-        else if (tohost_dev == 1 && tohost_cmd == 0) // console_read
-            for (int i = 0; i < 8; i++)
-                memory[htif.fromhost + i] = 0;
         else
-            fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
-                    tohost_dev, tohost_cmd, tohost_dat);
-        for (int i = 0; i < 8; i++)
-            memory[htif.tohost + i] = 0;
-        fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
-        char ch; // receive character from stdin
-        if (DLE(memory, htif.fromhost) == 0 && (ch = getchar()) != EOF)
-        {
-            memory[htif.fromhost + 7] = 1;
-            memory[htif.fromhost + 6] = 0;
-            for (int i = 1; i < 6; i++)
-                memory[htif.fromhost] = 0;
-            memory[htif.fromhost] = ch;
+        { // check deltas
+            if (cycle >= cmd.mintime)
+                cmd.debug ? fprintf(stderr, "[Debug] %ld %lx\n", cycle, deltas.front().pc), 0 : 0;
+            deltas.pop();
         }
-        fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
-        sim ? sim->get_mem()[htif.fromhost] = 1 : 0;
+        // HTIF requests handler
+        htif(mem, htifaddr, cmd.args);
     }
-    if (exitcall)
-        fprintf(stderr, "[Info] Exit with code %d.\n", exitcode);
-    else if (sim && !spike)
-    {
-        // final status check
-        for (int i = sim->csr[0xb00].val; i < cmd.maxtime; i++)
-            sim->step();
-        for (int i = 0; i < 64; i++)
-            if (sim->get_arreg()[i] != dut->arregs[i])
-            {
-                fprintf(stderr, "[Info] Difference found at maximum cycle:\n");
-                fprintf(stderr, "[Info]     DUT: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f',
-                        i % 32, dut->arregs[i]);
-                fprintf(stderr, "[Info]     SIM: %c%d: 0x%016lx\n", i < 32 ? 'x' : 'f',
-                        i % 32, sim->get_arreg()[i]);
-                fprintf(stderr, "[Info] Press Enter to continue...\n");
-                getchar();
-            }
-        fprintf(stderr, "[Info] Maximum cycle %d reached.\n", cmd.maxtime);
-    }
-    fprintf(stderr, "[Info] Statistics:\n");
-    fprintf(stderr, "[Info]     CPI: %lu / %lu = %.3lf    MPKI: %lu / %.3lf = %.3lf\n",
-            dut->cycle, dut->instret, (double)dut->cycle / dut->instret,
-            dut->misp, dut->instret / 1000., (double)dut->misp / dut->instret * 1000);
 
-    // Clean
-    if (spike)
-    {
-        char buffer[1024];
-        while (fread(buffer, 1024, 1, spike) > 0)
-            ;
-        pclose(spike);
-    }
+    /* Clean and exit */
     delete (trace ? trace->close(), trace : NULL);
-    delete sim;
     delete dut;
-    return exitcode;
+    delete sim;
+    if (cycle > cmd.maxtime)
+        fprintf(stderr, "[Info] Exceeded maximum cycle %d\n", cmd.maxtime);
+    if (htifexit & 1)
+        fprintf(stderr, "[Info] Exited with code %hhu\n", (int)htifexit >> 1);
+    return htifexit >> 1;
 }
-
-const uint8_t dtb_spike[1173] = {
-    0xd0, 0x0d, 0xfe, 0xed, 0x00, 0x00, 0x04, 0x95, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x03, 0xa4,
-    0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x03, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x1b, 0x75, 0x63, 0x62, 0x62,
-    0x61, 0x72, 0x2c, 0x73, 0x70, 0x69, 0x6b, 0x65, 0x2d, 0x62, 0x61, 0x72, 0x65, 0x2d, 0x64, 0x65,
-    0x76, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x26,
-    0x75, 0x63, 0x62, 0x62, 0x61, 0x72, 0x2c, 0x73, 0x70, 0x69, 0x6b, 0x65, 0x2d, 0x62, 0x61, 0x72,
-    0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x63, 0x68, 0x6f, 0x73, 0x65, 0x6e, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x2c, 0x63, 0x6f, 0x6e, 0x73,
-    0x6f, 0x6c, 0x65, 0x3d, 0x68, 0x76, 0x63, 0x30, 0x20, 0x65, 0x61, 0x72, 0x6c, 0x79, 0x63, 0x6f,
-    0x6e, 0x3d, 0x73, 0x62, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
-    0x63, 0x70, 0x75, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x35, 0x00, 0x98, 0x96, 0x80, 0x00, 0x00, 0x00, 0x01, 0x63, 0x70, 0x75, 0x40,
-    0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x48,
-    0x63, 0x70, 0x75, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x54,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x58,
-    0x6f, 0x6b, 0x61, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x06,
-    0x00, 0x00, 0x00, 0x1b, 0x72, 0x69, 0x73, 0x63, 0x76, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x5f, 0x72, 0x76, 0x36, 0x34, 0x69, 0x6d, 0x61, 0x66,
-    0x64, 0x63, 0x5f, 0x7a, 0x69, 0x63, 0x6e, 0x74, 0x72, 0x5f, 0x7a, 0x69, 0x68, 0x70, 0x6d, 0x00,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x69, 0x72, 0x69, 0x73, 0x63,
-    0x76, 0x2c, 0x73, 0x76, 0x35, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x72, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x83, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x98, 0x3b, 0x9a, 0xca, 0x00, 0x00, 0x00, 0x00, 0x01, 0x69, 0x6e, 0x74, 0x65,
-    0x72, 0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x6c, 0x65, 0x72,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xa8,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb9,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x1b, 0x72, 0x69, 0x73, 0x63,
-    0x76, 0x2c, 0x63, 0x70, 0x75, 0x2d, 0x69, 0x6e, 0x74, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xce, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x6d, 0x65, 0x6d, 0x6f,
-    0x72, 0x79, 0x40, 0x38, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x48, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00,
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x01, 0x73, 0x6f, 0x63, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04,
-    0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x21,
-    0x00, 0x00, 0x00, 0x1b, 0x75, 0x63, 0x62, 0x62, 0x61, 0x72, 0x2c, 0x73, 0x70, 0x69, 0x6b, 0x65,
-    0x2d, 0x62, 0x61, 0x72, 0x65, 0x2d, 0x73, 0x6f, 0x63, 0x00, 0x73, 0x69, 0x6d, 0x70, 0x6c, 0x65,
-    0x2d, 0x62, 0x75, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0xd6, 0x00, 0x00, 0x00, 0x01, 0x63, 0x6c, 0x69, 0x6e, 0x74, 0x40, 0x32, 0x30,
-    0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0d,
-    0x00, 0x00, 0x00, 0x1b, 0x72, 0x69, 0x73, 0x63, 0x76, 0x2c, 0x63, 0x6c, 0x69, 0x6e, 0x74, 0x30,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0xdd,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00,
-    0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x68, 0x74, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x1b, 0x75, 0x63, 0x62, 0x2c,
-    0x68, 0x74, 0x69, 0x66, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x09, 0x23, 0x61, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73, 0x2d, 0x63, 0x65, 0x6c,
-    0x6c, 0x73, 0x00, 0x23, 0x73, 0x69, 0x7a, 0x65, 0x2d, 0x63, 0x65, 0x6c, 0x6c, 0x73, 0x00, 0x63,
-    0x6f, 0x6d, 0x70, 0x61, 0x74, 0x69, 0x62, 0x6c, 0x65, 0x00, 0x6d, 0x6f, 0x64, 0x65, 0x6c, 0x00,
-    0x62, 0x6f, 0x6f, 0x74, 0x61, 0x72, 0x67, 0x73, 0x00, 0x74, 0x69, 0x6d, 0x65, 0x62, 0x61, 0x73,
-    0x65, 0x2d, 0x66, 0x72, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63, 0x79, 0x00, 0x64, 0x65, 0x76, 0x69,
-    0x63, 0x65, 0x5f, 0x74, 0x79, 0x70, 0x65, 0x00, 0x72, 0x65, 0x67, 0x00, 0x73, 0x74, 0x61, 0x74,
-    0x75, 0x73, 0x00, 0x72, 0x69, 0x73, 0x63, 0x76, 0x2c, 0x69, 0x73, 0x61, 0x00, 0x6d, 0x6d, 0x75,
-    0x2d, 0x74, 0x79, 0x70, 0x65, 0x00, 0x72, 0x69, 0x73, 0x63, 0x76, 0x2c, 0x70, 0x6d, 0x70, 0x72,
-    0x65, 0x67, 0x69, 0x6f, 0x6e, 0x73, 0x00, 0x72, 0x69, 0x73, 0x63, 0x76, 0x2c, 0x70, 0x6d, 0x70,
-    0x67, 0x72, 0x61, 0x6e, 0x75, 0x6c, 0x61, 0x72, 0x69, 0x74, 0x79, 0x00, 0x63, 0x6c, 0x6f, 0x63,
-    0x6b, 0x2d, 0x66, 0x72, 0x65, 0x71, 0x75, 0x65, 0x6e, 0x63, 0x79, 0x00, 0x23, 0x69, 0x6e, 0x74,
-    0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x65, 0x6c, 0x6c, 0x73, 0x00, 0x69, 0x6e, 0x74,
-    0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x6c, 0x65,
-    0x72, 0x00, 0x70, 0x68, 0x61, 0x6e, 0x64, 0x6c, 0x65, 0x00, 0x72, 0x61, 0x6e, 0x67, 0x65, 0x73,
-    0x00, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x72, 0x75, 0x70, 0x74, 0x73, 0x2d, 0x65, 0x78, 0x74, 0x65,
-    0x6e, 0x64, 0x65, 0x64, 0x00};

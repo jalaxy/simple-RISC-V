@@ -1,4 +1,4 @@
-#include "status.h"
+#include "state.h"
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -113,7 +113,7 @@ bool memory::issegfault(const uint8_t &x) { return &x == &segfault; }
  * @param adpf  raise page fault when violate access/dirty bits
  * @retval physical adderss
  */
-inline uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm = 0, bool adpf = 1)
+inline uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm, bool adpf)
 {
     uint64_t ppn, vpn[5], offset;
     int start = -1;
@@ -597,38 +597,38 @@ std::string disas(uint32_t ir)
 
 /**
  * @brief generate exception delta
- * @param status current status
+ * @param state current state
  * @param del    current delta
  * @param level  exception level
  * @param cause  exception cause
- * @retval newly generated delta on current status and delta
+ * @retval newly generated delta on current state and delta
  */
-inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cause, uint64_t val = 0)
+inline delta_t &genx(state_t &state, delta_t &del, uint8_t level, uint64_t cause, uint64_t val = 0)
 {
     delta_t &ret = del;
     ret.gprw = ret.memw = 0;
     if (level == 1) // trap into S mode
     {
         ret.level = 1;
-        ret.pc = status.csr["stvec"];
-        ret.csr["sepc"] = status.pc;
+        ret.pc = state.csr["stvec"];
+        ret.csr["sepc"] = state.pc;
         ret.csr["scause"] = cause;
         ret.csr["stval"] = val;
-        ret.csr["mstatus"] = status.csr["mstatus"];
-        ret.csr["mstatus"].write(8, status.level & 1);
-        ret.csr["mstatus"].write(5, status.csr["mstatus"][1]);
+        ret.csr["mstatus"] = state.csr["mstatus"];
+        ret.csr["mstatus"].write(8, state.level & 1);
+        ret.csr["mstatus"].write(5, state.csr["mstatus"][1]);
         ret.csr["mstatus"].write(1, 0);
     }
     else if (level == 3) // trap into M mode
     {
         ret.level = 3;
-        ret.pc = status.csr["mtvec"];
-        ret.csr["mepc"] = status.pc;
+        ret.pc = state.csr["mtvec"];
+        ret.csr["mepc"] = state.pc;
         ret.csr["mcause"] = cause;
         ret.csr["mtval"] = val;
-        ret.csr["mstatus"] = status.csr["mstatus"];
-        ret.csr["mstatus"].write(11, 12, status.level);
-        ret.csr["mstatus"].write(7, status.csr["mstatus"][3]);
+        ret.csr["mstatus"] = state.csr["mstatus"];
+        ret.csr["mstatus"].write(11, 12, state.level);
+        ret.csr["mstatus"].write(7, state.csr["mstatus"][3]);
         ret.csr["mstatus"].write(3, 0);
     }
     if ((ret.pc & 3) == 1 && (int64_t)cause < 0) // vectored for async exception
@@ -637,56 +637,56 @@ inline delta_t &genx(status_t &status, delta_t &del, uint8_t level, uint64_t cau
 }
 
 /**
- * @brief calculate a next status
- * @param status the current status
- * @retval a possible delta for next status
+ * @brief calculate a next state
+ * @param s the current state
+ * @retval a possible delta for next state
  */
-delta_t next(status_t &status)
+delta_t next(state_t &s)
 {
     /* initialize */
     delta_t ret;
-    ret.level = status.level;
+    ret.level = s.level;
     ret.gprw = ret.memw = 0;
-    status.pc &= ~1ull;
+    s.pc &= ~1ull;
 
     /* interrupt */
-    bool mintena = status.level < 3 || status.level == 3 && status.csr["mstatus"][3];
-    bool sintena = status.level < 1 || status.level == 1 && status.csr["mstatus"][1];
-    if (status.csr["mie"] & status.csr["mip"])
+    bool mintena = s.level < 3 || s.level == 3 && s.csr["mstatus"][3];
+    bool sintena = s.level < 1 || s.level == 1 && s.csr["mstatus"][1];
+    if (s.csr["mie"] & s.csr["mip"])
         for (int i = 0; i < 64; i++)
-            if (status.csr["mie"][i] && status.csr["mip"][i])
-                if (status.csr["mideleg"][i] && sintena)
-                    return genx(status, ret, 1, (1ull << 63) | i);
-                else if (!status.csr["mideleg"][i] && mintena)
-                    return genx(status, ret, 3, (1ull << 63) | i);
+            if (s.csr["mie"][i] && s.csr["mip"][i])
+                if (s.csr["mideleg"][i] && sintena)
+                    return genx(s, ret, 1, (1ull << 63) | i);
+                else if (!s.csr["mideleg"][i] && mintena)
+                    return genx(s, ret, 3, (1ull << 63) | i);
 
     /* fetch instruction and decode compressed instruction */
-    bits medeleg = status.level <= 1 ? status.csr["medeleg"] : bits();
-    uint64_t su = status.level == 0 ? 0x100 : (status.level == 1 ? 0x200 : 0);
-    uint64_t satp = status.level == 3 ? 0 : (uint64_t)status.csr["satp"];
-    uint64_t ppc = paddr(status.mem, satp, status.pc, su | 8); // require X permission
-    bits idata = status.mem.ui32(ppc), ir;
+    bits medeleg = s.level <= 1 ? s.csr["medeleg"] : bits();
+    uint64_t su = s.level == 0 ? 0x100 : (s.level == 1 ? 0x200 : 0);
+    uint64_t satp = s.level == 3 ? 0 : (uint64_t)s.csr["satp"];
+    uint64_t ppc = paddr(s.mem, satp, s.pc, su | 8); // require X permission
+    bits idata = s.mem.ui32(ppc), ir;
     if (ppc == -1)
     {
-        status.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
-        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc);
+        s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
+        return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc);
     }
-    if ((status.pc & 0xfff) == 0xffe) // beyond page
-        idata = idata & 0xffff | (status.mem.ui32(ppc = paddr(status.mem, satp, status.pc + 2, su | 8)) << 16);
+    if ((s.pc & 0xfff) == 0xffe) // beyond page
+        idata = idata & 0xffff | (s.mem.ui32(ppc = paddr(s.mem, satp, s.pc + 2, su | 8)) << 16);
     if (ppc == -1)
     {
-        status.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
-        return genx(status, ret, medeleg[12] ? 1 : 3, 12, status.pc + 2);
+        s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
+        return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc + 2);
     }
-    if (status.csr["mstatus"][17] && status.csr["mstatus"].range(11, 12) < 3) // MPRV bit in mstatus
+    if (s.csr["mstatus"][17] && s.csr["mstatus"].range(11, 12) < 3) // MPRV bit in mstatus
     {
-        satp = (uint64_t)status.csr["satp"];
-        su = status.csr["mstatus"].range(11, 12) == 1 ? 0x200 : 0x100;
+        satp = (uint64_t)s.csr["satp"];
+        su = s.csr["mstatus"].range(11, 12) == 1 ? 0x200 : 0x100;
     }
-    if (status.csr["mstatus"][18] && su == 0x200) // SUM bit in mstatus
+    if (s.csr["mstatus"][18] && su == 0x200) // SUM bit in mstatus
         su = 0;
-    status.ir = idata[0] && idata[1] ? idata : idata.range(0, 15);
-    ret.pc = status.pc + (idata.range(0, 1) == 3 ? 4 : 2);
+    s.ir = idata[0] && idata[1] ? idata : idata.range(0, 15);
+    ret.pc = s.pc + (idata.range(0, 1) == 3 ? 4 : 2);
     switch ((idata.range(13, 15) << 2) | idata.range(0, 1))
     {
     case 0b00000:
@@ -989,23 +989,23 @@ delta_t next(status_t &status)
     }
 
     /* execute */
-    uint8_t funct3 = ir.range(12, 14), fs = status.csr["mstatus"].range(13, 14);
-    uint64_t rs1 = status.gpr[ir.range(15, 19)], rs2 = status.gpr[ir.range(20, 24)];
-    double ds1 = (double)status.gpr[ir.range(15, 19) + 32], ds2 = (double)status.gpr[ir.range(20, 24) + 32],
-           ds3 = (double)status.gpr[ir.range(27, 31) + 32];
-    float ss1 = (float)status.gpr[ir.range(15, 19) + 32], ss2 = (float)status.gpr[ir.range(20, 24) + 32],
-          ss3 = (float)status.gpr[ir.range(27, 31) + 32];
+    uint8_t funct3 = ir.range(12, 14), fs = s.csr["mstatus"].range(13, 14);
+    uint64_t rs1 = s.gpr[ir.range(15, 19)], rs2 = s.gpr[ir.range(20, 24)];
+    double ds1 = (double)s.gpr[ir.range(15, 19) + 32], ds2 = (double)s.gpr[ir.range(20, 24) + 32],
+           ds3 = (double)s.gpr[ir.range(27, 31) + 32];
+    float ss1 = (float)s.gpr[ir.range(15, 19) + 32], ss2 = (float)s.gpr[ir.range(20, 24) + 32],
+          ss3 = (float)s.gpr[ir.range(27, 31) + 32];
     int64_t imm;
     uint64_t va, pa;
     switch (ir.range(0, 6)) // opcode
     {
     case 0b0000011: // LOAD
         va = rs1 + ir.range(20, 31).sext(12);
-        if ((pa = paddr(status.mem, satp, va, su | 2)) == -1)      // require R permission
-            return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
+        if ((pa = paddr(s.mem, satp, va, su | 2)) == -1)      // require R permission
+            return genx(s, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
-        ret.gprv = status.mem.ui64(pa);
+        ret.gprv = s.mem.ui64(pa);
         if (funct3 == 0b000) // LB
             ret.gprv = (int64_t)(int8_t)ret.gprv;
         else if (funct3 == 0b100) // LBU
@@ -1021,16 +1021,16 @@ delta_t next(status_t &status)
         break;
     case 0b0000111: // LOAD-FP
         if (!fs)
-            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
         va = rs1 + ir.range(20, 31).sext(12);
-        if ((pa = paddr(status.mem, satp, va, su | 2)) == -1)
-            return genx(status, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
+        if ((pa = paddr(s.mem, satp, va, su | 2)) == -1)
+            return genx(s, ret, medeleg[13] ? 1 : 3, 13, va); // load PF
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         if (funct3 == 0b010) // FLW
-            ret.gprv = status.mem.ui64(pa) | (-1llu << 32);
+            ret.gprv = s.mem.ui64(pa) | (-1llu << 32);
         else if (funct3 == 0b011) // FLD
-            ret.gprv = status.mem.ui64(pa);
+            ret.gprv = s.mem.ui64(pa);
         break;
     case 0b0001111: // MISC-MEM
         break;
@@ -1061,7 +1061,7 @@ delta_t next(status_t &status)
     case 0b0010111: // AUIPC
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
-        ret.gprv = status.pc + bits(ir.range(12, 31) << 12).sext(32);
+        ret.gprv = s.pc + bits(ir.range(12, 31) << 12).sext(32);
         break;
     case 0b0011011: // OP-IMM-32
         imm = ir.range(20, 31).sext(12);
@@ -1079,14 +1079,14 @@ delta_t next(status_t &status)
         break;
     case 0b0100111: // STORE-FP
         if (!fs)
-            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
     case 0b0100011: // STORE
         va = rs1 + bits(ir.range(25, 31) << 5 | ir.range(7, 11)).sext(12);
-        if ((pa = paddr(status.mem, satp, va, su | 4)) == -1)      // require W permission
-            return genx(status, ret, medeleg[15] ? 1 : 3, 15, va); // store PF
+        if ((pa = paddr(s.mem, satp, va, su | 4)) == -1)      // require W permission
+            return genx(s, ret, medeleg[15] ? 1 : 3, 15, va); // store PF
         ret.memw = 1 << ir.range(12, 13);
         ret.mema = pa;
-        ret.memv = status.gpr[ir.range(20, 24) + (ir[2] ? 32 : 0)];
+        ret.memv = s.gpr[ir.range(20, 24) + (ir[2] ? 32 : 0)];
         if (ret.memw < 8)
             ret.memv &= ~(-1ull << 8 * ret.memw);
         break;
@@ -1094,25 +1094,25 @@ delta_t next(status_t &status)
         switch (ir.range(27, 31))
         {
         case 0b00010: // LR
-            if ((pa = paddr(status.mem, satp, rs1, su | 2)) == -1)
-                return genx(status, ret, medeleg[13] ? 1 : 3, 13, rs1); // load PF
+            if ((pa = paddr(s.mem, satp, rs1, su | 2)) == -1)
+                return genx(s, ret, medeleg[13] ? 1 : 3, 13, rs1); // load PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.mem.ui64(pa);
+            ret.gprv = s.mem.ui64(pa);
             ret.memw = 0x80 | (1 << ir.range(12, 13));
             ret.mema = pa;
             if (funct3 == 0b010) // LR.W
                 ret.gprv = (int64_t)(int32_t)ret.gprv;
             break;
         case 0b00011: // SC
-            if ((pa = paddr(status.mem, satp, rs1, su | 4)) == -1)
-                return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // store PF
+            if ((pa = paddr(s.mem, satp, rs1, su | 4)) == -1)
+                return genx(s, ret, medeleg[15] ? 1 : 3, 15, rs1); // store PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            if (status.rsrv[pa + 0] && status.rsrv[pa + 1] &&
-                status.rsrv[pa + 2] && status.rsrv[pa + 3] &&
-                (funct3 == 0b010 || status.rsrv[pa + 4] && status.rsrv[pa + 5] &&
-                                        status.rsrv[pa + 6] && status.rsrv[pa + 7]))
+            if (s.rsrv[pa + 0] && s.rsrv[pa + 1] &&
+                s.rsrv[pa + 2] && s.rsrv[pa + 3] &&
+                (funct3 == 0b010 || s.rsrv[pa + 4] && s.rsrv[pa + 5] &&
+                                        s.rsrv[pa + 6] && s.rsrv[pa + 7]))
             {
                 ret.gprv = 0;
                 ret.memw = 0xc0 | (1 << ir.range(12, 13));
@@ -1125,11 +1125,11 @@ delta_t next(status_t &status)
                 ret.gprv = 1;
             break;
         default:
-            if ((pa = paddr(status.mem, satp, rs1, su | 4)) == -1)
-                return genx(status, ret, medeleg[15] ? 1 : 3, 15, rs1); // AMO PF
+            if ((pa = paddr(s.mem, satp, rs1, su | 4)) == -1)
+                return genx(s, ret, medeleg[15] ? 1 : 3, 15, rs1); // AMO PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.mem.ui64(pa);
+            ret.gprv = s.mem.ui64(pa);
             ret.memw = 1 << ir.range(12, 13);
             ret.mema = pa;
             if (funct3 == 0b010) // AMO*.W
@@ -1261,7 +1261,7 @@ delta_t next(status_t &status)
     case 0b1001011: // NMSUB
     case 0b1001111: // NMADD
         if (!fs)
-            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         if (ir.range(2, 3) == 0)
@@ -1275,7 +1275,7 @@ delta_t next(status_t &status)
         break;
     case 0b1010011: // OP-FP
         if (!fs)
-            return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11) + 32;
         switch (ir.range(27, 31))
@@ -1423,38 +1423,38 @@ delta_t next(status_t &status)
             funct3 == 0b101 && (int64_t)rs1 >= (int64_t)rs2 || // BGE
             funct3 == 0b110 && rs1 < rs2 ||                    // BLTU
             funct3 == 0b111 && rs1 >= rs2)                     // BGEU
-            ret.pc = status.pc + imm;
+            ret.pc = s.pc + imm;
         break;
     case 0b1100111: // JALR
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
-        ret.gprv = status.pc + (idata.range(0, 1) == 3 ? 4 : 2);
+        ret.gprv = s.pc + (idata.range(0, 1) == 3 ? 4 : 2);
         imm = ir.range(20, 31).sext(12);
         ret.pc = rs1 + imm;
         break;
     case 0b1101111: // JAL
         ret.gprw = 1;
         ret.gpra = ir.range(7, 11);
-        ret.gprv = status.pc + (idata.range(0, 1) == 3 ? 4 : 2);
+        ret.gprv = s.pc + (idata.range(0, 1) == 3 ? 4 : 2);
         imm = bits((ir[31] << 20) | (ir.range(12, 19) << 12) | (ir[20] << 11) | (ir.range(21, 30) << 1)).sext(21);
-        ret.pc = status.pc + imm;
+        ret.pc = s.pc + imm;
         break;
     case 0b1110011: // SYSTEM
         if (ir.range(12, 13))
         { // CSRR[WSC]
             uint16_t addr = ir.range(20, 31);
             if (addr >= 0xc00 && addr < 0xc20) // shadowed counters
-                if (status.level == 3 ||
-                    status.csr["mcounteren"][addr & 0x1f] &&
-                        (status.level == 2 || status.csr["scounteren"][addr & 0x1f]))
+                if (s.level == 3 ||
+                    s.csr["mcounteren"][addr & 0x1f] &&
+                        (s.level == 2 || s.csr["scounteren"][addr & 0x1f]))
                     addr -= 0x100;
             if (addr == 0x100 || addr == 0x144 || addr == 0x104) // sstatus/sip/sie
                 addr += 0x200;
             if (csrname.find(addr) == csrname.end())
-                return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+                return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = status.csr[csrname[addr]];
+            ret.gprv = s.csr[csrname[addr]];
             rs1 = ir[14] ? (uint64_t)ir.range(15, 19) : rs1;
             uint64_t wvalue;
             if (ir.range(12, 13) == 1) // CSRRW
@@ -1463,44 +1463,44 @@ delta_t next(status_t &status)
                 wvalue = ret.gprv | rs1;
             else if (ir.range(12, 13) == 3) // CSRRC
                 wvalue = ret.gprv & ~rs1;
-            if (ir.range(20, 31).range(8, 9) > status.level) // check level
-                return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+            if (ir.range(20, 31).range(8, 9) > s.level) // check level
+                return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
             if (ir.range(20, 31) >= 0xc00 && ir.range(20, 31) < 0xc20) // write read-only counters
                 if (wvalue != ret.gprv)
-                    return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+                    return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
             ret.csr[csrname[addr]] = wvalue;
         }
         else if ((ir & ~(1 << 20)) == 0x73) // ECALL / EBREAK
-            return genx(status, ret, medeleg[ir[20] ? 3 : status.level + 8] ? 1 : 3,
-                        ir[20] ? 3 : status.level + 8);
+            return genx(s, ret, medeleg[ir[20] ? 3 : s.level + 8] ? 1 : 3,
+                        ir[20] ? 3 : s.level + 8);
         else if (ir == 0x30200073) // MRET
         {
-            ret.pc = status.csr["mepc"];
-            ret.level = status.csr["mstatus"].range(11, 12);
-            ret.csr["mstatus"] = status.csr["mstatus"];
+            ret.pc = s.csr["mepc"];
+            ret.level = s.csr["mstatus"].range(11, 12);
+            ret.csr["mstatus"] = s.csr["mstatus"];
             ret.csr["mstatus"].write(11, 12, 0);
-            ret.csr["mstatus"].write(3, status.csr["mstatus"][7]);
+            ret.csr["mstatus"].write(3, s.csr["mstatus"][7]);
             ret.csr["mstatus"].write(7, 1);
         }
         else if (ir == 0x10200073) // SRET
         {
-            ret.pc = status.csr["sepc"];
-            ret.level = status.csr["mstatus"][8];
-            ret.csr["mstatus"] = status.csr["mstatus"];
+            ret.pc = s.csr["sepc"];
+            ret.level = s.csr["mstatus"][8];
+            ret.csr["mstatus"] = s.csr["mstatus"];
             ret.csr["mstatus"].write(8, 0);
-            ret.csr["mstatus"].write(1, status.csr["mstatus"][5]);
+            ret.csr["mstatus"].write(1, s.csr["mstatus"][5]);
             ret.csr["mstatus"].write(5, 1);
         }
         break;
     default:
-        return genx(status, ret, medeleg[2] ? 1 : 3, 2, idata);
+        return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
     }
 
-    /* return status delta */
+    /* return state delta */
     if (ret.gpra == 0)
         ret.gprw = 0;
-    ret.csr["mcycle"] = status.csr["mcycle"] + 1;
-    ret.csr["minstret"] = status.csr["minstret"] + 1;
+    ret.csr["mcycle"] = s.csr["mcycle"] + 1;
+    ret.csr["minstret"] = s.csr["minstret"] + 1;
     if (ret.csr.find("misa") != ret.csr.end()) // some WARL csr fields
         ret.csr.at("misa") = 0x14112d | (1ull << 63);
     if (ret.csr.find("mstatus") != ret.csr.end()) // some WARL csr fields
@@ -1509,11 +1509,11 @@ delta_t next(status_t &status)
 }
 
 /**
- * @brief apply delta on status
- * @param s the status
+ * @brief apply delta on state
+ * @param s the state
  * @param d the delta to apply
  */
-void apply(status_t &s, delta_t &d)
+void apply(state_t &s, delta_t &d)
 {
     s.pc = d.pc;
     s.level = d.level;

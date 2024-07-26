@@ -5,8 +5,8 @@
 # Verilator variables
 MAKE = make -j8
 VERILATOR_V = ../../src/pipeline.sv stats.sv
-VERILATOR_H =
-VERILATOR_CPP = main.cpp
+VERILATOR_H = ../simulator/state.h
+VERILATOR_CPP = main.cpp ../simulator/state.cpp
 VERILATOR_SRC = $(VERILATOR_V) $(VERILATOR_CPP)
 VERILATOR_TOP = stats
 VERILATOR_FLAGS = -cc -exe -assert -top-module $(VERILATOR_TOP) \

@@ -3,7 +3,7 @@
 #include <vector>
 #include <elf.h>
 #include <sys/signal.h>
-#include "status.h"
+#include "state.h"
 
 typedef struct
 {
@@ -16,11 +16,11 @@ typedef struct
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
 
-void print(uint64_t cycle, status_t &status, const delta_t &delta)
+void print(uint64_t cycle, state_t &state, const delta_t &delta)
 {
     char s[256], lch[4] = {'U', 'S', 'H', 'M'};
     sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", cycle,
-            lch[status.level & 3], status.pc, status.ir, disas(status.ir).c_str());
+            lch[state.level & 3], state.pc, state.ir, disas(state.ir).c_str());
     if (strlen(s) < 63)
     {
         for (int i = strlen(s); i < 63; i++)
@@ -35,7 +35,7 @@ void print(uint64_t cycle, status_t &status, const delta_t &delta)
     fprintf(stderr, "\n");
 }
 
-void print(status_t &s, uint64_t addr = 0, uint64_t size = 0)
+void print(state_t &s, uint64_t addr = 0, uint64_t size = 0)
 {
     fprintf(stderr, "[Debug] General-purpose registers:\n");
     for (int i = 0; i < 16; i++)
@@ -96,11 +96,13 @@ int main(int argc, char *argv[])
     {
         printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
-        printf("    -hex: (force) input file as hex hump\n");
+        printf("    -bin: (force) input file as binary file\n");
+        printf("    -hex: (force) input file as hex text file\n");
         printf("    -elf: (default) input file as RISC-V ELF executable\n");
         printf("    -dtb `binary`: specify device tree binary\n");
         printf("    -initrd `binary`: specify initial rootfs\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
+        printf("    -d: debug mode\n");
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
@@ -110,7 +112,7 @@ int main(int argc, char *argv[])
     fprintf(stderr, "\n");
 
     /* Initialize memory and registers */
-    status_t s;
+    state_t s;
     htifaddr_t htifaddr;
     uint64_t dtbaddr = 0x1020;
     uint64_t initrdaddr = 0xfe60fe00;
@@ -254,12 +256,13 @@ int main(int argc, char *argv[])
             return fprintf(stderr, "[Error] Adding memory from file failed\n"), 1;
         fclose(fp);
     }
-
-    /* Simulate */
-    uint64_t cycle = 0, htifexit;
+    s.mem.ui64(htifaddr.fromhost) = s.mem.ui64(htifaddr.tohost) = 0;
     s.mem.add(0xc0000, 0x2000000);                     // CLINT area
     s.mem.ui64(s.csr["mtime"] = 0x200bff8) = 0;        // mtime
     s.mem.ui64(s.csr["mtimecmp"] = 0x2004000) = -1ull; // mtimecmp
+
+    /* Simulate */
+    uint64_t cycle = 0, htifexit;
     signal(SIGINT, intrhandler);
     while (!interrupt && cycle <= cmd.maxtime)
     {
@@ -268,7 +271,7 @@ int main(int argc, char *argv[])
             s.mem.ui64(s.csr["mtime"])++;
         s.csr["mip"].write(7, s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]));
 
-        /* get next status */
+        /* get next state */
         delta_t d = next(s);
         if (cycle >= cmd.mintime)
             cmd.debug ? print(cycle, s, d), 0 : 0;
@@ -285,8 +288,9 @@ int main(int argc, char *argv[])
             break;
     }
     if (cmd.filetype == 1 && cmd.debug)
-        disasmem(&s.mem[s.pc], hexsz), print(s, 0x10010000, 256);
+        disasmem(&s.mem[0x80000000], hexsz), print(s, 0x10010000, 256);
 
+    /* Exit */
     if (cycle > cmd.maxtime)
         fprintf(stderr, "[Info] Exceeded maximum cycle %d\n", cmd.maxtime);
     if (htifexit & 1)
