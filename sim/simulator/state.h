@@ -75,8 +75,8 @@ typedef struct
 
 typedef struct
 {
-    uint8_t level;
-    uint64_t pc;
+    uint8_t level;      // NEXT level
+    uint64_t pc;        // NEXT pc
     uint8_t gprw, memw; // gprw: [01]  memw: [01248] (rsrv: r+0x80/w+0xc0)
     uint64_t gpra, mema;
     uint64_t gprv, memv;
@@ -93,5 +93,7 @@ std::string disas(uint32_t ir);
 delta_t next(state_t &s);
 void apply(state_t &s, delta_t &delta);
 uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs);
+void print(uint64_t cycle, state_t &state, const delta_t &delta);
+void print(state_t &s, uint64_t addr = 0, uint64_t size = 0);
 void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size);
 void disasmem(const uint8_t *mem, uint64_t size);

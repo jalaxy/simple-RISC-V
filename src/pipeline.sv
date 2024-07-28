@@ -128,7 +128,7 @@ typedef struct packed {
     logic [64:0] rd;
     logic [63:0] npc, pc;
     logic [31:0] ir;
-    logic mem, patupd, b, c, fencei;
+    logic memw, csrw, patupd, b, c, fencei;
     logic [6:0] rda;
     logic [17:0] pat;
     logic [2:0] ret;
@@ -142,7 +142,7 @@ typedef struct packed {
 typedef struct packed {
     logic [63:0] pc;
     logic [31:0] ir;
-    logic mem, patupd, b, c, fencei;
+    logic memw, csrw, patupd, b, c, fencei;
     logic [6:0] rda;
     logic [17:0] pat;
     logic [2:0] ret;
@@ -945,7 +945,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             out_wb_g[g].valid = in_id[g].valid;
             out_wb_g[g].rda = in.rda;
             out_wb_g[g].rd = res;
-            out_wb_g[g].mem = op[`EX_LOAD] | op[`EX_STORE] | op[`EX_CSR];
+            out_wb_g[g].memw = op[`EX_LOAD] & in.rsrv == 2'b01 | op[`EX_STORE];
+            out_wb_g[g].csrw = op[`EX_CSR];
             out_wb_g[g].patupd = (|in.bmask | in.j) &
                 (in.pat[1:0] == 2'b01 | in.pat[1:0] == 2'b10);
             out_wb_g[g].b = |in.bmask;
@@ -1058,7 +1059,8 @@ module wb_stage(input logic clk, input logic rst,
     always_comb for (int i = 0; i < 5; i++) front[i] = cqfront + i[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) rear[i] = front[i] + num[`lgCQSZ-1:0];
     always_comb for (int i = 0; i < 4; i++) cqvalid[i] = i[`lgCQSZ:0] < num;
-    always_comb intr_taken = |num & intr[6] & ~cqinfo[0].mem & cqinfo[0].pc == lastnpc;
+    always_comb intr_taken = |num & intr[6] & cqinfo[0].pc == lastnpc &
+        ~cqinfo[0].memw & ~cqinfo[0].csrw;
     always_comb cqexcep[0] = |num & cqcause[0][6] & cqinfo[0].pc == lastnpc;
     always_comb cqredir[0] = |num &
         cqinfo[0].pc != lastnpc | lastinfo.fencei | cqexcep[0] | intr_taken;

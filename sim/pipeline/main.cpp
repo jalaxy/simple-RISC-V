@@ -27,6 +27,19 @@ typedef struct
     uint64_t addr = 0, wdata = 0, vaddr = 0;
 } dcache_req_t;
 
+typedef struct
+{
+    uint8_t level;
+    uint64_t pc;
+    uint32_t ir;
+    uint8_t gpr, csr, mem;
+} cmt_t;
+
+typedef struct
+{
+    uint64_t w, a, v;
+} del_t;
+
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
 
@@ -281,7 +294,8 @@ int main(int argc, char *argv[])
     // clock and memory loop
     std::queue<icache_req_t> ireq;
     std::queue<dcache_req_t> dreq;
-    std::queue<delta_t> deltas;
+    std::queue<cmt_t> cmts;
+    std::queue<del_t> gprs, csrs, mems;
     uint64_t cycle = 0, htifexit = 0;
     mem.add(0xc0000, 0x2000000); // CLINT area
     mem.ui64(0x200bff8) = 0;     // mtime
@@ -289,7 +303,7 @@ int main(int argc, char *argv[])
     signal(SIGINT, intrhandler);
     while (!interrupt && cycle <= cmd.maxtime)
     {
-        if (deltas.empty())
+        if (cmts.size() < 2)
         {
             // negedge clock
             dut->clk = 0, dut->eval(), trace && cycle >= cmd.mintime ? trace->dump(wt++), 0 : 0;
@@ -346,24 +360,67 @@ int main(int argc, char *argv[])
                         dut->dcache_rdat = 1;
                 }
             }
+            dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
             ireq.pop(), dreq.pop();
             // extract delta
             for (int i = 0; i < 4; i++)
                 if (dut->cmt[i])
-                    deltas.push({.pc = dut->stt_pc[i]});
+                    cmts.push({.level = dut->cmt_level[i],
+                               .pc = dut->cmt_pc[i],
+                               .ir = dut->cmt_ir[i],
+                               .gpr = dut->cmt_gpr[i],
+                               .csr = dut->cmt_csr[i],
+                               .mem = dut->cmt_mem[i]});
+            for (int i = 0; i < 4; i++)
+                if (dut->del_gprw[i])
+                    gprs.push({.w = 1, .a = dut->del_gpra[i], .v = dut->del_gprv[i]});
+            if (dut->del_csrw)
+                csrs.push({.w = 1, .a = dut->del_csra, .v = dut->del_csrv});
+            if (dut->del_memw)
+                mems.push({.w = dut->del_memw, .a = dut->del_mema, .v = dut->del_memv});
             // evaluate again
-            dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
             cycle++;
         }
         else
         { // check deltas
+            state_t stt;
+            delta_t del;
+            stt.level = cmts.front().level;
+            stt.pc = cmts.front().pc;
+            stt.ir = cmts.front().ir;
+            if (cmts.front().gpr)
+            {
+                del.gprw = 1;
+                del.gpra = gprs.front().a;
+                del.gprv = gprs.front().v;
+                gprs.pop();
+            }
+            else
+                del.gprw = 0;
+            if (cmts.front().mem)
+            {
+                del.memw = mems.front().w;
+                del.mema = mems.front().a;
+                del.memv = mems.front().v;
+                mems.pop();
+            }
+            else
+                del.memw = 0;
+            if (cmts.front().csr)
+            {
+                // del.csr[csrname[csrs.front().a]] = csrs.front().v;
+                csrs.pop();
+            }
             if (cycle >= cmd.mintime)
-                cmd.debug ? fprintf(stderr, "[Debug] %ld %lx\n", cycle, deltas.front().pc), 0 : 0;
-            deltas.pop();
+                cmd.debug ? print(cycle, stt, del), 0 : 0;
+            cmts.pop();
         }
         // HTIF requests handler
-        htif(mem, htifaddr, cmd.args);
+        if (htifexit = htif(mem, htifaddr, cmd.args) & 1)
+            break;
     }
+    if (cmd.filetype == 1 && cmd.debug)
+        disasmem(&mem[0x400000], hexsz);
 
     /* Clean and exit */
     delete (trace ? trace->close(), trace : NULL);

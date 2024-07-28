@@ -16,39 +16,6 @@ typedef struct
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
 
-void print(uint64_t cycle, state_t &state, const delta_t &delta)
-{
-    char s[256], lch[4] = {'U', 'S', 'H', 'M'};
-    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", cycle,
-            lch[state.level & 3], state.pc, state.ir, disas(state.ir).c_str());
-    if (strlen(s) < 63)
-    {
-        for (int i = strlen(s); i < 63; i++)
-            s[i] = ' ';
-        s[63] = 0;
-    }
-    fputs(s, stderr);
-    if (delta.gprw)
-        fprintf(stderr, " %s: %lx", gprname[delta.gpra], delta.gprv);
-    if (delta.memw && delta.memw >> 4 != 0x8)
-        fprintf(stderr, " d%d@%lx: %lx", delta.memw & 0xf, delta.mema, delta.memv);
-    fprintf(stderr, "\n");
-}
-
-void print(state_t &s, uint64_t addr = 0, uint64_t size = 0)
-{
-    fprintf(stderr, "[Debug] General-purpose registers:\n");
-    for (int i = 0; i < 16; i++)
-    {
-        fprintf(stderr, "[Debug]");
-        for (int j = 0; j < 4; j++)
-            fprintf(stderr, " %8s: %016lx", gprname[i * 4 + j], (uint64_t)s.gpr[i * 4 + j]);
-        fprintf(stderr, "\n");
-    }
-    if (size)
-        dumpmem(&s.mem[addr], addr, size);
-}
-
 int main(int argc, char *argv[])
 {
     /* Read command line */

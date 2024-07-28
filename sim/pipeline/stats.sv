@@ -1,17 +1,3 @@
-typedef struct packed {
-    logic [1:0] level;
-    logic [63:0] pc, mstatus, mcycle, minstret, mtime;
-    logic [63:0] mepc, mcause, mtval, sepc, scause, stval;
-} state_t;
-
-typedef struct packed {
-    logic gprw, csrw;
-    logic [7:0] memw;
-    logic [5:0] gpra;
-    logic [11:0] csra;
-    logic [63:0] mema, gprv, csrv, memv;
-} delta_t;
-
 module stats(
     input  logic         clk,
     input  logic         rst,
@@ -34,15 +20,22 @@ module stats(
     output logic [63:0] dcache_wdat,
     output logic        dcache_flsh,
     // stats
-    output logic        cmt[3:0],
-    output logic  [1:0] stt_level[3:0],
-    output logic [63:0] stt_pc[3:0],
-    output logic        del_gprw[3:0],
-    output logic  [5:0] del_gpra[3:0],
-    output logic [63:0] del_gprv[3:0],
-    output logic        del_csrw[3:0],
-    output logic [11:0] del_csra[3:0],
-    output logic [63:0] del_csrv[3:0],
+    output logic        cmt       [3:0],
+    output logic  [1:0] cmt_level [3:0],
+    output logic [63:0] cmt_pc    [3:0],
+    output logic [31:0] cmt_ir    [3:0],
+    output logic        cmt_gpr   [3:0],
+    output logic        cmt_csr   [3:0],
+    output logic        cmt_mem   [3:0],
+    output logic        del_gprw  [3:0],
+    output logic  [5:0] del_gpra  [3:0],
+    output logic [63:0] del_gprv  [3:0],
+    output logic        del_csrw,
+    output logic [11:0] del_csra,
+    output logic [63:0] del_csrv,
+    output logic  [7:0] del_memw,
+    output logic [63:0] del_mema,
+    output logic [63:0] del_memv,
     output logic [63:0] stallpc,
     output logic [63:0] misp
 );
@@ -55,17 +48,30 @@ module stats(
         dcache_wdat, dcache_flsh);
 
     /* architectural states change */
-    always_comb for (int i = 0; i < 4; i++) begin
-        cmt[i] = pipeline_inst.wb_stage_inst.cqpop[i] &
-                ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6];
-        stt_level[i] = pipeline_inst.csr_inst.level;
-        stt_pc[i] = pipeline_inst.wb_stage_inst.cqinfo[i].pc;
-        del_gprw[i] = |pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
-        del_gpra[i] = pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
-        del_gprv[i] = pipeline_inst.wb_stage_inst.cqdata[i][63:0];
-        del_csrw[i] = pipeline_inst.csr_inst.wena;
-        del_csra[i] = pipeline_inst.csr_inst.addr;
-        del_csrv[i] = pipeline_inst.csr_inst.wres;
+    always_comb begin
+        for (int i = 0; i < 4; i++) begin
+            cmt[i] = pipeline_inst.wb_stage_inst.cqpop[i] &
+                    ~pipeline_inst.wb_stage_inst.cqinfo[i].rda[6];
+            cmt_level[i] = pipeline_inst.csr_inst.level;
+            cmt_pc[i] = pipeline_inst.wb_stage_inst.cqinfo[i].pc;
+            cmt_ir[i] = pipeline_inst.wb_stage_inst.cqinfo[i].ir;
+            cmt_gpr[i] = |pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
+            cmt_csr[i] = pipeline_inst.wb_stage_inst.cqinfo[i].csrw;
+            cmt_mem[i] = pipeline_inst.wb_stage_inst.cqinfo[i].memw;
+            del_gprw[i] = cmt[i] & cmt_gpr[i];
+            del_gpra[i] = pipeline_inst.wb_stage_inst.cqinfo[i].rda[5:0];
+            del_gprv[i] = pipeline_inst.wb_stage_inst.cqdata[i][63:0];
+        end
+        del_csrw = pipeline_inst.csr_inst.wena;
+        del_csra = pipeline_inst.csr_inst.addr;
+        del_csrv = pipeline_inst.csr_inst.wres;
+        del_memw = 0;
+        del_mema = dcache_addr;
+        del_memv = dcache_wdat;
+        if (|dcache_rqst & dcache_wena)
+            del_memw = 8'(1 << dcache_bits[1:0]);
+        if (|dcache_rqst & dcache_rsrv == 2'b1)
+            del_memw = {1'b1, dcache_wena, 2'd0, 4'(1 << dcache_bits[1:0])};
     end
 
     /* other stats */
