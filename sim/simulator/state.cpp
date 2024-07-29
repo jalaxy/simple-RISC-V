@@ -1384,7 +1384,7 @@ delta_t next(state_t &s)
         case 0b11100:
             ret.gpra = ir.range(7, 11);
             if (funct3 == 0) // FMV.X.F
-                ret.gprv = ir[25] ? *(uint64_t *)&ds1 : *(uint32_t *)&ds1;
+                ret.gprv = ir[25] ? *(uint64_t *)&ds1 : *(uint32_t *)&ss1 | 0xffff'ffff'0000'0000;
             else if (funct3 == 1) // FCLASS
             {
                 using namespace std;
@@ -1513,7 +1513,7 @@ delta_t next(state_t &s)
  * @param s the state
  * @param d the delta to apply
  */
-void apply(state_t &s, delta_t &d)
+void apply(state_t &s, delta_t d)
 {
     s.pc = d.pc;
     s.level = d.level;

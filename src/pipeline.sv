@@ -180,6 +180,8 @@ typedef struct packed {
 module pipeline(
     input logic clk,
     input logic rst,
+    input logic [7:0] eiptip,
+    input logic [63:0] mtime,
 
     output logic [63:0] csr_satp,
 
@@ -285,9 +287,10 @@ module pipeline(
         .rqst(div_rqst), .done(div_done), .r(div_r), .e(div_exc));
     fpu fpu_inst(.clk(clk), .rst(rst), .flush(redir), .ena(fpu_ena),
         .rqst(fpu_rqst), .done(fpu_done), .r(fpu_r), .e(fpu_exc));
-    csr csr_inst(.clk(clk), .rst(rst), .addr(csr_addr), .wena(csr_wena),
-        .rval(csr_rval), .wval(csr_wval), .func(csr_func), .eout(csr_excp),
-        .nret(nret), .ret(ret), .ein(excep), .cause(cause),
+    csr csr_inst(.clk(clk), .rst(rst),
+        .eiptip(eiptip), .mtime(mtime), .addr(csr_addr),
+        .wena(csr_wena), .rval(csr_rval), .wval(csr_wval), .func(csr_func),
+        .eout(csr_excp), .nret(nret), .ret(ret), .ein(excep), .cause(cause),
         .epc(epc), .tval(tval), .satp_flush(satp_flush), .intr(intr),
         .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
         .csr_sepc(csr_sepc), .csr_satp(csr_satp));
@@ -1316,37 +1319,16 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
             lsqsent[i] <= through[2'(i - 32'(rear))] | fwd[2'(i - 32'(rear))];
             for (int j = 0; j < 4; j++)
                 if (rqst[2'(i - 32'(rear))].addr[64] &
-                    rqst[2'(i - 32'(rear))].addr[`lgCQSZ:0] == addr_done[j]) begin
+                    rqst[2'(i - 32'(rear))].addr[`lgCQSZ:0] == addr_done[j])
                     lsqrqst[i].addr <= 65'(addr_val[j]);
-                    if (addr_val[j] == 64'h0200bff8) // CLINT mapping mtime
-                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                            {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c0};
-                    if (addr_val[j] == 64'h02004000) // CLINT mapping mtimecmp
-                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                            {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c1};
-                end
             for (int j = 0; j < 4; j++)
                 if (rqst[2'(i - 32'(rear))].wdat[64] &
                     rqst[2'(i - 32'(rear))].wdat[`lgCQSZ:0] == late_done[j])
                     lsqrqst[i].wdat <= late_val[j];
-            if (rqst[2'(i - 32'(rear))].addr == 65'h0200bff8) // CLINT mapping mtime
-                {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                    {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c0};
-            if (rqst[2'(i - 32'(rear))].addr == 65'h02004000) // CLINT mapping mtimecmp
-                {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                    {1'b1, 3'(rqst[2'(i - 32'(rear))].wena), 65'h7c1};
         end else begin
             for (int j = 0; j < 4; j++)
                 if (lsqrqst[i].addr[64] & lsqrqst[i].addr[`lgCQSZ:0] == addr_done[j])
-                begin
                     lsqrqst[i].addr <= 65'(addr_val[j]);
-                    if (addr_val[j] == 64'h0200bff8) // CLINT mapping mtime
-                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                            {1'b1, 3'(lsqrqst[i].wena), 65'h7c0};
-                    if (addr_val[j] == 64'h02004000) // CLINT mapping mtimecmp
-                        {lsqrqst[i].csr, lsqrqst[i].bits, lsqrqst[i].addr} <=
-                            {1'b1, 3'(lsqrqst[i].wena), 65'h7c1};
-                end
             for (int j = 0; j < 4; j++)
                 if (lsqrqst[i].wdat[64] & lsqrqst[i].wdat[`lgCQSZ:0] == late_done[j])
                     lsqrqst[i].wdat <= late_val[j];
@@ -1447,6 +1429,7 @@ module arbiter(
 endmodule
 
 module csr(input logic clk, input logic rst,
+    input logic [7:0] eiptip, input [63:0] mtime,
     input logic [11:0] addr, output logic [63:0] rval,
     input logic wena, input logic [63:0] wval, input logic [2:0] func,
     input logic [63:0] nret, output logic eout,
@@ -1459,8 +1442,7 @@ module csr(input logic clk, input logic rst,
     logic [1:0] level; // 00 -> U  01 -> S  11 -> M
     logic [63:0] wres; logic [64:0] val; logic trapintos;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
-    logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, mie;
-    logic [63:0] mtime, mtimecmp, tick;
+    logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, msip, mie;
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
     logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
     logic [63:0] stvec, scounteren, sscratch;
@@ -1502,8 +1484,6 @@ module csr(input logic clk, input logic rst,
         12'h003: val = 65'(fcsr);          12'h005: val = 65'(utvec);
         12'hc00: val = 65'(mcycle);        12'hc01: val = 65'(mtime);
         12'hc02: val = 65'(minstret);
-        // memory-mapped (redirect to custom space)
-        12'h7c0: val = 65'(mtime);         12'h7c1: val = 65'(mtimecmp);
         default: val = {1'b1, 64'd0};
     endcase
     always_comb rval = val[63:0];
@@ -1570,8 +1550,8 @@ module csr(input logic clk, input logic rst,
         if (rst) medeleg <= 0; else if (wena & addr == 12'h302) begin
             medeleg <= wres; medeleg[11] <= 0; end
         if (rst) mideleg <= 0; else if (wena & addr == 12'h303) mideleg <= wres;
-        if (rst) mip <= 0; else if (wena & (addr == 12'h344 | addr == 12'h144)) begin
-            mip <= wres; mip[63:12] <= 0; mip[10] <= 0; mip[6] <= 0; mip[2] <= 0; end
+        if (rst) msip <= 0; else if (wena & (addr == 12'h344 | addr == 12'h144))
+            {msip[3], msip[1:0]} <= {wres[3], wres[1:0]};
         if (rst) mie <= 0; else if (wena & (addr == 12'h304 | addr == 12'h104)) begin
             mie <= wres; mie[63:12] <= 0; mie[10] <= 0; mie[6] <= 0; mie[2] <= 0; end
         if (rst) mcycle <= 0; else if (wena & addr == 12'hb00) mcycle <= wres;
@@ -1599,14 +1579,8 @@ module csr(input logic clk, input logic rst,
         if (rst) stval <= 0; else if (wena & addr == 12'h143) stval <= wres;
         if (rst) satp <= 0; else if (wena & addr == 12'h180) satp <= wres;
         if (wena & addr == 12'h005) utvec <= wres;
-        if (rst) mtime <= 0; else if (wena & addr == 12'h7c0) mtime <= wres;
-        else if (~|tick) mtime <= mtime + 1;
-        if (rst) mtimecmp <= 0; else if (wena & addr == 12'h7c1) mtimecmp <= wres;
-        // time interrupt generation
-        if (rst) mip <= 0; else if (mtime >= mtimecmp & ~mip[7]) mip[7] <= 1;
-        else if (wena & addr == 12'h7c1) mip[7] <= 0; // clear when writing mtimecmp
     end
-    always_ff @(posedge clk) if (rst | tick == 10) tick <= 0; else tick <= tick + 1;
+    always_comb mip = {52'd0, eiptip, msip[3:0]};
     always_comb begin intr = 0;
         for (int i = 0; i < 12; i++) if (mip[i] & mie[i])
             if (~mideleg[i] & (level < 3 | level == 3 & mstatus[3]) |

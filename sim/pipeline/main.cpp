@@ -11,7 +11,7 @@ typedef struct
 {
     const char *file = 0, *dtb = 0, *initrd = 0, *vcd = 0;
     std::vector<const char *> args;
-    uint8_t debug = 0, help = 0, filetype = 0;
+    uint8_t sim = 0, verbose = 0, help = 0, filetype = 0;
     int mintime = 0, maxtime = INT32_MAX;
 } cmd_t;
 
@@ -29,6 +29,7 @@ typedef struct
 
 typedef struct
 {
+    uint64_t cycle;
     uint8_t level;
     uint64_t pc;
     uint32_t ir;
@@ -42,6 +43,21 @@ typedef struct
 
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
+
+bool check(delta_t del, delta_t ref)
+{
+    del.memv &= (del.memw == 8 ? -1ul : (1ul << (del.memw & 0xf) * 8) - 1);
+    ref.memv &= (ref.memw == 8 ? -1ul : (1ul << (ref.memw & 0xf) * 8) - 1);
+    if (del.memw >> 4 == 0x8)
+        del.memv = ref.memv = 0;
+    if (del.gprw != ref.gprw || del.memw != ref.memw)
+        return false;
+    if (del.gprw && (del.gpra != ref.gpra || del.gprv != ref.gprv))
+        return false;
+    if (del.memw && (del.mema != ref.mema || del.memv != ref.memv))
+        return false;
+    return true;
+}
 
 int main(int argc, char *argv[])
 {
@@ -77,8 +93,10 @@ int main(int argc, char *argv[])
                     cmd.maxtime = INT32_MAX;
                 i += 2;
             }
-            else if (strcmp(argv[i] + j, "d") == 0)
-                cmd.debug = 1;
+            else if (strcmp(argv[i] + j, "v") == 0)
+                cmd.verbose = 1;
+            else if (strcmp(argv[i] + j, "s") == 0)
+                cmd.sim = 1;
             else if (strcmp(argv[i] + j, "h") == 0)
                 cmd.help = 1;
         }
@@ -99,7 +117,8 @@ int main(int argc, char *argv[])
         printf("    -dtb `binary`: specify device tree binary\n");
         printf("    -initrd `binary`: specify initial rootfs\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
-        printf("    -d: debug mode\n");
+        printf("    -s: run and check with simulator\n");
+        printf("    -v: verbose mode\n");
         return 0;
     }
     fprintf(stderr, "[Info] Running simulation in %s mode with:\n[Info]     ",
@@ -273,18 +292,19 @@ int main(int argc, char *argv[])
         fclose(fp);
     }
     mem.ui64(htifaddr.fromhost) = mem.ui64(htifaddr.tohost) = 0;
+    mem.add(0xc0000, 0x2000000); // CLINT area
+    const uint64_t mtime = 0x200bff8, mtimecmp = 0x2004000;
+    mem.ui64(mtime) = 0, mem.ui64(mtimecmp) = -1ull;
 
     /* Simulate */
     Vstats *dut = new (std::nothrow) Vstats;
-    state_t *sim = cmd.debug ? new (std::nothrow) state_t : NULL;
+    state_t *sim = cmd.sim ? new (std::nothrow) state_t : NULL;
     VerilatedVcdC *trace = cmd.vcd ? new (std::nothrow) VerilatedVcdC : NULL;
     uint64_t wt = 0; // waveform record time
+    if (sim)
+        sim->pc = entry, sim->mem = mem;
     if (trace)
-    {
-        Verilated::traceEverOn(true); // trace waveform
-        dut->trace(trace, 5);
-        trace->open(cmd.vcd);
-    }
+        Verilated::traceEverOn(true), dut->trace(trace, 5), trace->open(cmd.vcd);
     // reset
     dut->rst = 0, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
     dut->rst = 1, dut->clk = 0, dut->eval(), trace ? trace->dump(wt++), 0 : 0;
@@ -296,14 +316,14 @@ int main(int argc, char *argv[])
     std::queue<dcache_req_t> dreq;
     std::queue<cmt_t> cmts;
     std::queue<del_t> gprs, csrs, mems;
-    uint64_t cycle = 0, htifexit = 0;
-    mem.add(0xc0000, 0x2000000); // CLINT area
-    mem.ui64(0x200bff8) = 0;     // mtime
-    mem.ui64(0x2004000) = -1ull; // mtimecmp
+    uint64_t cycle = 0;
+    const char *exitcause = NULL;
+    uint8_t exitcode;
     signal(SIGINT, intrhandler);
-    while (!interrupt && cycle <= cmd.maxtime)
+    while (!interrupt && !exitcause)
     {
-        if (cmts.size() < 2)
+        static int emptytimes = 0, stabletimes = 0;
+        if (cmts.size() < 2) // drive clock and handle memory requests
         {
             // negedge clock
             dut->clk = 0, dut->eval(), trace && cycle >= cmd.mintime ? trace->dump(wt++), 0 : 0;
@@ -320,13 +340,18 @@ int main(int argc, char *argv[])
                 dreq.pop();
             ireq.empty() ? ireq.push({0}), 0 : 0;
             dreq.empty() ? dreq.push({0}), 0 : 0;
-            dut->clk = 1, dut->eval();            // clock changes first
-            dut->icache_done = ireq.front().rqst; // other signals change after clk
+            dut->clk = 1, dut->eval(); // clock changes first, other signals change after clk
+            if (cycle % 16 == 0)       // set interrupt
+                mem.ui64(mtime)++, sim ? sim->mem.ui64(mtime)++ : 0;
+            dut->mtime = mtime;
+            if (mtime > mtimecmp)
+                dut->eiptip |= 1 << 3;
+            dut->icache_done = ireq.front().rqst; // handle an icache request
             if (ireq.front().rqst && ireq.front().addr != -1)
                 for (int j = 0; j < 4; j++)
                     dut->icache_data[j] = mem.ui32(ireq.front().addr + 4 * j);
             dut->icache_pgft = ireq.front().rqst && ireq.front().addr == -1;
-            dut->dcache_done = dreq.front().rqst;
+            dut->dcache_done = dreq.front().rqst; // handle an dcache request
             if (dreq.front().rqst)
                 if (dreq.front().addr == -1)
                     dut->dcache_rdat = dreq.front().vaddr; // fault vaddr in rdat as tval
@@ -336,7 +361,7 @@ int main(int argc, char *argv[])
             if (dreq.front().rqst && dreq.front().addr == -1)
                 dut->dcache_pgft = dreq.front().wena ? 2 : 1; // [1:0] -> [WPF,RPF]
             // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
-            uint64_t width = 1 << (dreq.front().bits & 3);
+            uint64_t width = 1 << (dreq.front().bits & 3); // process data of dcache response
             uint64_t mask = width < 8 ? (1llu << 8 * width) - 1 : ~0llu;
             if (dreq.front().rqst && !dreq.front().wena && dreq.front().rsrv == 1)
                 for (int i = 0; i < width; i++)
@@ -349,7 +374,7 @@ int main(int argc, char *argv[])
                 if (dreq.front().rqst && dreq.front().wena)
                 { // store instructions
                     if (dreq.front().rsrv != 1 || rsrv[dreq.front().addr])
-                    {
+                    { // check SC
                         uint64_t addr = dreq.front().addr, data = dreq.front().wdata;
                         for (int j = 0; j < width; j++)
                             mem[addr + j] = bits(data).range(j * 8, j * 8 + 7);
@@ -360,12 +385,14 @@ int main(int argc, char *argv[])
                         dut->dcache_rdat = 1;
                 }
             }
+            // evaluate again
             dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
             ireq.pop(), dreq.pop();
             // extract delta
             for (int i = 0; i < 4; i++)
                 if (dut->cmt[i])
-                    cmts.push({.level = dut->cmt_level[i],
+                    cmts.push({.cycle = cycle,
+                               .level = dut->cmt_level[i],
                                .pc = dut->cmt_pc[i],
                                .ir = dut->cmt_ir[i],
                                .gpr = dut->cmt_gpr[i],
@@ -378,23 +405,21 @@ int main(int argc, char *argv[])
                 csrs.push({.w = 1, .a = dut->del_csra, .v = dut->del_csrv});
             if (dut->del_memw)
                 mems.push({.w = dut->del_memw, .a = dut->del_mema, .v = dut->del_memv});
-            // evaluate again
             cycle++;
+            emptytimes++;
+            if (cmd.filetype == 1 && emptytimes > 1024)
+                exitcause = "no commits within long time (hex mode)", exitcode = 255;
         }
-        else
-        { // check deltas
+        else // check deltas
+        {
             state_t stt;
             delta_t del;
+            uint64_t cyc = cmts.front().cycle;
             stt.level = cmts.front().level;
             stt.pc = cmts.front().pc;
             stt.ir = cmts.front().ir;
             if (cmts.front().gpr)
-            {
-                del.gprw = 1;
-                del.gpra = gprs.front().a;
-                del.gprv = gprs.front().v;
-                gprs.pop();
-            }
+                del.gprw = 1, del.gpra = gprs.front().a, del.gprv = gprs.front().v, gprs.pop();
             else
                 del.gprw = 0;
             if (cmts.front().mem)
@@ -403,32 +428,57 @@ int main(int argc, char *argv[])
                 del.mema = mems.front().a;
                 del.memv = mems.front().v;
                 mems.pop();
+                if (del.memw >> 4 == 0xc && del.gprv == 1) // failed SC
+                    del.memw = 0;
             }
             else
                 del.memw = 0;
             if (cmts.front().csr)
             {
-                // del.csr[csrname[csrs.front().a]] = csrs.front().v;
+                if (csrname.find(csrs.front().a) != csrname.end())
+                    del.csr[csrname[csrs.front().a]] = csrs.front().v;
                 csrs.pop();
             }
-            if (cycle >= cmd.mintime)
-                cmd.debug ? print(cycle, stt, del), 0 : 0;
             cmts.pop();
+            del.level = cmts.front().level;
+            del.pc = cmts.front().pc;
+            if (sim)
+            {
+                delta_t delsim = next(*sim);
+                if (!check(del, delsim))
+                {
+                    fprintf(stderr, "[Debug] ------ Difference detected ------\n");
+                    fprintf(stderr, "[Debug] DUT/SIM:\n");
+                    print(cyc, stt, del);
+                    print(cycle, *sim, delsim);
+                    fprintf(stderr, "[Debug] ---------------------------------\n");
+                    exitcause = "checking failure", exitcode = 255;
+                }
+                apply(*sim, del);
+            }
+            if (cyc >= cmd.mintime)
+                cmd.verbose ? print(cyc, stt, del), 0 : 0;
+            emptytimes = 0;
+            if (cmd.filetype == 1 && cmd.maxtime == INT32_MAX)
+                if (del.level == stt.level && del.pc == stt.pc && !del.gprw && !del.memw)
+                    stabletimes++;
+            if (stabletimes > 16)
+                exitcause = "reaching stable state (hex mode)", exitcode = 0;
         }
         // HTIF requests handler
-        if (htifexit = htif(mem, htifaddr, cmd.args) & 1)
-            break;
+        uint64_t htifexit = htif(mem, htifaddr, cmd.args);
+        if (htifexit & 1)
+            exitcause = "HTIF exit call", exitcode = htifexit >> 1;
+        if (cycle > cmd.maxtime)
+            exitcause = "reaching maximum cycle", exitcode = 0;
     }
-    if (cmd.filetype == 1 && cmd.debug)
+    if (cmd.filetype == 1 && cmd.verbose)
         disasmem(&mem[0x400000], hexsz);
 
     /* Clean and exit */
     delete (trace ? trace->close(), trace : NULL);
     delete dut;
     delete sim;
-    if (cycle > cmd.maxtime)
-        fprintf(stderr, "[Info] Exceeded maximum cycle %d\n", cmd.maxtime);
-    if (htifexit & 1)
-        fprintf(stderr, "[Info] Exited with code %hhu\n", (int)htifexit >> 1);
-    return htifexit >> 1;
+    fprintf(stderr, "[Info] Exited at cycle %ld with code %hhu due to %s\n", cycle, exitcode, exitcause);
+    return exitcode;
 }
