@@ -34,6 +34,8 @@ typedef struct
     uint64_t pc;
     uint32_t ir;
     uint8_t gpr, csr, mem;
+    /* CSRs that may change when trap or return from trap */
+    uint64_t mexc, sexc, ret, mstatus, mcause, mepc, mtval, scause, sepc, stval;
 } cmt_t;
 
 typedef struct
@@ -56,6 +58,11 @@ bool check(delta_t del, delta_t ref)
         return false;
     if (del.memw && (del.mema != ref.mema || del.memv != ref.memv))
         return false;
+    ref.csr.erase("mcycle");
+    ref.csr.erase("minstret");
+    for (auto i : ref.csr)
+        if (del.csr.find(i.first) == del.csr.end() || del.csr[i.first] != i.second)
+            return false;
     return true;
 }
 
@@ -397,7 +404,17 @@ int main(int argc, char *argv[])
                                .ir = dut->cmt_ir[i],
                                .gpr = dut->cmt_gpr[i],
                                .csr = dut->cmt_csr[i],
-                               .mem = dut->cmt_mem[i]});
+                               .mem = dut->cmt_mem[i],
+                               .mexc = dut->cmt_mexc && (i == 3 || !dut->cmt[i + 1]), // last commit
+                               .sexc = dut->cmt_sexc && (i == 3 || !dut->cmt[i + 1]),
+                               .ret = dut->cmt_ret && (i == 3 || !dut->cmt[i + 1]),
+                               .mstatus = dut->cmt_mstatus,
+                               .mcause = dut->cmt_mcause,
+                               .mepc = dut->cmt_mepc,
+                               .mtval = dut->cmt_mtval,
+                               .scause = dut->cmt_scause,
+                               .sepc = dut->cmt_sepc,
+                               .stval = dut->cmt_stval});
             for (int i = 0; i < 4; i++)
                 if (dut->del_gprw[i])
                     gprs.push({.w = 1, .a = dut->del_gpra[i], .v = dut->del_gprv[i]});
@@ -415,6 +432,7 @@ int main(int argc, char *argv[])
             state_t stt;
             delta_t del;
             uint64_t cyc = cmts.front().cycle;
+            uint8_t mexc = cmts.front().mexc, sexc = cmts.front().sexc, ret = cmts.front().ret;
             stt.level = cmts.front().level;
             stt.pc = cmts.front().pc;
             stt.ir = cmts.front().ir;
@@ -442,6 +460,22 @@ int main(int argc, char *argv[])
             cmts.pop();
             del.level = cmts.front().level;
             del.pc = cmts.front().pc;
+            if (del.csr.find("mstatus") != del.csr.end() || ret)
+                del.csr["mstatus"] = cmts.front().mstatus;
+            if (mexc)
+            {
+                del.csr["mstatus"] = cmts.front().mstatus;
+                del.csr["mcause"] = cmts.front().mcause;
+                del.csr["mepc"] = cmts.front().mepc;
+                del.csr["mtval"] = cmts.front().mtval;
+            }
+            if (sexc)
+            {
+                del.csr["mstatus"] = cmts.front().mstatus;
+                del.csr["scause"] = cmts.front().scause;
+                del.csr["sepc"] = cmts.front().sepc;
+                del.csr["stval"] = cmts.front().stval;
+            }
             if (sim)
             {
                 delta_t delsim = next(*sim);
@@ -451,7 +485,15 @@ int main(int argc, char *argv[])
                     fprintf(stderr, "[Debug] DUT/SIM:\n");
                     print(cyc, stt, del);
                     print(cycle, *sim, delsim);
-                    fprintf(stderr, "[Debug] ---------------------------------\n");
+                    fprintf(stderr, "[Debug] DUT CSRs:");
+                    for (auto i : del.csr)
+                        if (i.first != "mcycle" && i.first != "minstret")
+                            fprintf(stderr, " %s: %lx", i.first.c_str(), (uint64_t)i.second);
+                    fprintf(stderr, "\n[Debug] SIM CSRs:");
+                    for (auto i : delsim.csr)
+                        if (i.first != "mcycle" && i.first != "minstret")
+                            fprintf(stderr, " %s: %lx", i.first.c_str(), (uint64_t)i.second);
+                    fprintf(stderr, "\n[Debug] ---------------------------------\n");
                     exitcause = "checking failure", exitcode = 255;
                 }
                 apply(*sim, del);

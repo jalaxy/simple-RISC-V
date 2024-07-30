@@ -228,7 +228,7 @@ module pipeline(
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
     logic excep; logic [63:0] cause; logic [63:0] epc, tval, nret; logic [2:0] ret;
-    logic satp_flush; logic [63:0] csr_tvec, csr_mepc, csr_sepc; logic [6:0] intr;
+    logic csr_flush; logic [63:0] csr_tvec, csr_mepc, csr_sepc; logic [6:0] intr;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -255,7 +255,7 @@ module pipeline(
         .late_done(late_done), .late_val(late_val),
         .pt_done(pt_done), .pt_data(pt_data), .pt_npc(pt_npc), .ena_arb(pt_ena),
         .addr_done(addr_done), .addr_val(addr_val), .level(csr_inst.level));
-    wb_stage wb_stage_inst(.clk(clk), .rst(rst), .satp_flush(satp_flush), .redir(redir),
+    wb_stage wb_stage_inst(.clk(clk), .rst(rst), .csr_flush(csr_flush), .redir(redir),
         .in_ex(data_ex_wb), .get_ex(get_ex_wb),
         .out_pc(data_wb_pc), .ena_pc(get_wb_pc),
         .frontid(frontid), .nextid(nextid),
@@ -291,7 +291,7 @@ module pipeline(
         .eiptip(eiptip), .mtime(mtime), .addr(csr_addr),
         .wena(csr_wena), .rval(csr_rval), .wval(csr_wval), .func(csr_func),
         .eout(csr_excp), .nret(nret), .ret(ret), .ein(excep), .cause(cause),
-        .epc(epc), .tval(tval), .satp_flush(satp_flush), .intr(intr),
+        .epc(epc), .tval(tval), .csr_flush(csr_flush), .intr(intr),
         .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
         .csr_sepc(csr_sepc), .csr_satp(csr_satp));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
@@ -984,7 +984,7 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
 endmodule
 
 module wb_stage(input logic clk, input logic rst,
-    input logic satp_flush, output logic redir,
+    input logic csr_flush, output logic redir,
     input ex_wb_t [3:0] in_ex, output logic [3:0] get_ex,
     output xx_pc_t out_pc, input logic ena_pc,
     output logic [`lgCQSZ:0] frontid, output logic [`lgCQSZ:0] nextid,
@@ -1070,7 +1070,7 @@ module wb_stage(input logic clk, input logic rst,
     always_comb cqpatup[0] = cqredir[0] | lastvalid & lastinfo.patupd;
     always_comb for (int i = 1; i < 4; i++) begin
         cqexcep[i] = cqcause[i][6] & cqvalid[i] &
-            cqinfo[i].pc == cqnpc[i - 1] & ~satp_flush;
+            cqinfo[i].pc == cqnpc[i - 1] & ~csr_flush;
         for (int j = 0; j < i; j++) if (cqinfo[j].ret[2]) cqexcep[i] = 0;
     end
     always_comb begin
@@ -1078,7 +1078,7 @@ module wb_stage(input logic clk, input logic rst,
             cqinfo[i].pc != cqnpc[i - 1] & ~cqdata[i - 1][64] | cqinfo[i - 1].fencei;
         for (int i = 0; i < 4; i++) for (int j = 0; j < i; j++) // level may change
             if (cqinfo[j].ret[2]) cqredir[i] = 1;
-        if (satp_flush) cqredir[1] = 1; // csr_satp may change
+        if (csr_flush) cqredir[1] = 1; // csr_satp may change
     end
     always_comb for (int i = 1; i < 4; i++)
         cqpatup[i] = cqredir[i] | cqvalid[i - 1] & cqinfo[i - 1].patupd;
@@ -1435,7 +1435,7 @@ module csr(input logic clk, input logic rst,
     input logic [63:0] nret, output logic eout,
     input logic ein, input logic [63:0] epc, logic [63:0] tval,
     input logic [63:0] cause, input logic [2:0] ret,
-    output logic satp_flush, output logic [6:0] intr,
+    output logic csr_flush, output logic [6:0] intr,
     output logic [63:0] csr_tvec, output logic [63:0] csr_mepc,
     output logic [63:0] csr_sepc, output logic [63:0] csr_satp
 );
@@ -1586,7 +1586,9 @@ module csr(input logic clk, input logic rst,
             if (~mideleg[i] & (level < 3 | level == 3 & mstatus[3]) |
                  mideleg[i] & (level < 1 | level == 1 & mstatus[1])) // globally enabled
                 intr = {1'b1, 6'(i)}; end
-    always_comb satp_flush = wena & addr == 12'h180;
+    // some CSRs change can cause pipeline flush: mstatus, satp
+    always_comb csr_flush = wena &
+        (addr == 12'h300 | addr == 12'h100 | addr == 12'h180);
     always_comb if (trapintos)
              csr_tvec = wena & addr == 12'h105 ? wres & ~64'd2 : stvec;
         else csr_tvec = wena & addr == 12'h305 ? wres & ~64'd2 : mtvec;

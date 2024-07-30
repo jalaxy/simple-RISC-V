@@ -32,7 +32,7 @@ bits &bits::operator>>=(int x) { return this->data >>= x, *this; }
 bits &bits::operator|=(uint64_t x) { return this->data |= x, *this; }
 bits bits::range(uint8_t s, uint8_t e) const { return data << 63 - e >> 63 - e + s; }
 int64_t bits::sext(int w) const { return ((data >> w - 1) & 1 ? -1ull << w : 0) | data & ~(-1ull << w); }
-void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ~((1 << e - s + 1) - 1 << s)) |= x << s; }
+void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ~((1ull << e - s + 1ull) - 1ull << s)) |= x << s; }
 void bits::write(uint8_t i, uint64_t x) { (data &= ~(1 << i)) |= x << i; }
 
 memory::memory() {}
@@ -1504,7 +1504,7 @@ delta_t next(state_t &s)
     if (ret.csr.find("misa") != ret.csr.end()) // some WARL csr fields
         ret.csr.at("misa") = 0x14112d | (1ull << 63);
     if (ret.csr.find("mstatus") != ret.csr.end()) // some WARL csr fields
-        ret.csr.at("mstatus").write(30, 32, 0xa);
+        ret.csr.at("mstatus").write(32, 35, 0xa);
     return ret;
 }
 
