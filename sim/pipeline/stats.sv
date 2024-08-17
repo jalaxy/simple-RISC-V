@@ -31,14 +31,21 @@ module stats(
     output logic        cmt_mem   [3:0],
     output logic        cmt_mexc, // related to some CSR change
     output logic        cmt_sexc,
+    output logic        cmt_int,
     output logic        cmt_ret,
     output logic [63:0] cmt_mstatus, // CSR deltas are calculated by states
+    output logic [63:0] cmt_misa,
+    output logic [63:0] cmt_mtvec,
     output logic [63:0] cmt_mcause,
     output logic [63:0] cmt_mepc,
     output logic [63:0] cmt_mtval,
+    output logic [63:0] cmt_stvec,
     output logic [63:0] cmt_scause,
     output logic [63:0] cmt_sepc,
     output logic [63:0] cmt_stval,
+    output logic [63:0] cmt_mip,
+    output logic [63:0] cmt_mcycle,
+    output logic [63:0] cmt_minstret,
     output logic        del_gprw  [3:0],
     output logic  [5:0] del_gpra  [3:0],
     output logic [63:0] del_gprv  [3:0],
@@ -76,17 +83,25 @@ module stats(
             del_gprv[i] = pipeline_inst.wb_stage_inst.cqdata[i][63:0];
         end
         if (pipeline_inst.wb_stage_inst.excep)
-            for (int i = 0; i < 4; i++) if (~cmt[i]) begin cmt[i] = 1; break; end
+            for (int i = 0; i < 4; i++) if (~cmt[i])
+                begin cmt[i] = 1; cmt_gpr[i] = 0; cmt_mem[i] = 0; break; end
         cmt_mexc = pipeline_inst.csr_inst.ein & ~pipeline_inst.csr_inst.trapintos;
         cmt_sexc = pipeline_inst.csr_inst.ein &  pipeline_inst.csr_inst.trapintos;
+        cmt_int = pipeline_inst.wb_stage_inst.intr_taken;
         cmt_ret = pipeline_inst.csr_inst.ret[2];
         cmt_mstatus = pipeline_inst.csr_inst.mstatus;
+        cmt_misa = pipeline_inst.csr_inst.misa;
+        cmt_mtvec = pipeline_inst.csr_inst.mtvec;
         cmt_mcause = pipeline_inst.csr_inst.mcause;
         cmt_mepc = pipeline_inst.csr_inst.mepc;
         cmt_mtval = pipeline_inst.csr_inst.mtval;
+        cmt_stvec = pipeline_inst.csr_inst.stvec;
         cmt_scause = pipeline_inst.csr_inst.scause;
         cmt_sepc = pipeline_inst.csr_inst.sepc;
         cmt_stval = pipeline_inst.csr_inst.stval;
+        cmt_mip = pipeline_inst.csr_inst.mip;
+        cmt_mcycle = pipeline_inst.csr_inst.mcycle;
+        cmt_minstret = pipeline_inst.csr_inst.minstret;
         del_csrw = pipeline_inst.csr_inst.wena;
         del_csra = pipeline_inst.csr_inst.addr;
         del_csrv = pipeline_inst.csr_inst.wres;

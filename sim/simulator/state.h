@@ -81,6 +81,8 @@ typedef struct
     uint64_t gpra, mema;
     uint64_t gprv, memv;
     std::map<std::string, bits> csr;
+    uint8_t ldlocal; // possibly load local store in load axiom of RVWMO
+    uint64_t ldaddr;
 } delta_t;
 
 typedef struct
@@ -92,7 +94,7 @@ uint64_t paddr(memory &mem, bits satp, bits vaddr, bits perm = 0, bool adpf = 1)
 std::string disas(uint32_t ir);
 delta_t next(state_t &s);
 void apply(state_t &s, delta_t delta);
-uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs);
+uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs, memory *pmem = 0);
 void print(uint64_t cycle, state_t &state, const delta_t &delta);
 void print(state_t &s, uint64_t addr = 0, uint64_t size = 0);
 void dumpmem(const uint8_t *mem, uint64_t base, uint64_t size);

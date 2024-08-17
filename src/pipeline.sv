@@ -99,13 +99,15 @@ typedef struct packed {
     logic [7:0][1:0] pat;
 } pc_if_t;
 typedef struct packed {
-    logic valid, pf;
+    logic valid;
+    logic [1:0] pf;
     logic [63:0] pc;
     logic [31:0] ir;
     logic [17:0] pat;
 } if_id_t;
 typedef struct packed {
-    logic valid, pf;
+    logic valid;
+    logic [1:0] pf;
     logic [`lgCQSZ:0] cqid;
     logic [2:0] delta;
     logic [63:0] pc;
@@ -128,7 +130,7 @@ typedef struct packed {
     logic [64:0] rd;
     logic [63:0] npc, pc;
     logic [31:0] ir;
-    logic memw, csrw, patupd, b, c, fencei;
+    logic memw, csrw, patupd, b, c, fencei, bppf;
     logic [6:0] rda;
     logic [17:0] pat;
     logic [2:0] ret;
@@ -142,7 +144,7 @@ typedef struct packed {
 typedef struct packed {
     logic [63:0] pc;
     logic [31:0] ir;
-    logic memw, csrw, patupd, b, c, fencei;
+    logic memw, csrw, patupd, b, c, fencei, bppf;
     logic [6:0] rda;
     logic [17:0] pat;
     logic [2:0] ret;
@@ -228,7 +230,8 @@ module pipeline(
     logic [11:0] csr_addr; logic csr_wena; logic [2:0] csr_func;
     logic [63:0] csr_rval, csr_wval; logic csr_excp;
     logic excep; logic [63:0] cause; logic [63:0] epc, tval, nret; logic [2:0] ret;
-    logic csr_flush; logic [63:0] csr_tvec, csr_mepc, csr_sepc; logic [6:0] intr;
+    logic csr_flush; logic [63:0] csr_mstatus, csr_tvec, csr_mepc, csr_sepc;
+    logic [6:0] intr;
 
     pc_stage pc_stage_inst(.clk(clk), .rst(rst),
         .in_if(data_if_pc), .get_if(get_if_pc),
@@ -242,7 +245,7 @@ module pipeline(
         .icache_flsh(icache_flsh), .icache_done(icache_done),
         .icache_pgft(icache_pgft), .icache_data(icache_data));
     id_stage id_stage_inst(.clk(clk), .rst(rst), .redir(redir),
-        .in_if(data_if_id), .get_if(get_if_id),
+        .mstatus(csr_mstatus), .in_if(data_if_id), .get_if(get_if_id),
         .out_ex(data_id_ex), .ena_ex(get_id_ex));
     ex_stage ex_stage_inst(.clk(clk), .rst(rst), .redir(redir),
         .in_id(data_id_ex), .get_id(get_id_ex),
@@ -292,7 +295,7 @@ module pipeline(
         .wena(csr_wena), .rval(csr_rval), .wval(csr_wval), .func(csr_func),
         .eout(csr_excp), .nret(nret), .ret(ret), .ein(excep), .cause(cause),
         .epc(epc), .tval(tval), .csr_flush(csr_flush), .intr(intr),
-        .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
+        .csr_mstatus(csr_mstatus), .csr_tvec(csr_tvec), .csr_mepc(csr_mepc),
         .csr_sepc(csr_sepc), .csr_satp(csr_satp));
     arbiter arbiter_inst( /* PT should have lowest priority to avoid deadlock,
                              or use dynamic priority? */
@@ -369,7 +372,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
     logic [15:0][1:0] rempat, ispat; logic [15:0] remb, isb, rempf, ispf;
     logic [3:0] icnum; logic [7:0] icb, icpf;
     logic [7:0][15:0] icdat; logic [7:0][63:0] icpc; logic [7:0][1:0] icpat;
-    logic [3:0][3:0] irpos; logic [3:0] irvalid, irb, irpf;
+    logic [3:0][3:0] irpos; logic [3:0] irvalid, irb; logic [3:0][1:0] irpf;
     logic [3:0][63:0] irpc; logic [3:0][31:0] irdat;
     logic [3:0][1:0] irpat; logic [3:0][15:0] irgh;
     logic [15:0] isnc; logic busy; logic [15:0] ghr, ghnew; logic [1:0] incomp;
@@ -383,7 +386,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
     always_comb for (int i = 0; i < 4; i++) irvalid[i] =
         |isnum & {1'b0, irpos[i]} + (isnc[irpos[i]] ? 5'd2 : 5'd1) <= isnum;
     always_comb for (int i = 0; i < 4; i++) irpc[i] = ispc[irpos[i]];
-    always_comb for (int i = 0; i < 4; i++) irpf[i] = ispf[irpos[i]];
+    always_comb for (int i = 0; i < 4; i++) irpf[i] = ispf[irpos[i]+1-:2];
     always_comb for (int i = 0; i < 4; i++) irdat[i] = isdat[irpos[i]+1-:2];
     always_comb for (int i = 0; i < 4; i++) irb[i] = irvalid[i] &(
         irdat[i][6:0] == 7'b1100011 |                        // BRANCH
@@ -468,6 +471,7 @@ module if_stage(input logic clk, input logic rst, input logic redir,
 endmodule
 
 module id_stage(input logic clk, input logic rst, input logic redir,
+    input logic [63:0] mstatus,
     input  if_id_t [3:0] in_if, output logic [3:0] get_if,
     output id_ex_t [3:0] out_ex, input logic [3:0] ena_ex
 );
@@ -603,7 +607,10 @@ module id_stage(input logic clk, input logic rst, input logic redir,
             exop[0][`EX_EBREAK] = ir == 32'h00100073;
             exop[0][`EX_RET] = (ir & ~(32'd3 << 28)) == 32'h00200073;
             exop[0][`EX_WFI] = ir == 32'h10500073;
-            if (ir[1:0] != 2'b11) exop[0] = 0;
+            if (ir[1:0] != 2'b11) exop = 0;
+            if ((op[`LOAD_FP] | op[`STORE_FP] | op[`MADD] | op[`MSUB] |
+                 op[`NMSUB]   | op[`NMADD]    | op[`OP_FP]) & ~|mstatus[14:13])
+                exop = 0;
             if (~|exop[0]) exop[0][`EX_INV] = 1;
         end
         always_comb numval[g] = |exop[2] ? 3 : (|exop[1] ? 2 : (|exop[0] ? 1 : 0));
@@ -955,13 +962,14 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             out_wb_g[g].b = |in.bmask;
             out_wb_g[g].c = ~in.delta[2];
             out_wb_g[g].fencei = op[`EX_FENCEI];
+            out_wb_g[g].bppf = in.delta[2] & in.pf == 2'b10; // page fault beyond page
             out_wb_g[g].pc = in.pc;
-            out_wb_g[g].ir = in.ir;
+            out_wb_g[g].ir = (in.delta[2] ? |in.pf : in.pf[0]) ? 32'hc02013 : in.ir;
             out_wb_g[g].pat = in.pat;
             out_wb_g[g].npc = jump ? jpc : in.pc + {61'd0, in.delta};
             if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 4'd2, level};
             else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
-            else if (in.pf) out_wb_g[g].cause = {1'b1, 6'd12};
+            else if (in.delta[2] ? |in.pf : in.pf[0]) out_wb_g[g].cause = {1'b1, 6'd12};
             else if (op[`EX_INV]) out_wb_g[g].cause = {1'b1, 6'd2};
             else out_wb_g[g].cause = 0;
             out_wb_g[g].ret = {op[`EX_RET], in.funct3[1:0]};
@@ -1103,7 +1111,8 @@ module wb_stage(input logic clk, input logic rst,
                 excep = 1; epc = cqinfo[i].pc;
                 cause = 64'(cqcause[i][5:0]);
                 if (cause == 13 | cause == 15) tval = cqdata[i][63:0]; // L/S PF
-                else if (cause == 12) tval = cqinfo[i].pc; // I PF 
+                else if (cause == 12) // I PF 
+                    tval = cqinfo[i].pc + (cqinfo[i].bppf ? 2 : 0);
                 else if (cause == 2) tval = 64'(cqinfo[i].ir); // invalid instruction
             end else excep = 0;
         excep &= redir;
@@ -1163,7 +1172,7 @@ module wb_stage(input logic clk, input logic rst,
                 out_pc.redir = cqredir[i];
                 for (int j = 0; j < i; j++) if (~cqpop[j]) out_pc.redir = 0;
                 out_pc.pc = outinfo.pc;
-                out_pc.npc = cqexcep[i] | intr_taken ? tvec : outnpc;
+                out_pc.npc = cqexcep[i] | intr_taken ? tvec : outnpc & ~64'd1;
                 out_pc.gh = outinfo.pat[17:2];
                 out_pc.pat = outinfo.pat[1:0];
                 out_pc.c = outinfo.c;
@@ -1269,7 +1278,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
         2: misa[i] = |rqst[i].addr[1:0]; 3: misa[i] = |rqst[i].addr[2:0];
     endcase
     always_comb for (int i = 0; i < 4; i++) if (rqst[i].id[`lgCQSZ]) begin
-        through[i] = ~rqst[i].wena & ~rqst[i].addr[64] & ~misa[i];
+        through[i] = ~rqst[i].wena & ~|rqst[i].rsrv & ~rqst[i].addr[64] & ~misa[i];
         for (int j = 0; j < `LSQSZ + i; j++) if (lsq[j].id[`lgCQSZ])
             if (lsq[j].addr[64] | lsqmi[j] | lsq[j].aqrl[1] |
                 rqst[i].addr[63:3] == lsq[j].addr[63:3])
@@ -1378,7 +1387,7 @@ module lsu(input logic clk, input logic rst, input logic flush, input logic ena,
     always_comb fromth = |thnum;
     always_comb if (~fromth & rqstf.id[`lgCQSZ] & ~lsqsent[front[0]] &
                     ~rqstf.addr[64] & ~rqstf.csr)
-        if (~rqstf.wena) fromlsq = ~rqstf.aqrl[0] | cqnext;
+        if (~rqstf.wena) fromlsq = ~rqstf.aqrl[0] & ~|rqstf.rsrv | cqnext;
         else fromlsq = ~rqstf.wdat[64] & cqnext;
     else fromlsq = 0;
     always_comb fromdc = dcache_done[`lgCQSZ];
@@ -1436,11 +1445,12 @@ module csr(input logic clk, input logic rst,
     input logic ein, input logic [63:0] epc, logic [63:0] tval,
     input logic [63:0] cause, input logic [2:0] ret,
     output logic csr_flush, output logic [6:0] intr,
+    output logic [63:0] csr_mstatus,
     output logic [63:0] csr_tvec, output logic [63:0] csr_mepc,
     output logic [63:0] csr_sepc, output logic [63:0] csr_satp
 );
     logic [1:0] level; // 00 -> U  01 -> S  11 -> M
-    logic [63:0] wres; logic [64:0] val; logic trapintos;
+    logic [63:0] wres; logic [64:0] val; logic trapintos, we;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
     logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, msip, mie;
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
@@ -1487,7 +1497,10 @@ module csr(input logic clk, input logic rst,
         default: val = {1'b1, 64'd0};
     endcase
     always_comb rval = val[63:0];
-    always_comb eout = wena & val[64];
+    always_comb eout = wena & val[64] | // unimplemented CSRs
+        wena & addr[9:8] > level | // violate privilege
+        wena & addr == 12'hc00 & rval != wres; // cycle (read-only)
+    always_comb we = wena & ~eout;
     always_ff @(posedge clk) begin
         // switch priority mode
         if (ret[2])
@@ -1529,56 +1542,50 @@ module csr(input logic clk, input logic rst,
                                         // ZY XWVU TSRQ PONM LKJI HGFE DCBA
                                         //       U  S      M    I   F  DC A
         if (rst) misa <= {2'h2, 36'h0, 26'b00_0001_0100_0001_0001_0010_1101};
-        else if (wena & addr == 12'h301) begin
-            misa[0] <= wres[0]; misa[3:2] <= wres[3:2]; misa[4] <= ~wres[8];
-            misa[8:5] <= wres[8:5]; misa[13:12] <= wres[13:12]; misa[16] <= wres[16];
-            misa[18] <= wres[18]; misa[20] <= wres[20]; misa[23] <= wres[23];
-            if (~wres[5]) {misa[3], misa[16]} <= 0;
-        end
         if (rst) mvendorid <= 0; if (rst) marchid <= 0;
         if (rst) mimpid    <= 0; if (rst) mhartid <= 0;
         if (rst) mstatus <= {32'ha, 19'h1, 13'h0};
-        else if (wena & (addr == 12'h300 | addr == 12'h100)) begin
+        else if (we & (addr == 12'h300 | addr == 12'h100)) begin
             mstatus <= wres;
             mstatus[35:32] <= 4'b1010; // SXL/UXL
             mstatus[63] <= wres[16:15] == 2'b11 | wres[14:13] == 2'b11;
             {mstatus[62:36], mstatus[31:23]} <= 0;
             {mstatus[10:9], mstatus[6], mstatus[2]} <= 0;
         end
-        if (rst) mtvec <= 0; else if (wena & addr == 12'h305) begin
-            mtvec <= wres; mtvec[1] <= 0; end
-        if (rst) medeleg <= 0; else if (wena & addr == 12'h302) begin
+        if (rst) mtvec <= 0; else if (we & addr == 12'h305) begin
+            mtvec <= wres; mtvec[1:0] <= 0; end
+        if (rst) medeleg <= 0; else if (we & addr == 12'h302) begin
             medeleg <= wres; medeleg[11] <= 0; end
-        if (rst) mideleg <= 0; else if (wena & addr == 12'h303) mideleg <= wres;
-        if (rst) msip <= 0; else if (wena & (addr == 12'h344 | addr == 12'h144))
+        if (rst) mideleg <= 0; else if (we & addr == 12'h303) mideleg <= wres;
+        if (rst) msip <= 0; else if (we & (addr == 12'h344 | addr == 12'h144))
             {msip[3], msip[1:0]} <= {wres[3], wres[1:0]};
-        if (rst) mie <= 0; else if (wena & (addr == 12'h304 | addr == 12'h104)) begin
+        if (rst) mie <= 0; else if (we & (addr == 12'h304 | addr == 12'h104)) begin
             mie <= wres; mie[63:12] <= 0; mie[10] <= 0; mie[6] <= 0; mie[2] <= 0; end
-        if (rst) mcycle <= 0; else if (wena & addr == 12'hb00) mcycle <= wres;
+        if (rst) mcycle <= 0; else if (we & addr == 12'hb00) mcycle <= wres;
         else mcycle <= mcycle + 64'd1;
         if (rst) minstret <= 0; else minstret <=
-            (wena & addr == 12'hb02 ? wres : minstret) + (mcountinhibit[2] ? 0 : nret);
+            (we & addr == 12'hb02 ? wres : minstret) + (mcountinhibit[2] ? 0 : nret);
         for (int i = 3; i < 32; i++) if (rst) mhpmcounter[i] <= 0;
-            else if (wena & addr[11:5] == 7'h58) mhpmcounter[i] <= wres;
+            else if (we & addr[11:5] == 7'h58) mhpmcounter[i] <= wres;
         for (int i = 3; i < 32; i++) if (rst) mhpmevent[i] <= 0;
-            else if (wena & addr[11:5] == 7'h58) mhpmevent[i] <= wres;
-        if (rst) mcounteren <= 0; else if (wena & addr == 12'h306) mcounteren <= wres;
+            else if (we & addr[11:5] == 7'h58) mhpmevent[i] <= wres;
+        if (rst) mcounteren <= 0; else if (we & addr == 12'h306) mcounteren <= wres;
         if (rst) mcountinhibit <= 0;
-        else if (wena & addr == 12'h320) mcountinhibit <= wres;
-        if (rst) mscratch <= 0; else if (wena & addr == 12'h340) mscratch <= wres;
-        if (rst) mepc <= 0; else if (wena & addr == 12'h341) mepc <= wres;
-        if (rst) mcause <= 0; else if (wena & addr == 12'h342) mcause <= wres;
-        if (rst) mtval <= 0; else if (wena & addr == 12'h343) mtval <= wres;
+        else if (we & addr == 12'h320) mcountinhibit <= wres;
+        if (rst) mscratch <= 0; else if (we & addr == 12'h340) mscratch <= wres;
+        if (rst) mepc <= 0; else if (we & addr == 12'h341) mepc <= wres;
+        if (rst) mcause <= 0; else if (we & addr == 12'h342) mcause <= wres;
+        if (rst) mtval <= 0; else if (we & addr == 12'h343) mtval <= wres;
         // S-level CSR
-        if (rst) stvec <= 0; else if (wena & addr == 12'h105) begin
-            stvec <= wres; stvec[1] <= 0; end
-        if (rst) scounteren <= 0; else if (wena & addr == 12'h106) scounteren <= wres;
-        if (rst) sscratch <= 0; else if (wena & addr == 12'h140) sscratch <= wres;
-        if (rst) sepc <= 0; else if (wena & addr == 12'h141) sepc <= wres;
-        if (rst) scause <= 0; else if (wena & addr == 12'h142) scause <= wres;
-        if (rst) stval <= 0; else if (wena & addr == 12'h143) stval <= wres;
-        if (rst) satp <= 0; else if (wena & addr == 12'h180) satp <= wres;
-        if (wena & addr == 12'h005) utvec <= wres;
+        if (rst) stvec <= 0; else if (we & addr == 12'h105) begin
+            stvec <= wres; stvec[1:0] <= 0; end
+        if (rst) scounteren <= 0; else if (we & addr == 12'h106) scounteren <= wres;
+        if (rst) sscratch <= 0; else if (we & addr == 12'h140) sscratch <= wres;
+        if (rst) sepc <= 0; else if (we & addr == 12'h141) sepc <= wres;
+        if (rst) scause <= 0; else if (we & addr == 12'h142) scause <= wres;
+        if (rst) stval <= 0; else if (we & addr == 12'h143) stval <= wres;
+        if (rst) satp <= 0; else if (we & addr == 12'h180) satp <= wres;
+        if (we & addr == 12'h005) utvec <= wres;
     end
     always_comb mip = {52'd0, eiptip, msip[3:0]};
     always_comb begin intr = 0;
@@ -1587,13 +1594,15 @@ module csr(input logic clk, input logic rst,
                  mideleg[i] & (level < 1 | level == 1 & mstatus[1])) // globally enabled
                 intr = {1'b1, 6'(i)}; end
     // some CSRs change can cause pipeline flush: mstatus, satp
-    always_comb csr_flush = wena &
-        (addr == 12'h300 | addr == 12'h100 | addr == 12'h180);
+    always_comb csr_flush = we &
+        (addr == 12'h300 | addr == 12'h100 | addr == 12'h180 |
+         addr == 12'h305 | addr == 12'h105);
+    always_comb csr_mstatus = addr == 12'h300 | addr == 12'h100 ? wres : mstatus;
     always_comb if (trapintos)
-             csr_tvec = wena & addr == 12'h105 ? wres & ~64'd2 : stvec;
-        else csr_tvec = wena & addr == 12'h305 ? wres & ~64'd2 : mtvec;
-    always_comb csr_mepc = wena & addr == 12'h341 ? wres : mepc;
-    always_comb csr_sepc = wena & addr == 12'h141 ? wres : sepc;
+             csr_tvec = we & addr == 12'h105 ? wres & ~64'd2 : stvec;
+        else csr_tvec = we & addr == 12'h305 ? wres & ~64'd2 : mtvec;
+    always_comb csr_mepc = we & addr == 12'h341 ? wres : mepc;
+    always_comb csr_sepc = we & addr == 12'h141 ? wres : sepc;
     always_comb csr_satp = level == 2'b11 ? 64'd0 : satp; // may not need forwarding
 endmodule
 

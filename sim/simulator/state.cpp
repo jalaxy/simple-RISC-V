@@ -33,7 +33,7 @@ bits &bits::operator|=(uint64_t x) { return this->data |= x, *this; }
 bits bits::range(uint8_t s, uint8_t e) const { return data << 63 - e >> 63 - e + s; }
 int64_t bits::sext(int w) const { return ((data >> w - 1) & 1 ? -1ull << w : 0) | data & ~(-1ull << w); }
 void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ~((1ull << e - s + 1ull) - 1ull << s)) |= x << s; }
-void bits::write(uint8_t i, uint64_t x) { (data &= ~(1 << i)) |= x << i; }
+void bits::write(uint8_t i, uint64_t x) { (data &= ~(1ull << i)) |= x << i; }
 
 memory::memory() {}
 memory::memory(const memory &b) { *this = b; }
@@ -94,6 +94,11 @@ uint8_t &memory::operator[](uint64_t addr)
 }
 memory &memory::operator=(const memory &b)
 {
+    for (auto p : this->ptr)
+        delete[] p;
+    this->base.clear();
+    this->size.clear();
+    this->ptr.clear();
     for (int i = 0; i < b.size.size(); i++)
         this->copy(b.ptr[i], b.size[i], b.base[i]);
     return *this;
@@ -647,7 +652,7 @@ delta_t next(state_t &s)
     delta_t ret;
     ret.level = s.level;
     ret.gprw = ret.memw = 0;
-    s.pc &= ~1ull;
+    ret.ldlocal = 0;
 
     /* interrupt */
     bool mintena = s.level < 3 || s.level == 3 && s.csr["mstatus"][3];
@@ -671,7 +676,7 @@ delta_t next(state_t &s)
         s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
         return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc);
     }
-    if ((s.pc & 0xfff) == 0xffe) // beyond page
+    if (idata[0] && idata[1] && (s.pc & 0xfff) == 0xffe) // beyond page
         idata = idata & 0xffff | (s.mem.ui32(ppc = paddr(s.mem, satp, s.pc + 2, su | 8)) << 16);
     if (ppc == -1)
     {
@@ -1018,6 +1023,8 @@ delta_t next(state_t &s)
             ret.gprv = (int64_t)(int32_t)ret.gprv;
         else if (funct3 == 0b110) // LWU
             ret.gprv = (uint32_t)ret.gprv;
+        ret.ldlocal = 1 << (funct3 & 3);
+        ret.ldaddr = pa;
         break;
     case 0b0000111: // LOAD-FP
         if (!fs)
@@ -1497,6 +1504,7 @@ delta_t next(state_t &s)
     }
 
     /* return state delta */
+    ret.pc &= ~1ull;
     if (ret.gpra == 0)
         ret.gprw = 0;
     ret.csr["mcycle"] = s.csr["mcycle"] + 1;
@@ -1504,7 +1512,15 @@ delta_t next(state_t &s)
     if (ret.csr.find("misa") != ret.csr.end()) // some WARL csr fields
         ret.csr.at("misa") = 0x14112d | (1ull << 63);
     if (ret.csr.find("mstatus") != ret.csr.end()) // some WARL csr fields
+    {
+        ret.csr.at("mstatus").write(6, 0);
+        ret.csr.at("mstatus").write(9, 10, 0);
         ret.csr.at("mstatus").write(32, 35, 0xa);
+        ret.csr.at("mstatus").write(63, ret.csr.at("mstatus").range(15, 16) == 3 ||
+                                            ret.csr.at("mstatus").range(13, 14) == 3); // SD bit
+    }
+    if (ret.csr.find("mtvec") != ret.csr.end())
+        ret.csr.at("mtvec").write(0, 1, 0);
     return ret;
 }
 
@@ -1550,9 +1566,10 @@ void apply(state_t &s, delta_t d)
  * @brief handle HTIF requests
  * @param mem memory working on
  * @param addr HTIF addressed
+ * @param pmem memory pointer that also require processing
  * @retval tohost exit call value ((code << 1) | 1)
  */
-uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
+uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs, memory *pmem)
 {
     /* handle HTIF requests */
     uint64_t tohost_dev = mem[addr.tohost + 7];
@@ -1574,7 +1591,6 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 arg2 = mem.ui64(magic_mem + 24); // filename size
                 arg3 = mem.ui64(magic_mem + 32); // flags
                 arg4 = mem.ui64(magic_mem + 40); // mode
-                mem[arg1 + arg2] = 0;
                 retval = openat(arg0, (char *)&mem[arg1], arg3, arg4);
             }
             else if (which == 0x39) // sysclose
@@ -1598,6 +1614,7 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 arg1 = mem.ui64(magic_mem + 16); // memory address
                 arg2 = mem.ui64(magic_mem + 24); // max read size
                 retval = read(arg0, &mem[arg1], arg2);
+                memcpy(&(*pmem)[arg1], &mem[arg1], retval);
             }
             else if (which == 0x40) // syswrite
             {
@@ -1617,6 +1634,8 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 arg1 = mem.ui64(magic_mem + 16); // memory address
                 arg2 = mem.ui64(magic_mem + 24); // read size
                 arg3 = mem.ui64(magic_mem + 32); // read offset
+                if (pmem)
+                    retval = pread(arg0, &(*pmem)[arg1], arg2, arg3);
                 retval = pread(arg0, &mem[arg1], arg2, arg3);
             }
             else if (which == 0x50) // sysfstat
@@ -1625,6 +1644,8 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 arg0 = mem.ui64(magic_mem + 8);  // file descriptor
                 arg1 = mem.ui64(magic_mem + 16); // memory address
                 retval = fstat(arg0, (struct stat *)&mem[arg1]);
+                if (pmem)
+                    fstat(arg0, (struct stat *)&(*pmem)[arg1]);
             }
             else if (which == 0x5d) // exit
                 return (mem.ui64(magic_mem + 8) << 1) | 1;
@@ -1635,12 +1656,20 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 arg0 = mem.ui64(magic_mem + 8);  // argument buffer address
                 arg1 = mem.ui64(magic_mem + 16); // argument buffer size
                 mem.ui64(arg0) = pkargs.size();
+                if (pmem)
+                    pmem->ui64(arg0) = pkargs.size();
                 uint64_t addr = arg0 + (pkargs.size() + 1) * 8;
                 for (int i = 0; i < pkargs.size(); i++)
                 {
                     mem.ui64(arg0 + (i + 1) * 8) = addr;
+                    if (pmem)
+                        pmem->ui64(arg0 + (i + 1) * 8) = addr;
                     if (addr - arg0 + strlen(pkargs[i]) + 1 <= arg1)
+                    {
                         memcpy(&mem[addr], pkargs[i], strlen(pkargs[i]) + 1);
+                        if (pmem)
+                            memcpy(&(*pmem)[addr], pkargs[i], strlen(pkargs[i]) + 1);
+                    }
                     addr += strlen(pkargs[i]) + 1;
                 }
                 if (addr - arg0 >= arg1)
@@ -1650,6 +1679,11 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
                 fprintf(stderr, "[Info] Unhandled proxied system call 0x%lx\n", which);
             mem.ui64(magic_mem) = retval;
             mem.ui64(addr.fromhost) = 1;
+            if (pmem)
+            {
+                pmem->ui64(magic_mem) = retval;
+                pmem->ui64(addr.fromhost) = 1;
+            }
         }
     }
     else if (tohost_dev == 1 && tohost_cmd == 1) // console write
@@ -1660,10 +1694,16 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
         fprintf(stderr, "[Info] Unrecognized HTIF command:\n  dev: 0x%lx  cmd: 0x%lx  data: 0x%lx\n",
                 tohost_dev, tohost_cmd, tohost_dat);
     mem.ui64(addr.tohost) = 0;
+    if (pmem)
+        pmem->ui64(addr.tohost) = 0;
     fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
     char ch; // receive character from stdin
     if (mem.ui64(addr.fromhost) == 0 && (ch = getchar()) != EOF)
+    {
         mem.ui64(addr.fromhost) = (1ull << 56) | ch;
+        if (pmem)
+            pmem->ui64(addr.fromhost) = (1ull << 56) | ch;
+    }
     fcntl(0, F_SETFL, fcntl(0, F_GETFL) & ~O_NONBLOCK);
     return 0;
 }
@@ -1677,8 +1717,8 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs)
 void print(uint64_t cycle, state_t &state, const delta_t &delta)
 {
     char s[256], lch[4] = {'U', 'S', 'H', 'M'};
-    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", cycle,
-            lch[state.level & 3], state.pc, state.ir, disas(state.ir).c_str());
+    sprintf(s, "[Debug] cycle %ld: %c@%lx: %8x %s", cycle, lch[state.level & 3], state.pc,
+            (state.ir & 3) == 3 ? state.ir : state.ir & 0xffff, disas(state.ir).c_str());
     if (strlen(s) < 63)
     {
         for (int i = strlen(s); i < 63; i++)
@@ -1827,25 +1867,25 @@ std::map<uint16_t, const char *> csrname = {
     {0x342, "mcause"},
     {0x343, "mtval"},
     {0x344, "mip"},
-    {0x3a0, "pmpcfg0"},
-    {0x3a1, "pmpcfg1"},
-    {0x3a2, "pmpcfg2"},
-    {0x3b0, "pmpaddr0"},
-    {0x3b1, "pmpaddr1"},
-    {0x3b2, "pmpaddr2"},
-    {0x3b3, "pmpaddr3"},
-    {0x3b4, "pmpaddr4"},
-    {0x3b5, "pmpaddr5"},
-    {0x3b6, "pmpaddr6"},
-    {0x3b7, "pmpaddr7"},
-    {0x3b8, "pmpaddr8"},
-    {0x3b9, "pmpaddr9"},
-    {0x3ba, "pmpaddr10"},
-    {0x3bb, "pmpaddr11"},
-    {0x3bc, "pmpaddr12"},
-    {0x3bd, "pmpaddr13"},
-    {0x3be, "pmpaddr14"},
-    {0x3bf, "pmpaddr15"},
+    // {0x3a0, "pmpcfg0"},
+    // {0x3a1, "pmpcfg1"},
+    // {0x3a2, "pmpcfg2"},
+    // {0x3b0, "pmpaddr0"},
+    // {0x3b1, "pmpaddr1"},
+    // {0x3b2, "pmpaddr2"},
+    // {0x3b3, "pmpaddr3"},
+    // {0x3b4, "pmpaddr4"},
+    // {0x3b5, "pmpaddr5"},
+    // {0x3b6, "pmpaddr6"},
+    // {0x3b7, "pmpaddr7"},
+    // {0x3b8, "pmpaddr8"},
+    // {0x3b9, "pmpaddr9"},
+    // {0x3ba, "pmpaddr10"},
+    // {0x3bb, "pmpaddr11"},
+    // {0x3bc, "pmpaddr12"},
+    // {0x3bd, "pmpaddr13"},
+    // {0x3be, "pmpaddr14"},
+    // {0x3bf, "pmpaddr15"},
     {0x7a0, "tselect"},
     {0x7a1, "tdata1"},
     {0x7a2, "tdata2"},

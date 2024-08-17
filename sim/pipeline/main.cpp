@@ -35,7 +35,8 @@ typedef struct
     uint32_t ir;
     uint8_t gpr, csr, mem;
     /* CSRs that may change when trap or return from trap */
-    uint64_t mexc, sexc, ret, mstatus, mcause, mepc, mtval, scause, sepc, stval;
+    uint64_t mexc, sexc, intr, ret, mstatus, misa, mtvec, mcause, mepc, mtval;
+    uint64_t stvec, scause, sepc, stval, mip, mcycle, minstret;
 } cmt_t;
 
 typedef struct
@@ -46,8 +47,10 @@ typedef struct
 int interrupt = 0;
 void intrhandler(int) { fprintf(stderr, "[Info] Interrupted\n"), interrupt = 1; }
 
-bool check(delta_t del, delta_t ref)
+bool check(delta_t del, delta_t ref, memory &localmem)
 {
+    if (del.level != ref.level || del.pc != ref.pc)
+        return false;
     del.memv &= (del.memw == 8 ? -1ul : (1ul << (del.memw & 0xf) * 8) - 1);
     ref.memv &= (ref.memw == 8 ? -1ul : (1ul << (ref.memw & 0xf) * 8) - 1);
     if (del.memw >> 4 == 0x8)
@@ -55,11 +58,16 @@ bool check(delta_t del, delta_t ref)
     if (del.gprw != ref.gprw || del.memw != ref.memw)
         return false;
     if (del.gprw && (del.gpra != ref.gpra || del.gprv != ref.gprv))
-        return false;
+        if (!(ref.ldlocal && del.gprv == localmem.ui64(ref.ldaddr)))
+            // in load value axiom of RVWMO, the load value can be not only the global
+            // memory value, but also local store value
+            // this could happen when setting HTIF fromhost by host machine
+            return false;
     if (del.memw && (del.mema != ref.mema || del.memv != ref.memv))
         return false;
     ref.csr.erase("mcycle");
     ref.csr.erase("minstret");
+    ref.csr.erase("mip");
     for (auto i : ref.csr)
         if (del.csr.find(i.first) == del.csr.end() || del.csr[i.first] != i.second)
             return false;
@@ -323,7 +331,8 @@ int main(int argc, char *argv[])
     std::queue<dcache_req_t> dreq;
     std::queue<cmt_t> cmts;
     std::queue<del_t> gprs, csrs, mems;
-    uint64_t cycle = 0;
+    memory localmem = mem; // record local store values
+    uint64_t cycle = 0, htifexit = 0;
     const char *exitcause = NULL;
     uint8_t exitcode;
     signal(SIGINT, intrhandler);
@@ -336,10 +345,10 @@ int main(int argc, char *argv[])
             dut->clk = 0, dut->eval(), trace && cycle >= cmd.mintime ? trace->dump(wt++), 0 : 0;
             // posedge clock
             if (dut->icache_rqst) // record stats before posedge
-                ireq.push({1, paddr(mem, dut->csr_satp, dut->icache_addr)});
+                ireq.push({1, paddr(mem, dut->csr_satp, dut->icache_addr, 1 << 3)});
             if (dut->dcache_rqst)
                 dreq.push({dut->dcache_rqst, dut->dcache_bits, dut->dcache_wena, dut->dcache_rsrv,
-                           paddr(mem, dut->csr_satp, dut->dcache_addr, dut->dcache_wena),
+                           paddr(mem, dut->csr_satp, dut->dcache_addr, dut->dcache_wena << 2),
                            dut->dcache_wdat, dut->dcache_addr});
             while (dut->icache_flsh && !ireq.empty())
                 ireq.pop();
@@ -365,8 +374,8 @@ int main(int argc, char *argv[])
                 else
                     dut->dcache_rdat = mem.ui64(dreq.front().addr);
             dut->dcache_pgft = 0;
-            if (dreq.front().rqst && dreq.front().addr == -1)
-                dut->dcache_pgft = dreq.front().wena ? 2 : 1; // [1:0] -> [WPF,RPF]
+            if (dreq.front().rqst && dreq.front().addr == -1) // [1:0] -> [WPF,RPF]
+                dut->dcache_pgft = dreq.front().wena || dreq.front().rsrv == 2 ? 2 : 1;
             // bits width (funct3) decode: 00b -> 8  01b -> 16  10b -> 32  11b -> 64
             uint64_t width = 1 << (dreq.front().bits & 3); // process data of dcache response
             uint64_t mask = width < 8 ? (1llu << 8 * width) - 1 : ~0llu;
@@ -383,6 +392,8 @@ int main(int argc, char *argv[])
                     if (dreq.front().rsrv != 1 || rsrv[dreq.front().addr])
                     { // check SC
                         uint64_t addr = dreq.front().addr, data = dreq.front().wdata;
+                        if (mem.issegfault(mem[addr]))
+                            mem.add(1, addr);
                         for (int j = 0; j < width; j++)
                             mem[addr + j] = bits(data).range(j * 8, j * 8 + 7);
                         if (dreq.front().rsrv == 1)
@@ -395,7 +406,7 @@ int main(int argc, char *argv[])
             // evaluate again
             dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
             ireq.pop(), dreq.pop();
-            // extract delta
+            // extract commits
             for (int i = 0; i < 4; i++)
                 if (dut->cmt[i])
                     cmts.push({.cycle = cycle,
@@ -407,35 +418,53 @@ int main(int argc, char *argv[])
                                .mem = dut->cmt_mem[i],
                                .mexc = dut->cmt_mexc && (i == 3 || !dut->cmt[i + 1]), // last commit
                                .sexc = dut->cmt_sexc && (i == 3 || !dut->cmt[i + 1]),
+                               .intr = dut->cmt_int,
                                .ret = dut->cmt_ret && (i == 3 || !dut->cmt[i + 1]),
                                .mstatus = dut->cmt_mstatus,
+                               .misa = dut->cmt_misa,
+                               .mtvec = dut->cmt_mtvec,
                                .mcause = dut->cmt_mcause,
                                .mepc = dut->cmt_mepc,
                                .mtval = dut->cmt_mtval,
+                               .stvec = dut->cmt_stvec,
                                .scause = dut->cmt_scause,
                                .sepc = dut->cmt_sepc,
-                               .stval = dut->cmt_stval});
+                               .stval = dut->cmt_stval,
+                               .mip = dut->cmt_mip,
+                               .mcycle = dut->cmt_mcycle,
+                               .minstret = dut->cmt_minstret});
             for (int i = 0; i < 4; i++)
                 if (dut->del_gprw[i])
                     gprs.push({.w = 1, .a = dut->del_gpra[i], .v = dut->del_gprv[i]});
             if (dut->del_csrw)
                 csrs.push({.w = 1, .a = dut->del_csra, .v = dut->del_csrv});
-            if (dut->del_memw)
-                mems.push({.w = dut->del_memw, .a = dut->del_mema, .v = dut->del_memv});
+            uint64_t va;
+            if (dut->del_memw && (va = paddr(mem, dut->csr_satp, dut->del_mema, 1 << 2)) != -1ull)
+                mems.push({.w = dut->del_memw, .a = va, .v = dut->del_memv});
             cycle++;
             emptytimes++;
             if (cmd.filetype == 1 && emptytimes > 1024)
                 exitcause = "no commits within long time (hex mode)", exitcode = 255;
+            if (cycle > cmd.maxtime)
+                exitcause = "reaching maximum cycle", exitcode = 0;
+            // HTIF requests handler
+            if ((htifexit = htif(mem, htifaddr, cmd.args, sim ? &sim->mem : 0)) & 1)
+                exitcause = "HTIF exit call", exitcode = htifexit >> 1;
         }
         else // check deltas
         {
-            state_t stt;
+            state_t stt; // for print
             delta_t del;
             uint64_t cyc = cmts.front().cycle;
-            uint8_t mexc = cmts.front().mexc, sexc = cmts.front().sexc, ret = cmts.front().ret;
+            uint8_t mexc = cmts.front().mexc, sexc = cmts.front().sexc;
+            uint8_t intr = cmts.front().intr, ret = cmts.front().ret;
             stt.level = cmts.front().level;
             stt.pc = cmts.front().pc;
             stt.ir = cmts.front().ir;
+            if (intr)
+                sim ? sim->csr["mip"] = cmts.front().mip, 0 : 0;
+            sim ? sim->csr["mcycle"] = cmts.front().mcycle, 0 : 0;
+            sim ? sim->csr["minstret"] = cmts.front().minstret, 0 : 0;
             if (cmts.front().gpr)
                 del.gprw = 1, del.gpra = gprs.front().a, del.gprv = gprs.front().v, gprs.pop();
             else
@@ -446,15 +475,18 @@ int main(int argc, char *argv[])
                 del.mema = mems.front().a;
                 del.memv = mems.front().v;
                 mems.pop();
-                if (del.memw >> 4 == 0xc && del.gprv == 1) // failed SC
+                if (del.memw >> 4 == 0xc && del.gprw && del.gprv == 1) // failed SC
                     del.memw = 0;
             }
             else
                 del.memw = 0;
             if (cmts.front().csr)
             {
-                if (csrname.find(csrs.front().a) != csrname.end())
-                    del.csr[csrname[csrs.front().a]] = csrs.front().v;
+                uint64_t a = csrs.front().a;
+                if (a == 0x100 || a == 0x144 || a == 0x104) // sstatus/sip/sie
+                    a += 0x200;
+                if (csrname.find(a) != csrname.end())
+                    del.csr[csrname[a]] = csrs.front().v;
                 csrs.pop();
             }
             cmts.pop();
@@ -462,6 +494,12 @@ int main(int argc, char *argv[])
             del.pc = cmts.front().pc;
             if (del.csr.find("mstatus") != del.csr.end() || ret)
                 del.csr["mstatus"] = cmts.front().mstatus;
+            if (del.csr.find("misa") != del.csr.end())
+                del.csr["misa"] = cmts.front().misa;
+            if (del.csr.find("mtvec") != del.csr.end())
+                del.csr["mtvec"] = cmts.front().mtvec;
+            if (del.csr.find("stvec") != del.csr.end())
+                del.csr["stvec"] = cmts.front().stvec;
             if (mexc)
             {
                 del.csr["mstatus"] = cmts.front().mstatus;
@@ -479,7 +517,7 @@ int main(int argc, char *argv[])
             if (sim)
             {
                 delta_t delsim = next(*sim);
-                if (!check(del, delsim))
+                if (!check(del, delsim, localmem))
                 {
                     fprintf(stderr, "[Debug] ------ Difference detected ------\n");
                     fprintf(stderr, "[Debug] DUT/SIM:\n");
@@ -489,13 +527,16 @@ int main(int argc, char *argv[])
                     for (auto i : del.csr)
                         if (i.first != "mcycle" && i.first != "minstret")
                             fprintf(stderr, " %s: %lx", i.first.c_str(), (uint64_t)i.second);
-                    fprintf(stderr, "\n[Debug] SIM CSRs:");
+                    fprintf(stderr, " npc: %lx\n", del.pc);
+                    fprintf(stderr, "[Debug] SIM CSRs:");
                     for (auto i : delsim.csr)
                         if (i.first != "mcycle" && i.first != "minstret")
                             fprintf(stderr, " %s: %lx", i.first.c_str(), (uint64_t)i.second);
-                    fprintf(stderr, "\n[Debug] ---------------------------------\n");
+                    fprintf(stderr, " npc: %lx\n", delsim.pc);
+                    fprintf(stderr, "[Debug] ---------------------------------\n");
                     exitcause = "checking failure", exitcode = 255;
                 }
+                localmem.ui64(del.mema) = del.memv;
                 apply(*sim, del);
             }
             if (cyc >= cmd.mintime)
@@ -507,13 +548,9 @@ int main(int argc, char *argv[])
             if (stabletimes > 16)
                 exitcause = "reaching stable state (hex mode)", exitcode = 0;
         }
-        // HTIF requests handler
-        uint64_t htifexit = htif(mem, htifaddr, cmd.args);
-        if (htifexit & 1)
-            exitcause = "HTIF exit call", exitcode = htifexit >> 1;
-        if (cycle > cmd.maxtime)
-            exitcause = "reaching maximum cycle", exitcode = 0;
     }
+    if (interrupt)
+        exitcause = "SIGINT", exitcode = 130;
     if (cmd.filetype == 1 && cmd.verbose)
         disasmem(&mem[0x400000], hexsz);
 
