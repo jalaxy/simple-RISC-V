@@ -58,6 +58,7 @@ bool memory::add(uint64_t size, uint64_t base)
     this->ptr.push_back(new (std::nothrow) uint8_t[size]);
     if (this->ptr.back() == 0)
         return this->size.back() = 0, false;
+    memset(this->ptr.back(), 0, size);
     for (int i = 0; i < this->size.size() - 1; i++)
         if (this->base[i] >= base && this->base[i] + this->size[i] <= base + size)
         {
@@ -597,6 +598,10 @@ std::string disas(uint32_t ir)
         sprintf(ret, "[instruction page fault]");
     if (ir == 0x00002013)
         sprintf(ret, "[instruction address misaligned]");
+    const char *intlevel[4] = {"user", "supervisor", "", "machine"};
+    const char *intname[4] = {"software", "timer", "external"};
+    if ((ir & 0xf00fffff) == 0x80002013)
+        sprintf(ret, "[%s %s interrupt]", intlevel[(ir >> 20) & 3], intname[(ir >> 22) & 3]);
     return ret;
 }
 
@@ -661,9 +666,15 @@ delta_t next(state_t &s)
         for (int i = 0; i < 64; i++)
             if (s.csr["mie"][i] && s.csr["mip"][i])
                 if (s.csr["mideleg"][i] && sintena)
+                {
+                    s.ir = 0x80002013 | (i << 20); // HINT for interrupt
                     return genx(s, ret, 1, (1ull << 63) | i);
+                }
                 else if (!s.csr["mideleg"][i] && mintena)
+                {
+                    s.ir = 0x80002013 | (i << 20);
                     return genx(s, ret, 3, (1ull << 63) | i);
+                }
 
     /* fetch instruction and decode compressed instruction */
     bits medeleg = s.level <= 1 ? s.csr["medeleg"] : bits();
@@ -1456,11 +1467,14 @@ delta_t next(state_t &s)
                     addr -= 0x100;
             if (addr == 0x100 || addr == 0x144 || addr == 0x104) // sstatus/sip/sie
                 addr += 0x200;
-            if (csrname.find(addr) == csrname.end())
+            if (csrname.find(addr) == csrname.end() && addr != 0xb01) // except mtime
                 return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
-            ret.gprv = s.csr[csrname[addr]];
+            if (addr == 0xb01) // mtime
+                ret.gprv = s.mem.ui64(s.csr["mtime"]);
+            else
+                ret.gprv = s.csr[csrname[addr]];
             rs1 = ir[14] ? (uint64_t)ir.range(15, 19) : rs1;
             uint64_t wvalue;
             if (ir.range(12, 13) == 1) // CSRRW
@@ -1474,7 +1488,8 @@ delta_t next(state_t &s)
             if (ir.range(20, 31) >= 0xc00 && ir.range(20, 31) < 0xc20) // write read-only counters
                 if (wvalue != ret.gprv)
                     return genx(s, ret, medeleg[2] ? 1 : 3, 2, idata);
-            ret.csr[csrname[addr]] = wvalue;
+            if (addr != 0xb01) // except mtime
+                ret.csr[csrname[addr]] = wvalue;
         }
         else if ((ir & ~(1 << 20)) == 0x73) // ECALL / EBREAK
             return genx(s, ret, medeleg[ir[20] ? 3 : s.level + 8] ? 1 : 3,
@@ -1613,7 +1628,11 @@ uint64_t htif(memory &mem, htifaddr_t &addr, std::vector<const char *> &pkargs, 
                 arg1 = mem.ui64(magic_mem + 16); // memory address
                 arg2 = mem.ui64(magic_mem + 24); // max read size
                 retval = read(arg0, &mem[arg1], arg2);
-                memcpy(&(*pmem)[arg1], &mem[arg1], retval);
+                if (pmem)
+                {
+                    pmem->add(1, arg1);
+                    memcpy(&(*pmem)[arg1], &mem[arg1], retval);
+                }
             }
             else if (which == 0x40) // syswrite
             {

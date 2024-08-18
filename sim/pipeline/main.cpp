@@ -29,7 +29,7 @@ typedef struct
 
 typedef struct
 {
-    uint64_t cycle;
+    uint64_t cycle, time;
     uint8_t level;
     uint64_t pc;
     uint32_t ir;
@@ -66,11 +66,18 @@ bool check(delta_t del, delta_t ref, memory &localmem)
     if (del.memw && (del.mema != ref.mema || del.memv != ref.memv))
         return false;
     ref.csr.erase("mcycle");
+    del.csr.erase("mcycle");
     ref.csr.erase("minstret");
+    del.csr.erase("minstret");
     ref.csr.erase("mip");
+    del.csr.erase("mip");
     for (auto i : ref.csr)
-        if (del.csr.find(i.first) == del.csr.end() || del.csr[i.first] != i.second)
+        if (del.csr.find(i.first) != del.csr.end() & del.csr[i.first] == i.second)
+            del.csr.erase(i.first);
+        else
             return false;
+    if (!del.csr.empty())
+        return false;
     return true;
 }
 
@@ -317,7 +324,7 @@ int main(int argc, char *argv[])
     VerilatedVcdC *trace = cmd.vcd ? new (std::nothrow) VerilatedVcdC : NULL;
     uint64_t wt = 0; // waveform record time
     if (sim)
-        sim->pc = entry, sim->mem = mem;
+        sim->pc = entry, sim->mem = mem, sim->csr["mtime"] = mtime;
     if (trace)
         Verilated::traceEverOn(true), dut->trace(trace, 5), trace->open(cmd.vcd);
     // reset
@@ -357,9 +364,9 @@ int main(int argc, char *argv[])
             ireq.empty() ? ireq.push({0}), 0 : 0;
             dreq.empty() ? dreq.push({0}), 0 : 0;
             dut->clk = 1, dut->eval(); // clock changes first, other signals change after clk
-            if (cycle % 16 == 0)       // set interrupt
-                mem.ui64(mtime)++, sim ? sim->mem.ui64(mtime)++ : 0;
-            dut->mtime = mtime;
+            dut->mtime = mem.ui64(mtime);
+            if (cycle % 16 == 0) // set interrupt
+                mem.ui64(mtime)++;
             if (mtime > mtimecmp)
                 dut->eiptip |= 1 << 3;
             dut->icache_done = ireq.front().rqst; // handle an icache request
@@ -372,7 +379,11 @@ int main(int argc, char *argv[])
                 if (dreq.front().addr == -1)
                     dut->dcache_rdat = dreq.front().vaddr; // fault vaddr in rdat as tval
                 else
+                {
+                    if (mem.issegfault(mem[dreq.front().addr]))
+                        mem.add(1, dreq.front().addr);
                     dut->dcache_rdat = mem.ui64(dreq.front().addr);
+                }
             dut->dcache_pgft = 0;
             if (dreq.front().rqst && dreq.front().addr == -1) // [1:0] -> [WPF,RPF]
                 dut->dcache_pgft = dreq.front().wena || dreq.front().rsrv == 2 ? 2 : 1;
@@ -392,8 +403,6 @@ int main(int argc, char *argv[])
                     if (dreq.front().rsrv != 1 || rsrv[dreq.front().addr])
                     { // check SC
                         uint64_t addr = dreq.front().addr, data = dreq.front().wdata;
-                        if (mem.issegfault(mem[addr]))
-                            mem.add(1, addr);
                         for (int j = 0; j < width; j++)
                             mem[addr + j] = bits(data).range(j * 8, j * 8 + 7);
                         if (dreq.front().rsrv == 1)
@@ -410,6 +419,7 @@ int main(int argc, char *argv[])
             for (int i = 0; i < 4; i++)
                 if (dut->cmt[i])
                     cmts.push({.cycle = cycle,
+                               .time = dut->mtime,
                                .level = dut->cmt_level[i],
                                .pc = dut->cmt_pc[i],
                                .ir = dut->cmt_ir[i],
@@ -461,10 +471,10 @@ int main(int argc, char *argv[])
             stt.level = cmts.front().level;
             stt.pc = cmts.front().pc;
             stt.ir = cmts.front().ir;
-            if (intr)
-                sim ? sim->csr["mip"] = cmts.front().mip, 0 : 0;
+            sim ? sim->csr["mip"] = intr ? cmts.front().mip : 0, 0 : 0;
             sim ? sim->csr["mcycle"] = cmts.front().mcycle, 0 : 0;
             sim ? sim->csr["minstret"] = cmts.front().minstret, 0 : 0;
+            sim ? sim->mem.ui64(mtime) = cmts.front().time, 0 : 0;
             if (cmts.front().gpr)
                 del.gprw = 1, del.gpra = gprs.front().a, del.gprv = gprs.front().v, gprs.pop();
             else
@@ -485,7 +495,7 @@ int main(int argc, char *argv[])
                 uint64_t a = csrs.front().a;
                 if (a == 0x100 || a == 0x144 || a == 0x104) // sstatus/sip/sie
                     a += 0x200;
-                if (csrname.find(a) != csrname.end())
+                if (!mexc && !sexc && csrname.find(a) != csrname.end())
                     del.csr[csrname[a]] = csrs.front().v;
                 csrs.pop();
             }

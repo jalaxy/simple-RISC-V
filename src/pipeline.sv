@@ -1499,7 +1499,7 @@ module csr(input logic clk, input logic rst,
     always_comb rval = val[63:0];
     always_comb eout = wena & val[64] | // unimplemented CSRs
         wena & addr[9:8] > level | // violate privilege
-        wena & addr == 12'hc00 & rval != wres; // cycle (read-only)
+        wena & addr >= 12'hc00 & addr < 12'hc20 & rval != wres; // read-only
     always_comb we = wena & ~eout;
     always_ff @(posedge clk) begin
         // switch priority mode
@@ -1566,9 +1566,9 @@ module csr(input logic clk, input logic rst,
         if (rst) minstret <= 0; else minstret <=
             (we & addr == 12'hb02 ? wres : minstret) + (mcountinhibit[2] ? 0 : nret);
         for (int i = 3; i < 32; i++) if (rst) mhpmcounter[i] <= 0;
-            else if (we & addr[11:5] == 7'h58) mhpmcounter[i] <= wres;
         for (int i = 3; i < 32; i++) if (rst) mhpmevent[i] <= 0;
-            else if (we & addr[11:5] == 7'h58) mhpmevent[i] <= wres;
+        if (we & addr > 12'hb02 & addr < 12'hb20) mhpmcounter[addr[4:0]] <= wres;
+        if (we & addr > 12'h322 & addr < 12'h340) mhpmevent[addr[4:0]] <= wres;
         if (rst) mcounteren <= 0; else if (we & addr == 12'h306) mcounteren <= wres;
         if (rst) mcountinhibit <= 0;
         else if (we & addr == 12'h320) mcountinhibit <= wres;

@@ -112,6 +112,8 @@ module stats(
             del_memw = 8'(1 << dcache_bits[1:0]);
         if (|dcache_rqst & dcache_rsrv == 2'b1)
             del_memw = {1'b1, dcache_wena, 2'd0, 4'(1 << dcache_bits[1:0])};
+        if (cmt_int) cmt_ir[0] = 32'h80002013 |
+            (32'(pipeline_inst.wb_stage_inst.intr[5:0]) << 20);
     end
 
     /* other stats */
