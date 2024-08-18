@@ -1597,7 +1597,7 @@ module csr(input logic clk, input logic rst,
     always_comb csr_flush = we &
         (addr == 12'h300 | addr == 12'h100 | addr == 12'h180 |
          addr == 12'h305 | addr == 12'h105);
-    always_comb csr_mstatus = addr == 12'h300 | addr == 12'h100 ? wres : mstatus;
+    always_comb csr_mstatus = we & (addr == 12'h300 | addr == 12'h100) ? wres : mstatus;
     always_comb if (trapintos)
              csr_tvec = we & addr == 12'h105 ? wres & ~64'd2 : stvec;
         else csr_tvec = we & addr == 12'h305 ? wres & ~64'd2 : mtvec;

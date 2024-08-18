@@ -125,12 +125,12 @@ int main(int argc, char *argv[])
     {
         printf("Usage: exec [options] file [arguments]\n");
         printf("Available options:\n");
-        printf("    -bin: (force) input file as binary file\n");
-        printf("    -hex: (force) input file as hex text file\n");
-        printf("    -elf: (default) input file as RISC-V ELF executable\n");
-        printf("    -w `waveform`: output waveform to `waveform`\n");
+        printf("    -bin: (force) load binary file\n");
+        printf("    -hex: (force) load hex text file\n");
+        printf("    -elf: (default) load RISC-V ELF executable\n");
         printf("    -dtb `binary`: specify device tree binary\n");
         printf("    -initrd `binary`: specify initial rootfs\n");
+        printf("    -w `waveform`: output waveform to `waveform`\n");
         printf("    -t `t1` `t2`: simulation time between `t1` and `t2`\n");
         printf("    -s: run and check with simulator\n");
         printf("    -v: verbose mode\n");

@@ -1304,12 +1304,11 @@ delta_t next(state_t &s)
             break;
         case 0b00100:
             if (funct3 == 0) // FSGNJ
-                ret.gprv = ir[25] ? bits(ds2 < 0 ? -ds1 : ds1) : bits(ss2 < 0 ? -ss1 : ss1);
+                ds1 = fabs(ds1), ss1 = fabsf(ss1);
             else if (funct3 == 1) // FSGNJN
-                ret.gprv = ir[25] ? bits(ds2 < 0 ? ds1 : -ds1) : bits(ss2 < 0 ? ss1 : -ss1);
-            else if (funct3 == 2) // FSGNJX
-                ret.gprv = ir[25] ? bits(ds1 < 0 ^ ds2 < 0 ? -ds1 : ds1)
-                                  : bits(ss1 < 0 ^ ss2 < 0 ? -ss1 : ss1);
+                ds1 = -fabs(ds1), ss1 = -fabsf(ss1);
+            if (funct3 == 0 || funct3 == 1 || funct3 == 2) // FSGNJ[NX]
+                ret.gprv = ir[25] ? bits(ds2 < 0 ? -ds1 : ds1) : bits(ss2 < 0 ? -ss1 : ss1);
             break;
         case 0b00101:
             if (funct3 == 0) // FMIN
