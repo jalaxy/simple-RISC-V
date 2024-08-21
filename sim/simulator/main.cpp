@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
     while (!interrupt && cycle <= cmd.maxtime)
     {
         /* set interrupts */
-        if (cycle % 10 == 0) // increase mtime
+        if (cycle % 4 == 0) // increase mtime
             s.mem.ui64(s.csr["mtime"])++;
         s.csr["mip"].write(7, s.mem.ui64(s.csr["mtime"]) >= s.mem.ui64(s.csr["mtimecmp"]));
 

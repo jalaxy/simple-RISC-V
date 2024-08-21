@@ -35,7 +35,7 @@ int64_t bits::sext(int w) const { return ((data >> w - 1) & 1 ? -1ull << w : 0) 
 void bits::write(uint8_t s, uint8_t e, uint64_t x) { (data &= ~((1ull << e - s + 1ull) - 1ull << s)) |= x << s; }
 void bits::write(uint8_t i, uint64_t x) { (data &= ~(1ull << i)) |= x << i; }
 
-memory::memory() {}
+memory::memory() { segfault = 0; }
 memory::memory(const memory &b) { *this = b; }
 memory::~memory()
 {
@@ -89,9 +89,13 @@ bool memory::read(FILE *fp, uint64_t size, uint64_t base)
 uint8_t &memory::operator[](uint64_t addr)
 {
     for (int i = 0; i < size.size(); i++)
-        if (base[i] <= addr && addr < base[i] + size[i])
+        if (base[i] <= addr && addr - base[i] < size[i])
             return *(ptr[i] + addr - base[i]);
-    return segfault;
+    add(8192, addr);
+    for (int i = 0; i < size.size(); i++)
+        if (base[i] <= addr && addr - base[i] < size[i])
+            return *(ptr[i] + addr - base[i]);
+    return *(uint8_t *)&segfault;
 }
 memory &memory::operator=(const memory &b)
 {
@@ -104,11 +108,10 @@ memory &memory::operator=(const memory &b)
         this->copy(b.ptr[i], b.size[i], b.base[i]);
     return *this;
 }
-uint8_t &memory::ui8(uint64_t addr) { return (*this)[addr]; }
+uint8_t &memory::ui8(uint64_t addr) { return *(uint8_t *)&(*this)[addr]; }
 uint16_t &memory::ui16(uint64_t addr) { return *(uint16_t *)&(*this)[addr]; }
 uint32_t &memory::ui32(uint64_t addr) { return *(uint32_t *)&(*this)[addr]; }
 uint64_t &memory::ui64(uint64_t addr) { return *(uint64_t *)&(*this)[addr]; }
-bool memory::issegfault(const uint8_t &x) { return &x == &segfault; }
 
 /**
  * @brief address translation
@@ -681,18 +684,21 @@ delta_t next(state_t &s)
     uint64_t su = s.level == 0 ? 0x100 : (s.level == 1 ? 0x200 : 0);
     uint64_t satp = s.level == 3 ? 0 : (uint64_t)s.csr["satp"];
     uint64_t ppc = paddr(s.mem, satp, s.pc, su | 8); // require X permission
-    bits idata = s.mem.ui32(ppc), ir;
     if (ppc == -1)
     {
         s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
         return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc);
     }
-    if (idata[0] && idata[1] && (s.pc & 0xfff) == 0xffe) // beyond page
-        idata = idata & 0xffff | (s.mem.ui32(ppc = paddr(s.mem, satp, s.pc + 2, su | 8)) << 16);
-    if (ppc == -1)
+    bits idata = s.mem.ui32(ppc), ir;
+    if (idata[0] && idata[1])
     {
-        s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
-        return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc + 2);
+        if ((ppc = paddr(s.mem, satp, s.pc + 2, su | 8)) == -1)
+        {
+            s.ir = 0x00c02013; // HINT for instruction page fault(SLTI zero, zero, 12)
+            return genx(s, ret, medeleg[12] ? 1 : 3, 12, s.pc + 2);
+        }
+        if ((s.pc & 0xfff) == 0xffe) // beyond page
+            idata = idata & 0xffff | (s.mem.ui32(ppc) << 16);
     }
     if (s.csr["mstatus"][17] && s.csr["mstatus"].range(11, 12) < 3) // MPRV bit in mstatus
     {
@@ -1127,6 +1133,9 @@ delta_t next(state_t &s)
                 return genx(s, ret, medeleg[15] ? 1 : 3, 15, rs1); // store PF
             ret.gprw = 1;
             ret.gpra = ir.range(7, 11);
+            if (s.rsrv.find(pa) == s.rsrv.end())
+                for (int i = 0; i < 8; i++)
+                    s.rsrv[pa + i] = 0;
             if (s.rsrv[pa + 0] && s.rsrv[pa + 1] &&
                 s.rsrv[pa + 2] && s.rsrv[pa + 3] &&
                 (funct3 == 0b010 || s.rsrv[pa + 4] && s.rsrv[pa + 5] &&
@@ -1562,8 +1571,6 @@ void apply(state_t &s, delta_t d)
         for (int i = 0; i < d.memw; i++)
             s.rsrv[d.mema + i] = 0;
     }
-    if (d.memw && s.mem.issegfault(s.mem[d.mema]))
-        s.mem.add(1, d.mema);
     if (d.memw == 1)
         s.mem.ui8(d.mema) = d.memv;
     else if (d.memw == 2)

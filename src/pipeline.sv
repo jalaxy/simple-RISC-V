@@ -182,7 +182,7 @@ typedef struct packed {
 module pipeline(
     input logic clk,
     input logic rst,
-    input logic [7:0] eiptip,
+    input logic [63:0] mip_ext,
     input logic [63:0] mtime,
 
     output logic [63:0] csr_satp,
@@ -291,7 +291,7 @@ module pipeline(
     fpu fpu_inst(.clk(clk), .rst(rst), .flush(redir), .ena(fpu_ena),
         .rqst(fpu_rqst), .done(fpu_done), .r(fpu_r), .e(fpu_exc));
     csr csr_inst(.clk(clk), .rst(rst),
-        .eiptip(eiptip), .mtime(mtime), .addr(csr_addr),
+        .mip_ext(mip_ext), .mtime(mtime), .addr(csr_addr),
         .wena(csr_wena), .rval(csr_rval), .wval(csr_wval), .func(csr_func),
         .eout(csr_excp), .nret(nret), .ret(ret), .ein(excep), .cause(cause),
         .epc(epc), .tval(tval), .csr_flush(csr_flush), .intr(intr),
@@ -830,9 +830,9 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
         always_comb rval = frompt ? 0 : rvalue[g];
         logic [`EX_END-1:0] op;
         logic [63:0] a, b;
-        logic jump;
+        logic jump, eq, lt, ltu;
         logic [63:0] jpc;
-        logic [64:0] sub, res;
+        logic [64:0] res;
         logic [63:0] add, sll, srl, sra;
         logic [2:0] bflag;
         mul_rqst_t mul_rqst; div_rqst_t div_rqst;
@@ -847,12 +847,14 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             if (in.iword & (in.exop[`EX_SLL] | in.exop[`EX_SRL] | in.exop[`EX_SRA]))
                 b[5] = 0;
         end
-        always_comb sub = {1'b0, a} - {1'b0, b};
         always_comb add = a + b;
         always_comb sll = a << b[5:0];
         always_comb srl = a >> b[5:0];
         always_comb sra = $signed($signed(a) >>> b[5:0]);
-        always_comb bflag = {~|sub, sub[63], sub[64]}; // zero, negative, carry
+        always_comb eq = a == b;
+        always_comb lt = $signed(a) < $signed(b);
+        always_comb ltu = a < b;
+        always_comb bflag = {eq, lt, ltu}; // zero, negative, carry
         always_comb if (op[`EX_CSR]) pt = 0;
             else if (lsu) pt = in.valid & rval[0][64];
             else pt = in.valid & (rval[0][64] | rval[1][64]);
@@ -921,17 +923,17 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
         end
         always_comb begin
             res = {65{op[`EX_ADD]}}  & {1'b0, add} |
-                  {65{op[`EX_SUB]}}  & {1'b0, sub[63:0]} |
+                  {65{op[`EX_SUB]}}  & {1'b0, a - b} |
                   {65{op[`EX_SLL]}}  & {1'b0, sll} |
                   {65{op[`EX_SRL]}}  & {1'b0, srl} |
                   {65{op[`EX_SRA]}}  & {1'b0, sra} |
-                  {65{op[`EX_SLT]}}  & {64'd0, sub[63]} |
-                  {65{op[`EX_SLTU]}} & {64'd0, sub[64]} |
+                  {65{op[`EX_SLT]}}  & {64'd0, lt} |
+                  {65{op[`EX_SLTU]}} & {64'd0, ltu} |
                   {65{op[`EX_XOR]}} & {1'b0, a ^ b} |
                   {65{op[`EX_OR]}}  & {1'b0, a | b} |
                   {65{op[`EX_AND]}} & {1'b0, a & b} |
-                  {65{op[`EX_MIN]}} & {1'b0, (in.isign ? sub[63] : sub[64]) ? a : b} |
-                  {65{op[`EX_MAX]}} & {1'b0, (in.isign ? sub[63] : sub[64]) ? b : a};
+                  {65{op[`EX_MIN]}} & {1'b0, (in.isign ? lt : ltu) ? a : b} |
+                  {65{op[`EX_MAX]}} & {1'b0, (in.isign ? lt : ltu) ? b : a};
             if (in.iword) res[63:0] = {{32{res[31]}}, res[31:0]};
             if (pt | mul | div | fpu | lsu & ~op[`EX_FENCE])
                 res = {1'b1, {63-`lgCQSZ{1'd0}}, in.cqid};
@@ -1438,7 +1440,7 @@ module arbiter(
 endmodule
 
 module csr(input logic clk, input logic rst,
-    input logic [7:0] eiptip, input [63:0] mtime,
+    input logic [63:0] mip_ext, input [63:0] mtime,
     input logic [11:0] addr, output logic [63:0] rval,
     input logic wena, input logic [63:0] wval, input logic [2:0] func,
     input logic [63:0] nret, output logic eout,
@@ -1452,7 +1454,7 @@ module csr(input logic clk, input logic rst,
     logic [1:0] level; // 00 -> U  01 -> S  11 -> M
     logic [63:0] wres; logic [64:0] val; logic trapintos, we;
     logic [63:0] misa, mvendorid, marchid, mimpid, mhartid;
-    logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, msip, mie;
+    logic [63:0] mstatus, mtvec, medeleg, mideleg, mip, mip_base, mie;
     logic [63:0] mcycle, minstret, mhpmcounter[31:0], mhpmevent[31:0];
     logic [63:0] mcounteren, mcountinhibit, mscratch, mepc, mcause, mtval;
     logic [63:0] stvec, scounteren, sscratch;
@@ -1557,8 +1559,8 @@ module csr(input logic clk, input logic rst,
         if (rst) medeleg <= 0; else if (we & addr == 12'h302) begin
             medeleg <= wres; medeleg[11] <= 0; end
         if (rst) mideleg <= 0; else if (we & addr == 12'h303) mideleg <= wres;
-        if (rst) msip <= 0; else if (we & (addr == 12'h344 | addr == 12'h144))
-            {msip[3], msip[1:0]} <= {wres[3], wres[1:0]};
+        if (rst) mip_base <= 0; else if (we & (addr == 12'h344 | addr == 12'h144))
+            mip_base <= wres;
         if (rst) mie <= 0; else if (we & (addr == 12'h304 | addr == 12'h104)) begin
             mie <= wres; mie[63:12] <= 0; mie[10] <= 0; mie[6] <= 0; mie[2] <= 0; end
         if (rst) mcycle <= 0; else if (we & addr == 12'hb00) mcycle <= wres;
@@ -1587,7 +1589,8 @@ module csr(input logic clk, input logic rst,
         if (rst) satp <= 0; else if (we & addr == 12'h180) satp <= wres;
         if (we & addr == 12'h005) utvec <= wres;
     end
-    always_comb mip = {52'd0, eiptip, msip[3:0]};
+    always_comb mip = mip_ext  & 64'b1000_1000_0000 | // MEIP/MTIP from external
+                      mip_base & 64'b0011_0011_1011;
     always_comb begin intr = 0;
         for (int i = 0; i < 12; i++) if (mip[i] & mie[i])
             if (~mideleg[i] & (level < 3 | level == 3 & mstatus[3]) |

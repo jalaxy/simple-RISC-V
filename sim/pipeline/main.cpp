@@ -338,6 +338,7 @@ int main(int argc, char *argv[])
     std::queue<dcache_req_t> dreq;
     std::queue<cmt_t> cmts;
     std::queue<del_t> gprs, csrs, mems;
+    std::queue<uint8_t> scsuc;
     memory localmem = mem; // record local store values
     uint64_t cycle = 0, htifexit = 0;
     const char *exitcause = NULL;
@@ -365,10 +366,9 @@ int main(int argc, char *argv[])
             dreq.empty() ? dreq.push({0}), 0 : 0;
             dut->clk = 1, dut->eval(); // clock changes first, other signals change after clk
             dut->mtime = mem.ui64(mtime);
-            if (cycle % 16 == 0) // set interrupt
+            if (cycle % 4 == 0) // set interrupt
                 mem.ui64(mtime)++;
-            if (mtime > mtimecmp)
-                dut->eiptip |= 1 << 3;
+            dut->mip_ext = (mem.ui64(mtime) > mem.ui64(mtimecmp)) << 7;
             dut->icache_done = ireq.front().rqst; // handle an icache request
             if (ireq.front().rqst && ireq.front().addr != -1)
                 for (int j = 0; j < 4; j++)
@@ -379,11 +379,7 @@ int main(int argc, char *argv[])
                 if (dreq.front().addr == -1)
                     dut->dcache_rdat = dreq.front().vaddr; // fault vaddr in rdat as tval
                 else
-                {
-                    if (mem.issegfault(mem[dreq.front().addr]))
-                        mem.add(1, dreq.front().addr);
                     dut->dcache_rdat = mem.ui64(dreq.front().addr);
-                }
             dut->dcache_pgft = 0;
             if (dreq.front().rqst && dreq.front().addr == -1) // [1:0] -> [WPF,RPF]
                 dut->dcache_pgft = dreq.front().wena || dreq.front().rsrv == 2 ? 2 : 1;
@@ -397,20 +393,23 @@ int main(int argc, char *argv[])
             {
                 dut->dcache_rdat &= mask;
                 if (((1 << 8 * width - 1) & dut->dcache_rdat) && !(dreq.front().bits >> 2))
-                    dut->dcache_rdat |= ~mask; // msb = 1 and sign extended
-                if (dreq.front().rqst && dreq.front().wena)
-                { // store instructions
+                    dut->dcache_rdat |= ~mask;              // msb = 1 and sign extended
+                if (dreq.front().rqst && dreq.front().wena) // store instructions
                     if (dreq.front().rsrv != 1 || rsrv[dreq.front().addr])
-                    { // check SC
+                    {                               // normal store or successful SC
+                        if (dreq.front().rsrv == 1) // successful SC
+                            scsuc.push(1);
                         uint64_t addr = dreq.front().addr, data = dreq.front().wdata;
                         for (int j = 0; j < width; j++)
                             mem[addr + j] = bits(data).range(j * 8, j * 8 + 7);
                         if (dreq.front().rsrv == 1)
                             rsrv[addr] = dut->dcache_rdat = 0;
                     }
-                    else
+                    else // failed SC
+                    {
+                        scsuc.push(0);
                         dut->dcache_rdat = 1;
-                }
+                    }
             }
             // evaluate again
             dut->eval(), (trace && cycle >= cmd.mintime) ? trace->dump(wt++), 0 : 0;
@@ -451,6 +450,9 @@ int main(int argc, char *argv[])
             uint64_t va;
             if (dut->del_memw && (va = paddr(mem, dut->csr_satp, dut->del_mema, 1 << 2)) != -1ull)
                 mems.push({.w = dut->del_memw, .a = va, .v = dut->del_memv});
+            if (sim && cycle && cycle % 1000000 == 0)
+                fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
+                        (int)cycle, sim->pc, sim->ir);
             cycle++;
             emptytimes++;
             if (cmd.filetype == 1 && emptytimes > 1024)
@@ -485,8 +487,8 @@ int main(int argc, char *argv[])
                 del.mema = mems.front().a;
                 del.memv = mems.front().v;
                 mems.pop();
-                if (del.memw >> 4 == 0xc && del.gprw && del.gprv == 1) // failed SC
-                    del.memw = 0;
+                if (del.memw >> 4 == 0xc) // SC
+                    del.memw &= scsuc.front() ? (uint8_t)-1 : 0, scsuc.pop();
             }
             else
                 del.memw = 0;

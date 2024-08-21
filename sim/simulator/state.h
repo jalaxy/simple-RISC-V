@@ -37,7 +37,7 @@ private:
     std::vector<uint64_t> base;
     std::vector<uint64_t> size;
     std::vector<uint8_t *> ptr;
-    uint8_t segfault;
+    uint64_t segfault;
 
 public:
     memory();
@@ -50,7 +50,6 @@ public:
     uint16_t &ui16(uint64_t);
     uint32_t &ui32(uint64_t);
     uint64_t &ui64(uint64_t);
-    bool issegfault(const uint8_t &);
     uint8_t &operator[](uint64_t);
     memory &operator=(const memory &);
 };
