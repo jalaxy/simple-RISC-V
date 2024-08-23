@@ -447,8 +447,8 @@ int main(int argc, char *argv[])
                     gprs.push({.w = 1, .a = dut->del_gpra[i], .v = dut->del_gprv[i]});
             if (dut->del_csrw)
                 csrs.push({.w = 1, .a = dut->del_csra, .v = dut->del_csrv});
-            uint64_t va;
-            if (dut->del_memw && (va = paddr(mem, dut->csr_satp, dut->del_mema, 1 << 2)) != -1ull)
+            uint64_t va, memw = dut->del_memw != 0 && dut->del_memw >> 4 != 0x8;
+            if (dut->del_memw && (va = paddr(mem, dut->csr_satp, dut->del_mema, memw << 2)) != -1ull)
                 mems.push({.w = dut->del_memw, .a = va, .v = dut->del_memv});
             if (sim && cycle && cycle % 1000000 == 0)
                 fprintf(stderr, "[Info] Keep-alive: cycle %d: pc: 0x%lx ir: 0x%x\n",
@@ -477,11 +477,11 @@ int main(int argc, char *argv[])
             sim ? sim->csr["mcycle"] = cmts.front().mcycle, 0 : 0;
             sim ? sim->csr["minstret"] = cmts.front().minstret, 0 : 0;
             sim ? sim->mem.ui64(mtime) = cmts.front().time, 0 : 0;
-            if (cmts.front().gpr)
+            if (cmts.front().gpr && !gprs.empty())
                 del.gprw = 1, del.gpra = gprs.front().a, del.gprv = gprs.front().v, gprs.pop();
             else
                 del.gprw = 0;
-            if (cmts.front().mem)
+            if (cmts.front().mem && !mems.empty())
             {
                 del.memw = mems.front().w;
                 del.mema = mems.front().a;
@@ -492,13 +492,10 @@ int main(int argc, char *argv[])
             }
             else
                 del.memw = 0;
-            if (cmts.front().csr)
+            if (cmts.front().csr && !csrs.empty() && !mexc && !sexc)
             {
-                uint64_t a = csrs.front().a;
-                if (a == 0x100 || a == 0x144 || a == 0x104) // sstatus/sip/sie
-                    a += 0x200;
-                if (!mexc && !sexc && csrname.find(a) != csrname.end())
-                    del.csr[csrname[a]] = csrs.front().v;
+                if (csrname.find(csrs.front().a) != csrname.end())
+                    del.csr[csrname[csrs.front().a]] = csrs.front().v;
                 csrs.pop();
             }
             cmts.pop();

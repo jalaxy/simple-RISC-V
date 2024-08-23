@@ -102,9 +102,13 @@ module stats(
         cmt_mip = pipeline_inst.csr_inst.mip;
         cmt_mcycle = pipeline_inst.csr_inst.mcycle;
         cmt_minstret = pipeline_inst.csr_inst.minstret;
-        del_csrw = pipeline_inst.csr_inst.wena;
+        del_csrw = pipeline_inst.csr_inst.we;
         del_csra = pipeline_inst.csr_inst.addr;
         del_csrv = pipeline_inst.csr_inst.wres;
+        if (del_csra == 12'h100 || del_csra == 12'h144 || del_csra == 12'h104)
+            del_csra = del_csra + 12'h200; // sstatus, sip, sie
+        if (del_csra >= 12'hc00 && del_csra <= 12'hc02)
+            del_csra = del_csra - 12'h100; // cycle, time, instret
         del_memw = 0;
         del_mema = dcache_addr;
         del_memv = dcache_wdat;

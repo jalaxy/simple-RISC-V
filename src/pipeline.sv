@@ -830,14 +830,15 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
         always_comb rval = frompt ? 0 : rvalue[g];
         logic [`EX_END-1:0] op;
         logic [63:0] a, b;
-        logic jump, eq, lt, ltu;
+        logic jump, pf, eq, lt, ltu;
         logic [63:0] jpc;
         logic [64:0] res;
         logic [63:0] add, sll, srl, sra;
         logic [2:0] bflag;
         mul_rqst_t mul_rqst; div_rqst_t div_rqst;
         fpu_rqst_t fpu_rqst; lsu_rqst_t lsu_rqst;
-        always_comb op = in.valid ? in.exop : 0;
+        always_comb pf = in.delta[2] ? |in.pf : in.pf[0];
+        always_comb op = in.valid & ~pf ? in.exop : 0;
         always_comb begin
             if (frompt & in_pt[g].j) a = in.pc; // JALR in PT
             else a = in.a[64] ? rval[0][63:0] : in.a[63:0];
@@ -966,13 +967,13 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             out_wb_g[g].fencei = op[`EX_FENCEI];
             out_wb_g[g].bppf = in.delta[2] & in.pf == 2'b10; // page fault beyond page
             out_wb_g[g].pc = in.pc;
-            out_wb_g[g].ir = (in.delta[2] ? |in.pf : in.pf[0]) ? 32'hc02013 : in.ir;
+            out_wb_g[g].ir = pf ? 32'hc02013 : in.ir;
             out_wb_g[g].pat = in.pat;
             out_wb_g[g].npc = jump ? jpc : in.pc + {61'd0, in.delta};
-            if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 4'd2, level};
-            else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
-            else if (in.delta[2] ? |in.pf : in.pf[0]) out_wb_g[g].cause = {1'b1, 6'd12};
+            if (pf) out_wb_g[g].cause = {1'b1, 6'd12};
             else if (op[`EX_INV]) out_wb_g[g].cause = {1'b1, 6'd2};
+            else if (op[`EX_ECALL]) out_wb_g[g].cause = {1'b1, 4'd2, level};
+            else if (op[`EX_EBREAK]) out_wb_g[g].cause = {1'b1, 6'd3};
             else out_wb_g[g].cause = 0;
             out_wb_g[g].ret = {op[`EX_RET], in.funct3[1:0]};
         end
@@ -986,10 +987,8 @@ module ex_stage(input logic clk, input logic rst, input logic redir,
             if (lsu_rqst[i].id[`lgCQSZ]) cqidocc[lsu_rqst[i].id[`lgCQSZ-1:0]] <= 1;
         end
         for (int i = 0; i < 4; i++)
-            if (late_done[i][`lgCQSZ] & ~late_val[i][64]) begin
-                assert(cqidocc[late_done[i][`lgCQSZ-1:0]]);
+            if (late_done[i][`lgCQSZ] & ~late_val[i][64])
                 cqidocc[late_done[i][`lgCQSZ-1:0]] <= 0;
-        end
     end
 endmodule
 
@@ -1116,6 +1115,7 @@ module wb_stage(input logic clk, input logic rst,
                 else if (cause == 12) // I PF 
                     tval = cqinfo[i].pc + (cqinfo[i].bppf ? 2 : 0);
                 else if (cause == 2) tval = 64'(cqinfo[i].ir); // invalid instruction
+                else tval = 0;
             end else excep = 0;
         excep &= redir;
         if (intr_taken) begin
